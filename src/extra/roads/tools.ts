@@ -10,8 +10,8 @@ import {
   BORDER_ATTRIBUTION,
   CROSSINGS,
   crossingLabel,
+  waitLine,
   type BorderService,
-  type WaitRow,
 } from './border.js';
 import {
   reportSentence,
@@ -591,13 +591,6 @@ const borderSchema = z.strictObject({
     .optional()
     .describe('to_us (CBP) or to_canada (CBSA); default both'),
 });
-
-function waitLine(r: WaitRow): string {
-  const delay =
-    r.delay_min === null ? r.status : r.delay_min === 0 ? 'no delay' : `${r.delay_min} min`;
-  const lanes = r.lanes_open !== null ? `, ${r.lanes_open} lane(s) open` : '';
-  return `${r.crossing_name} ${r.direction === 'to_us' ? 'into the US' : 'into Canada'} ${r.lane_type}: ${delay}${lanes}`;
-}
 
 function borderTool(deps: RoadsToolDeps): ToolDef {
   const schema = jsonSchema(borderSchema);

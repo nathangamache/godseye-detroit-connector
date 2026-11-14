@@ -167,8 +167,11 @@ and `docker logs`.
 * Compose limits: GEV 1 GiB / 256 pids / 2 CPUs, gateway 768 MiB / 256 pids / 2 CPUs, both pinned
   to CPUs 24-31. In dev mode systemd uses `Nice=10`, `CPUAffinity=16-31`, `MemoryMax` (cgroup
   CPU controls aren't delegated to the user manager here).
-* GEV's first camera query takes ~30 s while it fetches the 7,350-camera catalog;
-  `whats_happening_here` allows 45 s for cameras.
+* GEV's first camera query takes ~30 s while it fetches the 7,350-camera catalog.
+  `whats_happening_here` gives each section a short timeout (cameras 8 s, traffic and road
+  closures 12 s, weather 10 s, NWS alerts, air quality and border waits 8 s) inside an overall
+  budget of 15 s (longer only when `PULSE_TIMEOUT_MS` needs it), and shows cameras only when one
+  is in range, so a cold camera catalog just leaves that line out.
 
 ## Health checks
 

@@ -2,6 +2,7 @@
  * Border wait times at the Detroit/Windsor and Port Huron/Sarnia crossings: U.S.-bound from the
  * CBP Border Wait Times API, Canada-bound from CBSA's bwt CSV. Both keyless, cached 5 minutes.
  */
+import { haversineM } from '../../util/geo.js';
 import { TtlCache, errorText, type Http } from './http.js';
 import { cleanText } from './text.js';
 
@@ -22,6 +23,28 @@ const NAMES: Record<Crossing, { label: string; cbpPort: string; match: RegExp }>
   },
   blue_water: { label: 'Blue Water Bridge', cbpPort: '380201', match: /blue\s*water/i },
 };
+
+/**
+ * Where each crossing spans the river (public landmarks, rounded), for "is a crossing near this
+ * point" (whats_happening_here); the wait times themselves come from CBP and CBSA.
+ */
+export const CROSSING_POINTS: Record<Crossing, { lat: number; lon: number }> = {
+  ambassador: { lat: 42.312, lon: -83.074 },
+  tunnel: { lat: 42.327, lon: -83.041 },
+  gordie_howe: { lat: 42.289, lon: -83.097 },
+  blue_water: { lat: 42.999, lon: -82.424 },
+};
+
+/** The crossings within `km` of a point, nearest first. */
+export function crossingsNear(p: { lat: number; lon: number }, km: number): Crossing[] {
+  return CROSSINGS.map((c) => ({
+    c,
+    d: haversineM(p.lat, p.lon, CROSSING_POINTS[c].lat, CROSSING_POINTS[c].lon),
+  }))
+    .filter((x) => x.d <= km * 1000)
+    .sort((a, b) => a.d - b.d)
+    .map((x) => x.c);
+}
 
 export interface WaitRow {
   crossing: Crossing;
@@ -225,6 +248,14 @@ export function borderService(o: {
       return { rows, errors, ages };
     },
   };
+}
+
+/** "Ambassador Bridge into the US passenger: 10 min, 3 lane(s) open". */
+export function waitLine(r: WaitRow): string {
+  const delay =
+    r.delay_min === null ? r.status : r.delay_min === 0 ? 'no delay' : `${r.delay_min} min`;
+  const lanes = r.lanes_open !== null ? `, ${r.lanes_open} lane(s) open` : '';
+  return `${r.crossing_name} ${r.direction === 'to_us' ? 'into the US' : 'into Canada'} ${r.lane_type}: ${delay}${lanes}`;
 }
 
 export function crossingLabel(c: Crossing): string {

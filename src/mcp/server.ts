@@ -78,7 +78,7 @@ const DIRECT_TOOLS = [
   {
     name: 'whats_happening_here',
     description:
-      "One-call summary around a point or the user's phone: rail, rail radio, incidents, traffic, cameras, weather (call directly).",
+      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather, traffic, road closures, border waits near a crossing, air quality when configured, cameras when any are in range (call directly).",
   },
 ];
 
@@ -358,7 +358,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       title: "What's happening here",
       description:
-        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, traffic, public cameras and weather, each with its data age.",
+        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather, traffic, road closures within about 5 km, border waits when a Detroit/Windsor or Port Huron crossing is near, air quality when configured and public cameras when any are in range, each with its data age.",
       inputSchema: z.object({
         lat: z.number().min(-90).max(90).optional(),
         lon: z.number().min(-180).max(180).optional(),

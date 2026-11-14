@@ -1,16 +1,28 @@
 /**
  * where_am_i and whats_happening_here.
  *
- * whats_happening_here fans out in parallel with per-source timeouts:
+ * whats_happening_here fans out in parallel, each section with its own short timeout inside one
+ * overall budget (whatsHappeningBudgetMs), so a slow or failing source costs only its own line:
  *   rail (native) -> nearest line + crossing, with every name FRA and NARN give the track
  *   Pulse        -> rail_activity_near (relays Pulse's rail voice and EOT/HOT verdicts: quiet
  *                   only with Pulse's proof for the whole window), incidents_near (never
  *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
- *   GEV          -> get_traffic_flow, find_cctv_cameras, get_weather
+ *   gateway      -> weather_alerts (NWS, the point), road_closures (nearest 5 within 5 km, every
+ *                   enabled source), border_wait_times (only within 8 km of a Detroit/Windsor or
+ *                   Port Huron crossing), air_quality (only when AIRNOW_API_KEY is set)
+ *   GEV          -> get_weather, get_traffic_flow, find_cctv_cameras (shown only when a camera
+ *                   is in range: none in SE Michigan today)
  * and returns one compact summary with each source's timestamp/age and error. For an explicit
  * point it also says how far the user's phone is from that point (src/location/proximity.ts).
  */
 import type { Config } from '../config.js';
+import {
+  crossingLabel,
+  crossingsNear,
+  waitLine,
+  type Crossing,
+  type WaitRow,
+} from '../extra/roads/border.js';
 import type { Point, ProximityCheck } from '../location/proximity.js';
 import type { LocationStore } from '../location/store.js';
 import { postprocess, type McpToolResult } from '../tools/postprocess.js';
@@ -198,6 +210,8 @@ export interface WhatsHappeningDeps {
   now?: () => number;
   /** Explicit point only: distance/bearing of the phone's recent fix (audited by the caller). */
   phoneCheck?: (p: Point) => ProximityCheck | undefined;
+  /** Overall time budget in ms (default whatsHappeningBudgetMs). */
+  budgetMs?: number;
 }
 
 export interface WhatsHappeningArgs {
@@ -249,6 +263,10 @@ export async function whatsHappeningHere(
   const runner = deps.runner;
   const registry = runner.registry;
   const retrievedAt = () => new Date(now()).toISOString();
+  // The budget runs on the real clock (deps.now only dates the data).
+  const started = Date.now();
+  const budget = deps.budgetMs ?? whatsHappeningBudgetMs(deps.config);
+  const credits: string[] = [];
 
   const runSource = async (
     source: string,
@@ -256,20 +274,39 @@ export async function whatsHappeningHere(
     toolArgs: Record<string, unknown>,
     timeoutMs: number,
     interpret: (out: ToolOutput) => Omit<SourceReport, 'source' | 'retrieved_at'>,
-  ): Promise<SourceReport> => {
+    opts: {
+      /** Leave the section out when the tool is missing or switched off by policy. */
+      optional?: boolean;
+      /** Credit the tool's own attribution when the section is shown. */
+      credit?: boolean;
+    } = {},
+  ): Promise<SourceReport | undefined> => {
     const def = registry.get(toolName);
     if (!def) {
+      if (opts.optional) return undefined;
       const missing =
         toolName === 'nearest_rail'
           ? 'rail data is not loaded'
           : toolName.endsWith('_near')
             ? 'no Pulse data / Pulse tools not registered'
-            : "God's Eye View is offline right now";
+            : GATEWAY_SECTIONS.has(toolName)
+              ? `${toolName} is not available in this deployment`
+              : "God's Eye View is offline right now";
       return { source, status: 'unavailable', summary: missing, retrieved_at: retrievedAt() };
     }
     const verdict = registry.policy.evaluate(def);
-    if (!verdict.allowed)
+    if (!verdict.allowed) {
+      if (opts.optional) return undefined;
       return { source, status: 'skipped', summary: verdict.reason, retrieved_at: retrievedAt() };
+    }
+    const left = budget - (Date.now() - started);
+    if (left < MIN_SECTION_MS)
+      return {
+        source,
+        status: 'skipped',
+        summary: 'skipped: the time budget of this summary was spent',
+        retrieved_at: retrievedAt(),
+      };
     const rate = registry.policy.consumeRate(registry.policy.bucketsFor(def, toolArgs));
     if (!rate.ok) {
       return {
@@ -279,7 +316,7 @@ export async function whatsHappeningHere(
         retrieved_at: retrievedAt(),
       };
     }
-    const out = await runner.callRaw(def, toolArgs, ctx, timeoutMs);
+    const out = await runner.callRaw(def, toolArgs, ctx, Math.min(timeoutMs, left));
     const rep = interpret(out);
     const obs = rep.observed_at ?? observedAt(out.data);
     const r: SourceReport = { source, retrieved_at: retrievedAt(), ...rep };
@@ -287,97 +324,174 @@ export async function whatsHappeningHere(
       r.observed_at = obs;
       r.age_s = Math.max(0, Math.round((now() - Date.parse(obs)) / 1000));
     }
+    if (opts.credit && r.status === 'ok' && def.attribution) credits.push(def.attribution);
     return r;
   };
 
   // Rail is local and fast; its subdivision feeds the Pulse rail query.
-  const rail = await runSource('rail', 'nearest_rail', { lat, lon }, 3000, (out) => {
+  const rail = (await runSource('rail', 'nearest_rail', { lat, lon }, 3000, (out) => {
     if (out.isError) return { status: 'error', summary: out.summary };
     return { status: 'ok', summary: railLine((out.data ?? {}) as RailData), data: out.data };
-  });
+  }))!;
 
   const pulseDown = (out: ToolOutput) => out.isError && out.errorKind === 'unavailable';
-  const [railRadio, incidents, traffic, cameras, weather] = await Promise.all([
-    // The rail tool works out every name the track here has and matches Pulse's coverage on
-    // all of them; it asks Pulse twice (feeds/status, then rail/activity).
-    runSource(
-      'rail_radio',
-      'rail_activity_near',
-      { lat, lon, since_minutes: 30 },
-      2 * deps.config.PULSE_TIMEOUT_MS + 500,
-      (out) =>
-        pulseDown(out)
-          ? { status: 'unavailable', summary: 'no Pulse data / no rail radio coverage yet' }
-          : out.isError
-            ? { status: 'error', summary: out.summary }
-            : { status: 'ok', summary: out.summary, data: out.data },
-    ),
-    runSource(
-      'incidents',
-      'incidents_near',
-      { lat, lon, radius_km: radius, since_minutes: 120 },
-      deps.config.PULSE_TIMEOUT_MS + 500,
-      (out) =>
-        pulseDown(out)
-          ? { status: 'unavailable', summary: 'no Pulse data (Pulse is not running yet)' }
-          : out.isError
-            ? { status: 'error', summary: out.summary }
-            : { status: 'ok', summary: out.summary, data: out.data },
-    ),
-    runSource(
-      'traffic',
-      'get_traffic_flow',
-      { area: { lat, lon, radius_km: Math.min(radius, 10) } },
-      30_000,
-      (out) => {
-        if (out.isError && /tomtom/i.test(out.summary))
-          return { status: 'unavailable', summary: 'traffic needs a TomTom key' };
+  const nearCrossings = crossingsNear({ lat, lon }, BORDER_NEAR_KM);
+  const [railRadio, incidents, alerts, weather, air, traffic, closures, border, cameras] =
+    await Promise.all([
+      // The rail tool works out every name the track here has and matches Pulse's coverage on
+      // all of them; it asks Pulse twice (feeds/status, then rail/activity).
+      runSource(
+        'rail_radio',
+        'rail_activity_near',
+        { lat, lon, since_minutes: 30 },
+        2 * deps.config.PULSE_TIMEOUT_MS + 500,
+        (out) =>
+          pulseDown(out)
+            ? { status: 'unavailable', summary: 'no Pulse data / no rail radio coverage yet' }
+            : out.isError
+              ? { status: 'error', summary: out.summary }
+              : { status: 'ok', summary: out.summary, data: out.data },
+      ),
+      runSource(
+        'incidents',
+        'incidents_near',
+        { lat, lon, radius_km: radius, since_minutes: 120 },
+        deps.config.PULSE_TIMEOUT_MS + 500,
+        (out) =>
+          pulseDown(out)
+            ? { status: 'unavailable', summary: 'no Pulse data (Pulse is not running yet)' }
+            : out.isError
+              ? { status: 'error', summary: out.summary }
+              : { status: 'ok', summary: out.summary, data: out.data },
+      ),
+      runSource(
+        'weather_alerts',
+        'weather_alerts',
+        { lat, lon },
+        8_000,
+        (out) => {
+          if (out.isError)
+            return {
+              status: out.errorKind === 'unsupported' ? 'unavailable' : 'error',
+              summary: out.summary,
+            };
+          const d = (out.data ?? {}) as { count?: number; zone?: unknown; alerts?: unknown[] };
+          return {
+            status: 'ok',
+            summary: out.summary,
+            observed_at: isoOrUndefined(out.observedAt),
+            data: { count: d.count, zone: d.zone, alerts: (d.alerts ?? []).slice(0, 5) },
+          };
+        },
+        { credit: true },
+      ),
+      runSource('weather', 'get_weather', { location: { lat, lon } }, 10_000, (out) => {
         if (out.isError) return { status: 'error', summary: out.summary };
-        return {
-          status: 'ok',
-          summary: out.summary,
-          data: compact(out.data, [
-            'congested_km',
-            'closed_km',
-            'by_category',
-            'observed_at',
-            'map_url',
-          ]),
-        };
-      },
-    ),
-    runSource(
-      'cameras',
-      'find_cctv_cameras',
-      { area: { lat, lon, radius_km: radius }, limit: 5 },
-      45_000,
-      (out) => {
-        if (out.isError) return { status: 'error', summary: out.summary };
-        const d = (out.data ?? {}) as { cameras?: unknown[]; total?: number };
-        const cams = Array.isArray(d.cameras)
-          ? d.cameras
-              .slice(0, 5)
-              .map((c) => compact(c, ['id', 'name', 'city', 'distance_km', 'provider', 'credit']))
-          : undefined;
-        return { status: 'ok', summary: out.summary, data: { total: d.total, cameras: cams } };
-      },
-    ),
-    runSource('weather', 'get_weather', { location: { lat, lon } }, 20_000, (out) => {
-      if (out.isError) return { status: 'error', summary: out.summary };
-      const d = { ...((out.data ?? {}) as Record<string, unknown>) };
-      delete d.view;
-      return { status: 'ok', summary: out.summary, data: d };
-    }),
-  ]);
+        const d = { ...((out.data ?? {}) as Record<string, unknown>) };
+        delete d.view;
+        return { status: 'ok', summary: out.summary, data: d };
+      }),
+      // Only when AIRNOW_API_KEY is set (the policy switches air_quality off without it).
+      runSource(
+        'air_quality',
+        'air_quality',
+        { lat, lon },
+        8_000,
+        (out) =>
+          out.isError
+            ? { status: 'error', summary: out.summary }
+            : {
+                status: 'ok',
+                summary: out.summary,
+                data: compact(out.data, ['note', 'observations', 'forecast', 'retrieved_at']),
+              },
+        { optional: true, credit: true },
+      ),
+      runSource(
+        'traffic',
+        'get_traffic_flow',
+        { area: { lat, lon, radius_km: Math.min(radius, 10) } },
+        12_000,
+        (out) => {
+          if (out.isError && /tomtom/i.test(out.summary))
+            return { status: 'unavailable', summary: 'traffic needs a TomTom key' };
+          if (out.isError) return { status: 'error', summary: out.summary };
+          return {
+            status: 'ok',
+            summary: out.summary,
+            data: compact(out.data, [
+              'congested_km',
+              'closed_km',
+              'by_category',
+              'observed_at',
+              'map_url',
+            ]),
+          };
+        },
+      ),
+      runSource(
+        'road_closures',
+        'road_closures',
+        { lat, lon, radius_km: CLOSURES_RADIUS_KM, limit: CLOSURES_SHOWN },
+        12_000,
+        (out) => closuresReport(out, credits),
+      ),
+      nearCrossings.length
+        ? runSource(
+            'border',
+            'border_wait_times',
+            {},
+            8_000,
+            (out) => borderReport(out, nearCrossings),
+            { credit: true },
+          )
+        : undefined,
+      // Public cameras: shown only when one is in range (none in SE Michigan today).
+      runSource(
+        'cameras',
+        'find_cctv_cameras',
+        { area: { lat, lon, radius_km: radius }, limit: 5 },
+        8_000,
+        (out) => {
+          if (out.isError) return { status: 'error', summary: out.summary };
+          const d = (out.data ?? {}) as { cameras?: unknown[]; total?: number };
+          const cams = Array.isArray(d.cameras)
+            ? d.cameras
+                .slice(0, 5)
+                .map((c) => compact(c, ['id', 'name', 'city', 'distance_km', 'provider', 'credit']))
+            : undefined;
+          return { status: 'ok', summary: out.summary, data: { total: d.total, cameras: cams } };
+        },
+        { optional: true },
+      ),
+    ]);
+  const camerasInRange =
+    cameras?.status === 'ok' &&
+    ((cameras.data as { cameras?: unknown[] } | undefined)?.cameras?.length ?? 0) > 0;
 
-  const sources = [rail, railRadio, incidents, traffic, cameras, weather];
+  const sources = [
+    rail,
+    railRadio,
+    incidents,
+    alerts,
+    weather,
+    air,
+    traffic,
+    closures,
+    border,
+    camerasInRange ? cameras : undefined,
+  ].filter((s): s is SourceReport => s !== undefined);
   const label: Record<string, string> = {
     rail: 'Rail line & crossing',
     rail_radio: 'Rail radio (Pulse)',
     incidents: 'Incidents (Pulse)',
-    traffic: 'Traffic',
-    cameras: 'Cameras',
+    weather_alerts: 'Weather alerts (NWS)',
     weather: 'Weather',
+    air_quality: 'Air quality (AirNow)',
+    traffic: 'Traffic',
+    road_closures: 'Road closures',
+    border: 'Border waits',
+    cameras: 'Cameras',
   };
   const lines = [
     `What's happening within ${radius} km of ${lat.toFixed(4)}, ${lon.toFixed(4)} (${positionNote}):`,
@@ -410,17 +524,151 @@ export async function whatsHappeningHere(
       sources,
     },
   };
+  const attribution = [
+    'FRA/BTS rail data (public domain); Open-Meteo (CC BY 4.0); Traffic flow data © TomTom',
+    ...credits,
+    ...(camerasInRange ? ['camera operators as credited'] : []),
+  ];
   return postprocess(
     {
       name: 'whats_happening_here',
       source: 'gateway',
       untrustedText: true,
-      attribution:
-        'FRA/BTS rail data (public domain); Open-Meteo (CC BY 4.0); Traffic flow data © TomTom; camera operators as credited',
+      attribution: [...new Set(attribution)].join('; '),
     },
     output,
     runner.postOptions,
   );
+}
+
+/** Gateway-native tools whose section says "not available" (not "GEV offline") when missing. */
+const GATEWAY_SECTIONS = new Set(['weather_alerts', 'road_closures', 'border_wait_times']);
+/** A section that would get less than this of the budget is skipped, not started. */
+const MIN_SECTION_MS = 250;
+/** Crossings this close to the point get a border-waits section. */
+export const BORDER_NEAR_KM = 8;
+/** Road closures: within this radius, at most this many (nearest first). */
+export const CLOSURES_RADIUS_KM = 5;
+export const CLOSURES_SHOWN = 5;
+
+/**
+ * Overall time budget of one call: every section gets at most what is left of it. Never shorter
+ * than the rail and Pulse sections' own timeouts (rail radio asks Pulse twice).
+ */
+export function whatsHappeningBudgetMs(config: Pick<Config, 'PULSE_TIMEOUT_MS'>): number {
+  return Math.max(15_000, 3_000 + 2 * config.PULSE_TIMEOUT_MS + 1_000);
+}
+
+function isoOrUndefined(s: string | undefined): string | undefined {
+  return s && !Number.isNaN(Date.parse(s)) ? new Date(s).toISOString() : undefined;
+}
+
+interface ClosureItemData {
+  source?: string;
+  type?: string;
+  road?: string | null;
+  direction?: string | null;
+  full_closure?: boolean;
+  distance_km?: number | null;
+}
+interface ClosureSourceData {
+  source?: string;
+  label?: string;
+  status?: string;
+  count?: number;
+  note?: string;
+}
+
+/** road_closures, nearest few, with every enabled source and what it found. */
+function closuresReport(
+  out: ToolOutput,
+  credits: string[],
+): Omit<SourceReport, 'source' | 'retrieved_at'> {
+  if (out.isError) return { status: 'error', summary: out.summary };
+  const d = (out.data ?? {}) as {
+    items?: ClosureItemData[];
+    sources?: ClosureSourceData[];
+    attribution?: string[];
+  };
+  const items = (d.items ?? []).slice(0, CLOSURES_SHOWN);
+  const reports = d.sources ?? [];
+  const labelOf = new Map(reports.map((r) => [r.source, r.label ?? r.source ?? '?']));
+  // Sources that are off (no key, licence switch) aren't "checked"; the tool itself says so.
+  const enabled = reports.filter((r) => r.status !== 'off' && r.status !== 'not_configured');
+  const checked = enabled.length
+    ? enabled
+        .map((r) => `${r.label}: ${r.status === 'ok' ? (r.count ?? 0) : (r.note ?? r.status)}`)
+        .join('; ')
+    : 'none (no road source is enabled)';
+  const within = `within ${CLOSURES_RADIUS_KM} km`;
+  if (!items.length)
+    return {
+      status: 'ok',
+      summary: `No closures, incidents or work zones found ${within} in the sources checked, which is not proof the roads are open. Sources checked: ${checked}.`,
+      data: { count: 0, items: [], sources: enabled },
+    };
+  for (const a of d.attribution ?? []) credits.push(a);
+  const full = items.filter((i) => i.full_closure).length;
+  const text = items
+    .map((i) => {
+      const where = i.road ? ` on ${i.road}${i.direction ? ` ${i.direction}` : ''}` : '';
+      const dist = typeof i.distance_km === 'number' ? `${i.distance_km} km, ` : '';
+      return `${i.full_closure ? 'FULL CLOSURE: ' : ''}${i.type ?? 'item'}${where} (${dist}${labelOf.get(i.source) ?? i.source})`;
+    })
+    .join('; ');
+  const more =
+    items.length >= CLOSURES_SHOWN ? ` More may exist: road_closures lists up to 50.` : '';
+  return {
+    status: 'ok',
+    summary: `${items.length} item(s) ${within} (${full} full closure(s)); nearest ${items.length}: ${text}. Sources checked: ${checked}.${more}`,
+    data: {
+      count: items.length,
+      items: items.map((i) =>
+        compact(i, [
+          'source',
+          'type',
+          'road',
+          'direction',
+          'full_closure',
+          'lanes',
+          'from_cross_street',
+          'to_cross_street',
+          'start',
+          'end',
+          'updated',
+          'distance_km',
+        ]),
+      ),
+      sources: enabled,
+    },
+  };
+}
+
+/** border_wait_times, for the crossings near the point only. */
+function borderReport(
+  out: ToolOutput,
+  near: Crossing[],
+): Omit<SourceReport, 'source' | 'retrieved_at'> {
+  if (out.isError) return { status: 'error', summary: out.summary };
+  const d = (out.data ?? {}) as { rows?: WaitRow[]; errors?: string[] };
+  const rows = (d.rows ?? []).filter((r) => near.includes(r.crossing));
+  const errors = d.errors ?? [];
+  const main = rows.filter((r) => /^(passenger|commercial)$/.test(r.lane_type));
+  const missing = errors.length ? ` Missing: ${errors.join('; ')}.` : '';
+  const newest = rows
+    .map((r) => (r.updated ? Date.parse(r.updated) : NaN))
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b)
+    .pop();
+  const names = near.map(crossingLabel).join(', ');
+  return {
+    status: 'ok',
+    summary: rows.length
+      ? `${(main.length ? main : rows).slice(0, 8).map(waitLine).join('; ')}.${missing}`
+      : `No wait times reported for ${names}.${missing}`,
+    ...(newest !== undefined ? { observed_at: new Date(newest).toISOString() } : {}),
+    data: { crossings: near, rows, errors },
+  };
 }
 
 function usesCaller(a: WhatsHappeningArgs): boolean {

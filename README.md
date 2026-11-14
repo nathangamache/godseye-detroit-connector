@@ -9,9 +9,11 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 * Claude gets **four** tools instead of 40+: `find_tools` (BM25 search with hand-written
   synonyms; with no query it lists every tool the policy allows, by category, paginated),
   `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
-  `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, traffic, cameras
-  and weather, in parallel, each with its data age). The server instructions give the live tool
-  count instead of a fixed number.
+  `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, NWS alerts,
+  weather, traffic, the nearest road closures, border waits near a crossing, air quality when
+  configured and cameras when one is in range, in parallel, each with a short timeout inside one
+  overall budget and its data age). The server instructions give the live tool count instead of
+  a fixed number.
 * GEV's own MCP server is local-only and its UI assumes the owner is local. The gateway adds
   OAuth, licensing policy, quotas, result shrinking and link rewriting, and keeps every
   human-facing page on the tailnet, with an authenticator code (step-up) for approvals and
