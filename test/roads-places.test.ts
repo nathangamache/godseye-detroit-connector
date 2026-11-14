@@ -217,34 +217,30 @@ describe('geocode_place', () => {
     expect(waits).toEqual([1100, 800]);
   });
 
-  it('finds intersections through Overpass when OVERPASS_URL is set', async () => {
-    const overpass = {
-      elements: [
-        {
-          type: 'way',
-          tags: { highway: 'primary', name: 'Woodward Avenue' },
-          nodes: [10, 11, 12],
-          geometry: [
-            { lat: 42.44, lon: -83.12 },
-            { lat: 42.4453, lon: -83.1252 },
-            { lat: 42.45, lon: -83.13 },
-          ],
-        },
-        {
-          type: 'way',
-          tags: { highway: 'primary', name: 'West Eight Mile Road' },
-          nodes: [20, 11, 21],
-          geometry: [
-            { lat: 42.446, lon: -83.11 },
-            { lat: 42.4453, lon: -83.1252 },
-            { lat: 42.444, lon: -83.14 },
-          ],
-        },
-      ],
-    };
+  /** The Overpass query text of each call to the mock, in order. */
+  const overpassQueries = (x: ReturnType<typeof h>) =>
+    x.mock.calls
+      .filter((c) => /overpass/.test(c.url.href))
+      .map((c) => new URLSearchParams(String(c.init.body)).get('data')!);
+  const SHARED_NODE = /node\.na\.nb;/;
+  const PROXIMITY = /\(around\.b:30\)/;
+
+  it('finds a street intersection by a node both roads share, in one Overpass query', async () => {
     const x = h(
       { OVERPASS_URL: 'http://overpass.invalid/api/interpreter' },
-      { routes: [[/overpass\.invalid/, () => json(overpass)]] },
+      {
+        routes: [
+          [
+            /overpass\.invalid/,
+            (_u, init) => {
+              const q = new URLSearchParams(String(init.body)).get('data')!;
+              return SHARED_NODE.test(q)
+                ? json({ elements: [{ type: 'node', id: 11, lat: 42.4453, lon: -83.1252 }] })
+                : json({ elements: [] });
+            },
+          ],
+        ],
+      },
     );
     const out = await x.run('geocode_place', { query: 'Woodward & 8 Mile' });
     expect(placesOf(out)[0]).toMatchObject({
@@ -253,24 +249,27 @@ describe('geocode_place', () => {
       lat: 42.4453,
       lon: -83.1252,
     });
-    const body = new URLSearchParams(String(x.mock.last(/overpass/)!.init.body)).get('data')!;
-    expect(body).toContain('["name"~"(^| )woodward( |$)",i]');
-    expect(body).toContain('["name"~"(^| )(8|eight) mile( |$)",i]');
+    const qs = overpassQueries(x);
+    expect(qs).toHaveLength(1);
+    expect(qs[0]).toMatch(SHARED_NODE);
+    expect(qs[0]).toContain('["name"~"(^| )woodward( |$)",i]');
+    expect(qs[0]).toContain('["name"~"(^| )(8|eight) mile( |$)",i]');
+    expect(qs[0]).toMatch(/node\(w\.a\)->\.na;node\(w\.b\)->\.nb;/);
     expect(x.mock.last(/overpass/)!.init.method).toBe('POST');
   });
 
-  it('finds grade-separated freeway interchanges by closest approach', async () => {
+  it('falls back to ways of one road within 30 m of the other for grade-separated interchanges', async () => {
     const i94 = line({ lat: 42.36, lon: -83.1 }, { lat: 42.37, lon: -83.0 }, 20).map(
       ([lon, lat]) => ({ lat, lon }),
     );
     const m10 = line({ lat: 42.32, lon: -83.0603 }, { lat: 42.42, lon: -83.0597 }, 20).map(
       ([lon, lat]) => ({ lat: lat + 0.0001, lon }),
     );
-    const overpass = {
+    const ways = {
       elements: [
         {
           type: 'way',
-          tags: { highway: 'motorway', ref: 'I 94' },
+          tags: { highway: 'motorway', ref: 'I 94', layer: '1' },
           nodes: i94.map((_, i) => i + 1),
           geometry: i94,
         },
@@ -284,15 +283,67 @@ describe('geocode_place', () => {
     };
     const x = h(
       { OVERPASS_URL: 'http://overpass.invalid/api/interpreter' },
-      { routes: [[/overpass\.invalid/, () => json(overpass)]] },
+      {
+        routes: [
+          [
+            /overpass\.invalid/,
+            (_u, init) => {
+              const q = new URLSearchParams(String(init.body)).get('data')!;
+              // No shared node (the freeways cross on a bridge); the proximity query finds them.
+              return SHARED_NODE.test(q) ? json({ elements: [] }) : json(ways);
+            },
+          ],
+        ],
+      },
     );
     const out = await x.run('geocode_place', { query: 'I-94 and M-10' });
     const p = placesOf(out)[0]!;
-    expect(p.kind).toMatch(/^interchange/);
+    expect(p.kind).toMatch(/^interchange \(grade-separated: the roads pass within \d+ m\)$/);
     expect(p.lat).toBeCloseTo(42.364, 2);
     expect(p.lon).toBeCloseTo(-83.06, 2);
-    const body = new URLSearchParams(String(x.mock.last(/overpass/)!.init.body)).get('data')!;
-    expect(body).toContain('["ref"~"(^|;) *I[ -]?94( |;|$)",i]');
+    const qs = overpassQueries(x);
+    expect(qs).toHaveLength(2);
+    expect(qs[0]).toMatch(SHARED_NODE);
+    expect(qs[1]).toMatch(PROXIMITY);
+    expect(qs[1]).toContain('["ref"~"(^|;) *I[ -]?94( |;|$)",i]');
+    expect(qs[1]).toMatch(/way\.b\(around\.a:30\)/);
+  });
+
+  it('roads that never come within 30 m are no intersection: the other geocoders are tried', async () => {
+    const far = (lat: number) =>
+      line({ lat, lon: -83.1 }, { lat, lon: -83.0 }, 10).map(([lon, la]) => ({ lat: la, lon }));
+    const x = h(
+      { OVERPASS_URL: 'http://overpass.invalid/api/interpreter' },
+      {
+        routes: [
+          [
+            /overpass\.invalid/,
+            (_u, init) => {
+              const q = new URLSearchParams(String(init.body)).get('data')!;
+              if (SHARED_NODE.test(q)) return json({ elements: [] });
+              // Overpass's around is generous; the gateway checks the 30 m itself.
+              return json({
+                elements: [
+                  {
+                    type: 'way',
+                    tags: { highway: 'primary', name: 'Alpha Road' },
+                    geometry: far(42.4),
+                  },
+                  {
+                    type: 'way',
+                    tags: { highway: 'primary', name: 'Bravo Road' },
+                    geometry: far(42.401),
+                  },
+                ],
+              });
+            },
+          ],
+        ],
+      },
+    );
+    const out = await x.run('geocode_place', { query: 'Alpha Road and Bravo Road' });
+    expect(triedOf(out)[0]).toMatchObject({ source: 'overpass', status: 'no_match' });
+    expect(overpassQueries(x)).toHaveLength(2);
   });
 
   it('says intersections need Overpass when it is not configured', async () => {

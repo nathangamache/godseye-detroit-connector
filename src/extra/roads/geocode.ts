@@ -14,6 +14,7 @@ import { errorText } from './http.js';
 import {
   SE_MICHIGAN,
   bboxCenter,
+  distanceToLinesM,
   inBox,
   round4,
   samplePoints,
@@ -21,6 +22,12 @@ import {
   type Point,
 } from './geo.js';
 import { cleanText, normRoad } from './text.js';
+
+/**
+ * Grade-separated roads (no shared node) still "meet" where one passes within this of the other:
+ * a freeway crossing over another has its centre line within a few metres of the other's.
+ */
+export const INTERCHANGE_M = 30;
 
 export const OSM_ATTRIBUTION = '© OpenStreetMap contributors (ODbL), openstreetmap.org/copyright';
 export const ATTRIBUTION = {
@@ -209,8 +216,9 @@ export class Geocoder {
   ): Promise<GeocodeResult> {
     const q = cleanText(query, 200) ?? '';
     if (q.length < 2) return { places: [], attempts: [], cached: false };
-    // The query alone (never a caller's point); intersections answer differently with Overpass.
-    const key = `v1|${this.o.overpassUrl ? 'op|' : ''}${q.toLowerCase()}`;
+    // The query alone (never a caller's point); intersections answer differently with Overpass
+    // (v2: shared node, then ways within INTERCHANGE_M).
+    const key = `${this.o.overpassUrl ? 'v2|op|' : 'v1|'}${q.toLowerCase()}`;
     let cached = true;
     let hit = this.o.cache.get(key);
     if (!hit) {
@@ -387,7 +395,12 @@ export class Geocoder {
     );
   }
 
-  /** Where two roads meet: a node both share, else (grade-separated freeways) their closest approach. */
+  /**
+   * Where two roads meet. First a node both roads' ways share (one query that returns only
+   * those nodes): a junction at grade. Without one (freeway interchanges are grade-separated:
+   * the roads cross on a bridge, on different layers, with no common node), the ways of one
+   * road within INTERCHANGE_M of the other, and where they come closest.
+   */
   private async intersection(pair: [string, string], signal?: AbortSignal): Promise<Place[]> {
     const fa = roadFilter(pair[0]);
     const fb = roadFilter(pair[1]);
@@ -395,54 +408,58 @@ export class Geocoder {
     const [w, s, e, n] = SE_MICHIGAN;
     const skip =
       '["highway"!~"^(footway|cycleway|path|steps|service|track|pedestrian|bridleway|corridor|platform|construction|proposed)$"]';
-    const ql = `[out:json][timeout:25][bbox:${s},${w},${n},${e}];(way["highway"]${skip}${fa.ql};way["highway"]${skip}${fb.ql};);out body geom;`;
-    const ways = (await this.overpass(ql, signal)).filter((x) => x.type === 'way');
-    const A: Array<{ nodes: number[]; geom: LonLat[] }> = [];
-    const B: Array<{ nodes: number[]; geom: LonLat[] }> = [];
-    for (const wy of ways) {
-      const tags = (wy.tags ?? {}) as Record<string, string>;
-      const geom = (Array.isArray(wy.geometry) ? wy.geometry : [])
-        .map((g: { lat?: unknown; lon?: unknown }) => [num(g?.lon), num(g?.lat)])
-        .filter((c): c is LonLat => c[0] !== undefined && c[1] !== undefined);
-      const nodes = (Array.isArray(wy.nodes) ? wy.nodes : []).filter(
-        (x): x is number => typeof x === 'number',
-      );
-      if (fa.test(tags)) A.push({ nodes, geom });
-      if (fb.test(tags)) B.push({ nodes, geom });
-    }
+    const head = `[out:json][timeout:25][bbox:${s},${w},${n},${e}];`;
+    const wayA = `way["highway"]${skip}${fa.ql}`;
+    const wayB = `way["highway"]${skip}${fb.ql}`;
     const name = `${cleanText(pair[0], 60)} & ${cleanText(pair[1], 60)}`;
     const hits: Array<{ p: LonLat; kind: string }> = [];
-    const aNodes = new Map<number, LonLat>();
-    for (const wy of A) wy.nodes.forEach((id, i) => wy.geom[i] && aNodes.set(id, wy.geom[i]!));
-    for (const wy of B)
-      wy.nodes.forEach((id) => {
-        const p = aNodes.get(id);
-        if (p) hits.push({ p, kind: 'intersection' });
-      });
+
+    const shared = await this.overpass(
+      `${head}${wayA}->.a;${wayB}->.b;node(w.a)->.na;node(w.b)->.nb;node.na.nb;out skel;`,
+      signal,
+    );
+    for (const nd of shared) {
+      const lat = num(nd.lat);
+      const lon = num(nd.lon);
+      if (nd.type === 'node' && lat !== undefined && lon !== undefined)
+        hits.push({ p: [lon, lat], kind: 'intersection' });
+    }
+
     if (!hits.length) {
-      // Grade-separated: the closest approach under 400 m, on 50 m samples of both roads.
-      const cell = 0.005;
-      const grid = new Map<string, LonLat[]>();
-      for (const wy of A)
-        for (const pt of samplePoints(wy.geom, 50, 4000)) {
-          const k = `${Math.floor(pt.lon / cell)}:${Math.floor(pt.lat / cell)}`;
-          (grid.get(k) ?? grid.set(k, []).get(k)!).push([pt.lon, pt.lat]);
-        }
+      const near = await this.overpass(
+        `${head}${wayB}->.b;${wayA}(around.b:${INTERCHANGE_M})->.a;way.b(around.a:${INTERCHANGE_M})->.bn;(.a;.bn;);out tags geom;`,
+        signal,
+      );
+      const A: LonLat[][] = [];
+      const B: LonLat[][] = [];
+      for (const wy of near) {
+        if (wy.type !== 'way') continue;
+        const tags = (wy.tags ?? {}) as Record<string, string>;
+        const geom = (Array.isArray(wy.geometry) ? wy.geometry : [])
+          .map((g: { lat?: unknown; lon?: unknown }) => [num(g?.lon), num(g?.lat)])
+          .filter((c): c is LonLat => c[0] !== undefined && c[1] !== undefined);
+        if (geom.length < 2) continue;
+        if (fa.test(tags)) A.push(geom);
+        if (fb.test(tags)) B.push(geom);
+      }
+      // Overpass's "around" is the filter; the distance itself is measured here, on 10 m
+      // samples of road A against road B's segments, closest first.
       const close: Array<{ p: LonLat; d: number }> = [];
-      for (const wy of B)
-        for (const pt of samplePoints(wy.geom, 50, 4000)) {
-          const cx = Math.floor(pt.lon / cell);
-          const cy = Math.floor(pt.lat / cell);
-          for (let x = cx - 1; x <= cx + 1; x++)
-            for (let y = cy - 1; y <= cy + 1; y++)
-              for (const q of grid.get(`${x}:${y}`) ?? []) {
-                const d = haversineM(pt.lat, pt.lon, q[1], q[0]);
-                if (d < 400) close.push({ p: [(pt.lon + q[0]) / 2, (pt.lat + q[1]) / 2], d });
-              }
+      for (const a of A)
+        for (const pt of samplePoints(a, 10, 4000)) {
+          const best = distanceToLinesM(pt, B);
+          if (best.distM <= INTERCHANGE_M)
+            close.push({
+              p: [(pt.lon + best.at.lon) / 2, (pt.lat + best.at.lat) / 2],
+              d: best.distM,
+            });
         }
-      close.sort((a, b) => a.d - b.d);
+      close.sort((x, y) => x.d - y.d);
       for (const c of close)
-        hits.push({ p: c.p, kind: `interchange (roads pass within ${Math.round(c.d)} m)` });
+        hits.push({
+          p: c.p,
+          kind: `interchange (grade-separated: the roads pass within ${Math.round(c.d)} m)`,
+        });
     }
     // One answer per place where they meet (points within 500 m are the same junction).
     const out: Place[] = [];
