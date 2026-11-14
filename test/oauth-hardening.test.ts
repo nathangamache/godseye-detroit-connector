@@ -96,7 +96,7 @@ describe('OA-3: SSRF-pinned CIMD fetcher works under Node 24', () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('answers lookup in both shapes (Node 24 asks with {all: true})', () => {
+  it('answers lookup in both shapes (Node 24 asks with {all: true}), never synchronously', async () => {
     const lookup = pinnedLookup({ address: '203.0.113.5', family: 4 });
     const got: unknown[][] = [];
     (lookup as unknown as (h: string, o: unknown, cb: (...a: unknown[]) => void) => void)(
@@ -109,8 +109,83 @@ describe('OA-3: SSRF-pinned CIMD fetcher works under Node 24', () => {
       {},
       (...a) => got.push(a),
     );
+    // net/tls keep setting the socket up after calling lookup; answering inline lets a connect
+    // that fails at once destroy the socket under tls.connect (review: uncaught TypeError).
+    expect(got).toEqual([]);
+    await new Promise((r) => process.nextTick(r));
     expect(got[0]).toEqual([null, [{ address: '203.0.113.5', family: 4 }]]);
     expect(got[1]).toEqual([null, '203.0.113.5', 4]);
+  });
+
+  // 224.0.0.1 is multicast: Linux refuses a TCP connect to it synchronously (ENETUNREACH),
+  // like an IPv6 address on a host without an IPv6 route.
+  const failsAtOnce = '224.0.0.1';
+  const allowTest = (ip: string) => ip !== '127.0.0.1' && ip !== failsAtOnce && isPrivateIp(ip);
+
+  it.runIf(haveOpenssl())(
+    'a pinned address that fails at once falls through to the next, and nothing escapes uncaught',
+    async () => {
+      const uncaught: unknown[] = [];
+      const onUncaught = (e: unknown) => uncaught.push(e);
+      process.on('uncaughtException', onUncaught);
+      try {
+        const both = makeCimdFetcher({
+          resolver: async () => [
+            { address: failsAtOnce, family: 4 },
+            { address: '127.0.0.1', family: 4 },
+          ],
+          connectPort: port,
+          ca: cert,
+          isPrivate: allowTest,
+        });
+        const r = await both('https://cimd.test/client.json');
+        expect(JSON.parse(r.body)).toEqual(doc);
+        // Only the failing address: a clean CimdFetchError, not a TypeError and a crash.
+        const only = makeCimdFetcher({
+          resolver: async () => [{ address: failsAtOnce, family: 4 }],
+          connectPort: port,
+          ca: cert,
+          isPrivate: allowTest,
+        });
+        const err = await only('https://cimd.test/client.json').catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(CimdFetchError);
+        expect(String((err as Error).message)).toMatch(/fetch failed/);
+        await new Promise((r) => setTimeout(r, 100));
+        expect(uncaught).toEqual([]);
+      } finally {
+        process.off('uncaughtException', onUncaught);
+      }
+    },
+  );
+
+  it.runIf(haveOpenssl())('tries the validated addresses in order when one refuses', async () => {
+    // A closed port on the first address (ECONNREFUSED, asynchronous), the server on the second.
+    const closed = createServer();
+    await new Promise<void>((r) => closed.listen(0, '127.0.0.2', () => r()));
+    const closedPort = (closed.address() as AddressInfo).port;
+    await new Promise<void>((r) => closed.close(() => r()));
+    const second = createServer({ key: readFileSync(path.join(dir, 'key.pem')), cert }, (_q, s) =>
+      s
+        .writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ ...doc, client_name: 'second' })),
+    );
+    await new Promise<void>((r) => second.listen(closedPort, '127.0.0.3', () => r()));
+    try {
+      const f = makeCimdFetcher({
+        resolver: async () => [
+          { address: '127.0.0.2', family: 4 },
+          { address: '127.0.0.3', family: 4 },
+        ],
+        connectPort: closedPort,
+        ca: cert,
+        isPrivate: () => false,
+      });
+      expect(JSON.parse((await f('https://cimd.test/client.json')).body).client_name).toBe(
+        'second',
+      );
+    } finally {
+      second.close();
+    }
   });
 
   // The test server is on 127.0.0.1, so the private-address check is narrowed to let only it
