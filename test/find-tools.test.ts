@@ -122,7 +122,7 @@ describe('find_tools list mode', () => {
       for (const t of c.tools) expect(t.description.length).toBeGreaterThan(5);
     expect(json.direct_tools!.map((t) => t.name)).toEqual(['where_am_i', 'whats_happening_here']);
     expect(text).toMatch(new RegExp(`^${allowed.length} tool\\(s\\) available through run_tool`));
-    expect(text).toMatch(/Categories: rail \(3\), scanner \(4\)/);
+    expect(text).toMatch(/Categories: rail \(3\), scanner \(5\)/);
   });
 
   it('"*", "all", "all tools" and "list" are list mode too (not a keyword search)', async () => {
@@ -136,6 +136,7 @@ describe('find_tools list mode', () => {
   it('category lists one group; with a query it narrows the search', async () => {
     const { json } = await find({ category: 'scanner' });
     expect(names(json).sort()).toEqual([
+      'dpd_calls_near',
       'feeds_status',
       'incident_detail',
       'incidents_near',

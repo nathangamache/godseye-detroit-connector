@@ -272,9 +272,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * Arguments are validated against each tool's JSON schema; place names are refused unless a
   geocoder is configured.
 * Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket; each gateway-native family's
-  defaults: `AVIATION_RATE_LIMITS`, `WEATHER_TOOL_RATE_LIMITS`, `ROADS_TOOL_RATE_LIMITS`, each
-  unless `TOOL_RATE_LIMITS` sets the same bucket), per-grant and per-IP request limits, and at
-  most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
+  defaults: `AVIATION_RATE_LIMITS`, `WEATHER_TOOL_RATE_LIMITS`, `ROADS_TOOL_RATE_LIMITS`,
+  `CIVIC_TOOL_RATE_LIMITS`, each unless `TOOL_RATE_LIMITS` sets the same bucket), per-grant and
+  per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
 * No tool reads gateway config, env or files beyond the bundled rail data, the FAA registry copy
   and the roads tools' own cache and counters in `DATA_DIR/cache`; error text is stripped of paths
   and truncated.
@@ -344,6 +344,21 @@ bidi characters stripped), length-capped and labelled third-party in every resul
 | Valhalla on FOSSGIS (`VALHALLA_URL`) | `route_avoiding_closures` | none | Attribution with a fix-the-map link, a valid user agent, ≤ 1 req/s, no heavy use; full FOSSGIS terms unverified (bot-protected) | ≤ 1 req/s globally; at most 2 requests per route; small exclude polygons (≤ 9 km perimeter) | "Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL)" + openstreetmap.org/fixthemap, plus the credit of every closure source and geocoder the route used (and the Ontario 511 "as is" disclaimer when its items appear) |
 | Mi Drive (MDOT) | `mdot_camera_link` | none | Michigan.gov terms bar automated access without written agreement; linking allowed, framing not | **Link only**: nothing is fetched | "Michigan Department of Transportation, Mi Drive (link only)" |
 | CBP Border Wait Times API; CBSA bwt CSV | `border_wait_times` | none | U.S. federal work (no API terms published); CBSA on open.canada.ca (OGL-Canada verified only for the historical dataset) | 5 min cache per feed | CBP and CBSA credited; OGL-Canada line |
+
+### Gateway data sources and licensing (civic tools)
+
+The gateway's own tools in `src/extra/civic/` call these sources directly (GEV's providers keep
+their own terms). Every request has a timeout, a byte cap, no redirects and the generic
+User-Agent `godseye-detroit-connector/0.1 (personal non-commercial MCP gateway)`: no name, e-mail
+or host. Results carry the attribution below and are labelled untrusted third-party data.
+
+| Source | Tool | Key | Terms and how the gateway handles them |
+|---|---|---|---|
+| City of Detroit Open Data, "Police Serviced 911 Calls" (ArcGIS FeatureServer on `services2.arcgis.com`) | `dpd_calls_near` | none | The portal's open-data terms (EO 2015-2) allow retrieval, redistribution and reuse; the item's own licence field is blank. Official but published hours late (checked live: the newest record was about 11 h old), so every result says how old the newest record is and is labelled "official, delayed a few hours". Location is the city's nearest intersection only; any value that is not an intersection is withheld, so no house address is ever shown. The query box is built from numbers the gateway computes; a caller's category filter is applied in the gateway, never sent as SQL. |
+| SMART real-time via Swiftly (`api.goswift.ly`, GTFS-Realtime vehicle positions, trip updates and alerts) | `transit_vehicles_near` | `SWIFTLY_API_KEY` (Authorization header, sent to Swiftly only) | Swiftly's API licence grants display inside the licensee's application and bars sharing, sublicensing or redistributing content (4(vi)) and disclosing the API beyond the licensee (4(i)). Handling: display only; one in-memory snapshot, deleted after 30 s (Swiftly asks for at least 30 s of server-side caching); never written to disk, logged, exported or put in backups. Without the key the tool is off and fetches nothing. Whether answering through an AI assistant is "display in the licensee's application" is the owner's call (a grey area: AI is not mentioned). |
+| SMART static GTFS (`apps1.smartbus.org`) | `transit_vehicles_near` | none | Public schedule file; only route names and trip headsigns are read, kept in memory, refreshed at most daily (`SMART_STATIC_GTFS=false` turns it off). No licence is stated on the feed. |
+| GDELT DOC 2.0 API (`api.gdeltproject.org`) | `local_headlines` | none | "Unlimited and unrestricted use ... without fee"; any use must cite the GDELT Project with a link (in every result). GDELT asks for at most one request every 5 s: one process-wide queue starts a request only after the previous one ended and at least 5 s after it started, backs off 60 s after a 429 and refuses rather than queue for long; answers are cached 10 minutes. GEV's `get_regional_brief` also uses GDELT from the same address, outside this queue, and GDELT throttles per address. Headlines and links are third-party and unvetted. |
+| U.S. Census Bureau geocoder (`geocoding.geo.census.gov`) | `local_headlines` with coordinates | none | U.S. government service, no published terms or limits. It receives the point rounded to 0.01° (about 1 km), never the exact phone fix; answers are cached in memory for a day. |
 
 ### Data retention
 
@@ -510,7 +525,9 @@ Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
   Google content is excluded by policy, not by GEV. AirNow's guidelines ask that a product using
   its data be made known to the agencies and AirNow: send a one-line notice of personal,
   non-commercial use to dmc@airnowtech.org when you add `AIRNOW_API_KEY`. AirNow's terms don't
-  mention AI assistants.
+  mention AI assistants. Swiftly's API licence (SMART buses) does not mention AI assistants
+  either; the tool stays off until `SWIFTLY_API_KEY` is set, which is the owner's decision that
+  display through Claude is acceptable.
 * **Aviation**: adsb.fi allows personal, non-commercial use only, and anyone else running this
   code is bound by that too. Organisation and government owner names (and private names with
   `AIRCRAFT_OWNER_DISCLOSURE=full`) reach Claude's transcript; name plus city and state can
@@ -526,6 +543,11 @@ Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
   FOSSGIS terms and the licence of the live CBSA feed are unverified. If claude.ai's
   model-training setting is on, TomTom results may be retained by a third party (TomTom 11.6.4):
   keep it off while TomTom incidents are enabled.
+* **Civic tools with `here: true`** read the phone fix (audited per grant like `where_am_i`);
+  `local_headlines` then sends the point, rounded to about 1 km, to the U.S. Census geocoder and
+  only the town name to GDELT; `dpd_calls_near` sends a box around the point to the city's ArcGIS
+  service; `transit_vehicles_near` downloads SMART's whole feed and filters it in the gateway, so
+  Swiftly never sees the point.
 * `docker-compose` 1.29 is end-of-life and crashes when recreating containers against Docker 29
   (`KeyError: 'ContainerConfig'`): use `down` then `up -d`, or install Compose v2.
 

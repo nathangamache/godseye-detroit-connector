@@ -128,18 +128,20 @@ latest fix and is audited as a location read.
   `military_awareness`), ALPR locations (`ALLOW_ALPR_TOOLS`), place-name arguments
   (`GEV_PLACE_NAMES`, needs a Nominatim GEV can use).
 * Quotas (`TOOL_RATE_LIMITS`): TomTom traffic 20/h and 150/d, OSRM routes 30/h, camera snapshots
-  60/h, imagery 20/h, regional news 30/h, place lookups 30/h; `AVIATION_RATE_LIMITS` adds
-  `flights_near` 60/h and 600/d and `aircraft_lookup` 120/h for buckets `TOOL_RATE_LIMITS` does
-  not set. Outbound: adsb.fi at most one request per 1.1 s, adsb.lol at most `ADSBLOL_DAILY_MAX`
-  (100) calls a day.
+  60/h, imagery 20/h, regional news 30/h, place lookups 30/h. Each gateway-native family adds
+  its defaults for the buckets `TOOL_RATE_LIMITS` does not set: `AVIATION_RATE_LIMITS`
+  (`flights_near` 60/h and 600/d, `aircraft_lookup` 120/h), `WEATHER_TOOL_RATE_LIMITS`,
+  `ROADS_TOOL_RATE_LIMITS` and `CIVIC_TOOL_RATE_LIMITS` (Detroit 911 calls 60/h, SMART buses
+  120/h, local headlines 30/h and 200/d). Outbound: adsb.fi at most one request per 1.1 s,
+  adsb.lol at most `ADSBLOL_DAILY_MAX` (100) calls a day.
 * Every call: ajv validation (a failure returns the schema), 110 s timeout, at most 4 at once.
 * Every result: one copy of the data (GEV duplicates it), `data.view` stripped (its link kept as
   `map_url`), internal GEV links rewritten to the tailnet UI origin, third-party links flagged as
   unvetted, images downscaled with sharp (dropped with a note if they can't fit), total size
   (summary and images included) capped at 100k characters, provenance, retrieval time,
   attribution and an "untrusted data" label first.
-* Location reads (`where_am_i`, `whats_happening_here` without a point, a weather, water or air
-  tool called with `here: true`) are audited per grant.
+* Location reads (`where_am_i`, `whats_happening_here` without a point, a weather, water, air,
+  roads or civic tool called with `here: true`) are audited per grant.
   A tool called for an explicit point, while the phone's fix is under 30 minutes old, adds a
   "phone check" (distance, bearing from the point to the phone, fix age; never the phone's
   coordinates) and says plainly when the phone is not there; that is audited as a location read
@@ -173,6 +175,22 @@ list per service, the User-Agent `(godseye-personal-connector)`, a 12 s timeout,
 retries on 5xx (one on 429), no redirects and a size cap. Air quality is cached 30 min, USGS
 answers 10 min, NWS alerts 30 s and forecasts up to 10 min.
 
+## Gateway-native tools: civic, transit and news (`src/extra/civic`)
+
+Served by the gateway itself (`src/extra/civic/`), through `run_tool` like every other tool. Each
+takes a point as `lat`/`lon` or `here: true` (the latest phone fix, audited as a location read;
+its coordinates are never echoed), validates its input with zod, fetches with a timeout and a
+generic User-Agent, caps its output, labels it untrusted third-party data and credits its source.
+
+| Tool | What it answers | Source (key) | Notes |
+|---|---|---|---|
+| `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": the result says how old the newest record is; nearest intersection only, never a house address; Detroit city limits only |
+| `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **off** without it); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
+| `local_headlines` | Recent headlines mentioning a place (`place`, or a point turned into the town there) | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | at most one GDELT request every 5 s per process (queued), 10-minute cache; headlines are untrusted third-party text |
+
+GEV's `get_transit_vehicles` no longer advertises DDOT, SMART or QLINE: its feed registry has no
+Michigan feed.
+
 ## Repository layout
 
 ```
@@ -181,6 +199,7 @@ src/            gateway (TypeScript, ESM)
   mcp/          the four MCP tools                       tools/      registry, search, policy, post-processing
   gev/          child supervisor, relay, TCP transport   rail/       NARN/FRA spatial index + tools
   pulse/        Pulse HTTP client + tools                oauth/      authorization server, CIMD, DCR, tokens
+  extra/civic/  Detroit 911 calls, SMART buses, GDELT headlines (gateway-native tools)
   auth/         tailscale, step-up TOTP, dev login, CSRF location/   device tokens, ingest, /locate
   ui/           GEV reverse proxy, /pulse                http/       headers, Host/Origin checks, rate limits
   extra/aviation/  flights_near, aircraft_lookup, FAA registry sync
@@ -220,5 +239,8 @@ and adsb.lol (https://adsb.lol; ODbL 1.0). Aircraft registry: FAA Releasable Air
 government data). Weather and water data: National Weather Service, NOAA CO-OPS, NWS National
 Water Prediction Service and USGS, public domain (USGS values are provisional). Air quality: EPA
 AirNow and the reporting agencies (Michigan EGLE), preliminary data under the AirNow Data Exchange
-Guidelines. This repository is
+Guidelines. Civic tools: City of Detroit Open Data (Police Serviced 911 Calls), SMART real-time
+data via Swiftly (display only, under Swiftly's API licence) and SMART's GTFS schedule, the GDELT
+Project (gdeltproject.org; a citation and link go with every result) and the U.S. Census Bureau
+geocoder; see `docs/security.md` for the terms of each. This repository is
 public, for personal, non-commercial use; it holds no secrets or personal data.

@@ -402,6 +402,20 @@ const schema = z.object({
     .url({ protocol: /^https?$/ })
     .default('https://www.cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv'),
   // ---- end roads ----
+
+  // ---- civic ----
+  /**
+   * Swiftly real-time API key for SMART's GTFS-Realtime feeds (sent as the Authorization
+   * header). Unset: transit_vehicles_near is off and fetches nothing.
+   */
+  SWIFTLY_API_KEY: optionalString,
+  /** Fetch SMART's public static GTFS (route names, headsigns) for transit_vehicles_near. */
+  SMART_STATIC_GTFS: bool(true),
+  /** Default quotas for the civic tools; a TOOL_RATE_LIMITS entry for the same bucket wins. */
+  CIVIC_TOOL_RATE_LIMITS: rateLimitList(
+    'dpd_calls_near=60/h,transit_vehicles_near=120/h,local_headlines=30/h,local_headlines=200/d',
+  ),
+  // ---- end civic ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
@@ -476,6 +490,7 @@ export const FAMILY_RATE_LIMIT_SETTINGS = [
   'AVIATION_RATE_LIMITS',
   'WEATHER_TOOL_RATE_LIMITS',
   'ROADS_TOOL_RATE_LIMITS',
+  'CIVIC_TOOL_RATE_LIMITS',
 ] as const satisfies readonly (keyof RawConfig)[];
 
 /**

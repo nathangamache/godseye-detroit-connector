@@ -11,6 +11,8 @@ import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
+import { registerCivicTools } from './extra/civic/index.js';
+import { registerRoads } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
 import { makeGevCaller } from './gev/tools.js';
@@ -21,7 +23,6 @@ import { RailIndex } from './rail/index.js';
 import { railTools } from './rail/tools.js';
 import { PulseClient } from './pulse/client.js';
 import { pulseTools } from './pulse/tools.js';
-import { registerRoads } from './extra/roads/index.js';
 import { ToolPolicy } from './tools/policy.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/runner.js';
@@ -156,6 +157,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   });
   registerWeatherTools({ config, registry, locations, audit, tokens, logger, now });
   registerRoads(registry, { config, locations, audit, tokens, logger, now });
+  registerCivicTools(registry, { config, locations, audit, tokens, now });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(
