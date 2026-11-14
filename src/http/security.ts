@@ -23,7 +23,10 @@ export interface SecurityConfig {
 export function baseHeaders(cfg: SecurityConfig): RequestHandler {
   return (_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // same-origin, not no-referrer: under no-referrer browsers send 'Origin: null' on form POSTs,
+    // which the strict owner-POST origin check (correctly) refuses. same-origin still sends
+    // no referrer to any other origin.
+    res.setHeader('Referrer-Policy', 'same-origin');
     if (cfg.hsts) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     next();
   };

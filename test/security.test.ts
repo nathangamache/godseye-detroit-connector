@@ -511,7 +511,7 @@ describe('production mode listeners', () => {
     expect(await h.json()).toEqual({ ok: true });
     expect(h.headers.get('strict-transport-security')).toMatch(/max-age/);
     expect(h.headers.get('x-content-type-options')).toBe('nosniff');
-    expect(h.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(h.headers.get('referrer-policy')).toBe('same-origin');
     expect(h.headers.get('access-control-allow-origin')).toBeNull();
     const mcp = await fetch(gw.url + '/mcp', {
       method: 'POST',
@@ -551,5 +551,18 @@ describe('production mode listeners', () => {
         })
       ).status,
     ).toBe(404);
+  });
+});
+
+describe('owner form POSTs carry a real Origin in browsers', () => {
+  // Under Referrer-Policy no-referrer, browsers send `Origin: null` on every form POST
+  // (Fetch spec, "append a request Origin header"), so the strict owner-POST check refused
+  // every real consent approval. same-origin keeps the origin on same-origin POSTs and still
+  // sends no referrer anywhere else.
+  it('gateway pages never set no-referrer, in the header or in the page', async () => {
+    const { page } = await import('../src/ui/html.js');
+    const html = page('t', '<p>x</p>');
+    expect(html).toContain('<meta name="referrer" content="same-origin">');
+    expect(html).not.toMatch(/no-referrer/);
   });
 });

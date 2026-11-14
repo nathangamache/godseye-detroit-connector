@@ -24,7 +24,7 @@ export function page(title: string, body: string, opts: { nav?: NavOrigins } = {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>${esc(title)}</title>
 <link rel="stylesheet" href="/gw/static/app.css">
 </head>
