@@ -68,6 +68,39 @@ npm run stepup -- enroll                      # authenticator code for consent a
 npm run smoke:live -- --url http://127.0.0.1:7700
 ```
 
+## Roads and places tools (gateway-native, `src/extra/roads/`)
+
+Run through `find_tools` / `run_tool` like every other tool (categories `traffic`, `places`,
+`cameras`). Inputs are zod schemas; `here` (or `near: "here"`, `from: "here"`) uses the phone's
+latest fix and is audited as a location read.
+
+| Tool | What it answers | Sources (keys) |
+|---|---|---|
+| `road_closures` | Closures, crashes, lane closures and work zones near `lat`/`lon`, `here` or along a `road` (`radius_km` 1-50, `include` incidents/work_zones, `when` now/planned): source, road, direction, type, lanes and vehicle impact, description, from/to cross street, start, end, updated, distance_km, plus which sources were checked | City of Detroit right-of-way permits (keyless); MDOT RIDE work zones (WZDx v4) and traffic events (`MDOT_RIDE_API_KEY`); Ontario 511 events and construction, Windsor/Essex only (`ONTARIO_511_API_KEY`); TomTom Incident Details (`TOMTOM_API_KEY` and `ALLOW_TOMTOM_INCIDENTS=true`) |
+| `geocode_place` | Coordinates for a place, street address or intersection (`near`, `limit` 1-5), biased to SE Michigan | US Census Geocoder (addresses), Photon, public Nominatim as a capped last resort; intersections through a self-hosted Overpass (`OVERPASS_URL`) |
+| `route_avoiding_closures` | Driving route between places, addresses, `here` or lat/lon, around full closures (`avoid_closures`, `units`): distance, duration (no live traffic), maneuvers with street names, closures_avoided, warnings | Valhalla on FOSSGIS (`VALHALLA_URL`) with exclude_polygons from the open-data closure sources (never TomTom) |
+| `mdot_camera_link` | A Mi Drive map link with the camera layer, centred on a point, `here` or a road | Link only: no image is fetched (Michigan.gov terms) |
+| `border_wait_times` | Waits at the Ambassador Bridge, the tunnel, Gordie Howe and Blue Water (`crossing`, `direction`): delay, lanes open, lane type, updated, source | CBP Border Wait Times (U.S.-bound), CBSA CSV (Canada-bound), keyless |
+
+* A source whose key is missing is **off**, and every result says so with the fix
+  (`not configured: set MDOT_RIDE_API_KEY in deploy/secrets/gateway.env`). Each source fails on
+  its own: one down never sinks the others, and "none found" is reported as "not proof the road
+  is open", with the list of sources checked.
+* Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
+  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; MDOT RIDE is polled at most every
+  5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
+  minute; Valhalla and Nominatim get at most one request a second; Nominatim at most
+  `GEOCODER_NOMINATIM_DAILY_MAX` (50) a day and the shared `nominatim` bucket; border feeds are
+  cached 5 minutes.
+* Default quotas (`ROADS_TOOL_RATE_LIMITS`, overridden per bucket by `TOOL_RATE_LIMITS`):
+  road_closures 60/h, geocode_place 60/h, route_avoiding_closures 30/h, mdot_camera_link 60/h,
+  border_wait_times 60/h.
+* Geocoder answers are cached on disk (`DATA_DIR/cache`, mode 600, 30 days; the key is the query
+  only, never the caller's position) as Nominatim's policy requires. Every outbound request has a
+  generic User-Agent (`ROADS_USER_AGENT`) and a timeout, and every result carries its
+  attribution (ODbL for OpenStreetMap-derived answers; OGL-Ontario and the "as is" disclaimer for
+  Ontario 511). Licensing notes: `docs/security.md`.
+
 ## Tool policy
 
 * GEV tools are **deny by default**: only names on `GEV_TOOL_ALLOWLIST` are visible or runnable,

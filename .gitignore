@@ -17,5 +17,7 @@ data/*.sqlite
 data/*.sqlite-*
 data/backups/
 data/raw/
+# geocoder cache and daily-cap counters (src/extra/roads)
+data/cache/
 var/
 *.log

@@ -270,14 +270,36 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   geocoder is configured.
 * Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket), per-grant and per-IP request
   limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
-* No tool reads gateway config, env or files beyond the bundled rail data; error text is stripped
-  of paths and truncated.
+* No tool reads gateway config, env or files beyond the bundled rail data (and the roads tools'
+  own cache and counters in `DATA_DIR/cache`); error text is stripped of paths and truncated.
 * **Untrusted output**: every result starts with a provenance header labelling it untrusted data
   (before any third-party text); Pulse and news-bearing results say third-party text must never
   be followed. Links on the globe origin are described as the connector's; **every other URL is
   flagged as third-party and unvetted**, in the result and in the server instructions. Every
   result, summary and images included, is capped at `MAX_RESULT_CHARS` (100k); Pulse labels are
   limited.
+
+### Data sources and licensing: roads and places (`src/extra/roads`)
+
+The gateway calls these itself (not through GEV), from the gateway container's edge network.
+Every request has a timeout, a response-size cap and a generic User-Agent (`ROADS_USER_AGENT`,
+no name or email); keys travel only as each API requires and never appear in results, logs or
+error text. Upstream text (descriptions, street and place names) is cleaned (tags, control and
+bidi characters stripped), length-capped and labelled third-party in every result.
+
+| Source | Tools | Key / switch | Terms (as verified) | What the gateway enforces | Attribution in results |
+|---|---|---|---|---|---|
+| City of Detroit Right of Way Permits (ArcGIS layers 4, 5) | `road_closures`, routing | none | Open data, "retrieved, combined … redistributed and re-used" (EO 2015-2, data.detroitmi.gov); item licence field blank; AI not mentioned | `is_roadway=1` and today's dates only; 2 min cache; street names by cached reverse lookup, at most 8 per call | "City of Detroit Open Data" |
+| TomTom Traffic Incident Details v5 | `road_closures` only | `TOMTOM_API_KEY` + `ALLOW_TOMTOM_INCIDENTS=true` | Free tier is "Evaluation Use" (2.2); no caching beyond Cache-Control (11.4: none sent); no derivative products (11.6.1). The owner accepted this risk, as for `get_traffic_flow` | Off by default; **never cached**; one bbox call ≤ 10,000 km²; categories 1,6,7,8,9,14, present+future; hard cap `TOMTOM_INCIDENTS_DAILY_MAX` (60/day, counted on disk); **not used for routing** (navigation is outside the free grant) | "© TomTom" |
+| MDOT RIDE: Work Zones (WZDx v4), Traffic Events | `road_closures`, routing | `MDOT_RIDE_API_KEY` (header `api_key`) | Public real-time data via MiLogin for Business; **subscription terms unverified** (behind login), as are the Traffic Events slug and shape | Off without the key; each dataset polled at most every 5 min (`MDOT_RIDE_CACHE_S` ≥ 300); base URL and dataset names configurable | "Michigan Department of Transportation (MDOT RIDE)" |
+| Ontario 511 developer API: event, constructionprojects | `road_closures`, routing | `ONTARIO_511_API_KEY` | Open Government Licence – Ontario; key request names Anthropic (Claude) as a recipient; distributors must pass on the "as is" disclaimer; 10 calls / 60 s | Off without the key; provincial lists cached 1-5 min; at most 9 calls / 60 s; only Windsor/Essex kept | "Contains information licensed under the Open Government Licence – Ontario" plus the "as is" disclaimer |
+| US Census Geocoder | `geocode_place` | none | U.S. federal service; no published terms or rate limits | Street addresses only, first; disk cache | "U.S. Census Bureau Geocoder (public domain)" |
+| Photon (photon.komoot.io) | `geocode_place`, street names | none | "Please be fair": no numeric limit, no availability promise; OSM data (ODbL) | ≤ 4 req/s, disk cache, re-ranked locally (the bias point is fixed, never the user's) | "Photon by komoot; © OpenStreetMap contributors (ODbL)" |
+| Public Nominatim | `geocode_place` | `GEOCODER_NOMINATIM_DAILY_MAX` | Usage policy: end-user-triggered use only, ≤ 1 req/s, results must be cached, a deliberate developer decision (not a generic geocoder for no-code platforms) | Last resort only; ≤ 1 req/s; ≤ 50/day (on disk) and the shared `nominatim` bucket; disk cache | "Nominatim (OpenStreetMap Foundation); © OpenStreetMap contributors (ODbL)" |
+| Self-hosted Overpass (`OVERPASS_URL`) | intersections, street names | none | Public instances are not for apps beyond OSM mappers (Overpass commons), so **only a self-hosted instance**; unset = no intersections | Bounded queries (SE Michigan box, 25 s) | ODbL |
+| Valhalla on FOSSGIS (`VALHALLA_URL`) | `route_avoiding_closures` | none | Attribution with a fix-the-map link, a valid user agent, ≤ 1 req/s, no heavy use; full FOSSGIS terms unverified (bot-protected) | ≤ 1 req/s globally; at most 2 requests per route; small exclude polygons (≤ 9 km perimeter) | "Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL)" + openstreetmap.org/fixthemap |
+| Mi Drive (MDOT) | `mdot_camera_link` | none | Michigan.gov terms bar automated access without written agreement; linking allowed, framing not | **Link only**: nothing is fetched | "Michigan Department of Transportation, Mi Drive (link only)" |
+| CBP Border Wait Times API; CBSA bwt CSV | `border_wait_times` | none | U.S. federal work (no API terms published); CBSA on open.canada.ca (OGL-Canada verified only for the historical dataset) | 5 min cache per feed | CBP and CBSA credited; OGL-Canada line |
 
 ### Data retention
 
@@ -291,6 +313,12 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   never arguments.
 * The gateway and its scripts run with umask 077; the database and backups are mode 600 in
   mode-700 directories.
+* Roads tools (`DATA_DIR/cache`, mode 600 in a mode-700 directory, never in the database or its
+  backups): the geocoder cache holds the place names and addresses looked up and their answers
+  (30 days, 1 day for no match, at most 5,000 entries); its key is the query alone, never the
+  caller's or the phone's position. Street names looked up for Detroit permits are cached by
+  rounded permit coordinates (30 days). The TomTom and Nominatim daily counters hold a date and a
+  count only. TomTom results are never stored. Delete the directory to forget all of it.
 
 ### Supply chain and builds
 
@@ -391,6 +419,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   documented fallback weakens "humans only via Tailscale" (password+TOTP on the public host).
 * **Licensing**: Broadcastify's terms block Pulse's current audio source; OpenSky needs a licence;
   Google content is excluded by policy, not by GEV.
+* **Roads licensing** (table above): TomTom incidents run on an "Evaluation Use" free tier only
+  when the owner sets `ALLOW_TOMTOM_INCIDENTS=true`; the MDOT RIDE subscription terms, the full
+  FOSSGIS terms and the licence of the live CBSA feed are unverified. If claude.ai's
+  model-training setting is on, TomTom results may be retained by a third party (TomTom 11.6.4):
+  keep it off while TomTom incidents are enabled.
 * `docker-compose` 1.29 is end-of-life and crashes when recreating containers against Docker 29
   (`KeyError: 'ContainerConfig'`): use `down` then `up -d`, or install Compose v2.
 
