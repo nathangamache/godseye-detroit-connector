@@ -12,7 +12,7 @@
 # modes are normalised there (directories 755, files 644, executables 755, no set-id bits),
 # and the runtime stage copies only from the build stage, never from the context. Secrets
 # never enter the context (.dockerignore: deploy/secrets, .env, .env.*).
-FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS build
+FROM node:26.13.0-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68 AS build
 WORKDIR /app
 ENV npm_config_fund=false npm_config_audit=false npm_config_update_notifier=false
 COPY package.json package-lock.json .npmrc ./
@@ -27,7 +27,7 @@ COPY web ./web
 COPY third_party ./third_party
 RUN chmod -R u=rwX,go=rX /app/package.json /app/node_modules /app/dist /app/gev /app/data /app/web /app/third_party
 
-FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+FROM node:26.13.0-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68
 ENV NODE_ENV=production
 WORKDIR /app
 RUN groupadd --gid 10001 godseye \
