@@ -96,6 +96,23 @@ primary group, a umask of 002 gives it exactly that. So:
   minute, 30 days, 5k rows) and access (location reads per grant, no coordinates; 90 days, 20k
   rows). Admin also shows each grant's location-read count.
 
+## FAA aircraft registry copy (aircraft_lookup)
+
+* The gateway downloads `ReleasableAircraft.zip` once a day at about 06:15 UTC (and about two
+  minutes after start when the copy is missing or more than 30 h unchecked), with
+  `If-Modified-Since`, into `DATA_DIR/aviation/` (`/data/aviation` in docker; the ~73 MB archive
+  does not fit the 64 MB `/tmp`). The import takes about 10 s and peaks near 130 MB of memory;
+  the copy is about 50 MB. Log event: `aircraft_registry_sync` (`imported`, `not_modified` or
+  `failed` with the reason). A failed run keeps the last good copy and is retried an hour later,
+  twice.
+* By hand: `docker exec godseye-gateway node dist/scripts/aircraft-registry-sync.js [--force]`.
+  If registry.faa.gov starts refusing the gateway, download the ZIP in a browser, copy it into
+  the volume and run the same script with `--file /data/aviation/ReleasableAircraft.zip`, then
+  delete the ZIP (it holds addresses the copy does not keep).
+* Turn the daily download off with `AIRCRAFT_REGISTRY_SYNC=false`; turn the tools off with
+  `TOOL_DENYLIST=flights_near,aircraft_lookup`. Changing `AIRCRAFT_OWNER_DISCLOSURE` to or from
+  `full` rebuilds the copy at the next run (private names are kept only under `full`).
+
 ## Backups
 
 The database holds OAuth clients, **hashed** tokens and codes, devices, at most 24 h of location

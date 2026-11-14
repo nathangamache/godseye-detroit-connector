@@ -19,6 +19,20 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 * Rail context GEV lacks comes from public FRA/NARN datasets bundled here; Pulse plugs in over a
   documented HTTP contract.
 
+## Gateway-native tools (through `run_tool`)
+
+| Tool | Category | What it answers | Data |
+|---|---|---|---|
+| `nearest_rail` | rail | nearest rail line (owner, every subdivision name) and at-grade crossing | FRA crossing inventory, NARN (bundled) |
+| `crossings_near` | rail | grade crossings in a radius, nearest first | FRA crossing inventory (bundled) |
+| `flights_near` | aviation | aircraft near a point or the phone (`here: true`): callsign, hex, registration, type, altitude, speed, track, distance and bearing from the exact point, data age, position source, military/LADD/PIA flags, FAA registrant type with city and state (government owners by name), a globe link per aircraft | adsb.fi live (adsb.lol fallback); FAA registry copy |
+| `aircraft_lookup` | aviation | one aircraft by ICAO hex or N-number: make/model, year, registrant type and owner under the disclosure rules (never street or ZIP), status and dates, whether it is flying now | local copy of the FAA Releasable Aircraft Database, synced daily |
+
+`flights_near` never sends the exact position: the query centre is snapped to a 0.05° grid and
+the radius enlarged by 3 nm, then everything is measured here. Owner rules, LADD withholding and
+the sources' terms are in `docs/security.md` ("Aviation data"); the registry sync in
+`docs/operations.md`.
+
 ## Architecture
 
 ```
@@ -81,7 +95,10 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   `military_awareness`), ALPR locations (`ALLOW_ALPR_TOOLS`), place-name arguments
   (`GEV_PLACE_NAMES`, needs a Nominatim GEV can use).
 * Quotas (`TOOL_RATE_LIMITS`): TomTom traffic 20/h and 150/d, OSRM routes 30/h, camera snapshots
-  60/h, imagery 20/h, regional news 30/h, place lookups 30/h.
+  60/h, imagery 20/h, regional news 30/h, place lookups 30/h; `AVIATION_RATE_LIMITS` adds
+  `flights_near` 60/h and 600/d and `aircraft_lookup` 120/h for buckets `TOOL_RATE_LIMITS` does
+  not set. Outbound: adsb.fi at most one request per 1.1 s, adsb.lol at most `ADSBLOL_DAILY_MAX`
+  (100) calls a day.
 * Every call: ajv validation (a failure returns the schema), 110 s timeout, at most 4 at once.
 * Every result: one copy of the data (GEV duplicates it), `data.view` stripped (its link kept as
   `map_url`), internal GEV links rewritten to the tailnet UI origin, third-party links flagged as
@@ -113,11 +130,13 @@ src/            gateway (TypeScript, ESM)
   pulse/        Pulse HTTP client + tools                oauth/      authorization server, CIMD, DCR, tokens
   auth/         tailscale, step-up TOTP, dev login, CSRF location/   device tokens, ingest, /locate
   ui/           GEV reverse proxy, /pulse                http/       headers, Host/Origin checks, rate limits
+  extra/aviation/  flights_near, aircraft_lookup, FAA registry sync
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
 web/            /locate PWA and shared CSS
 scripts/        devices, stepup, hash-password, backup-db, revoke-all, smoke-live, gev-relay,
-                egress-probe, build-gev.sh, tighten-permissions.sh, rail data build/fetch, audit
+                egress-probe, build-gev.sh, tighten-permissions.sh, rail data build/fetch, audit,
+                aircraft-registry-sync
 deploy/         docker (image, compose, Tailscale sidecar), host-firewall (root), systemd units,
                 GEV notes, secrets README
 docs/           cloudflare-setup, tailscale-setup, host-firewall, phone-setup, operations, security,
@@ -139,5 +158,7 @@ test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
 
 God's Eye View is © 2026 Bilawal Sidhu, MIT; `gev/stdio-all-surfaces.mjs` is adapted from it (see
 `third_party/gods-eye-view/`). GEV's data sources keep their own terms; the gateway appends their
-attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. This repository is
+attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. Live aircraft: adsb.fi
+(https://adsb.fi; personal, non-commercial use) and adsb.lol (https://adsb.lol; ODbL 1.0).
+Aircraft registry: FAA Releasable Aircraft Database (US government data). This repository is
 public, for personal, non-commercial use; it holds no secrets or personal data.

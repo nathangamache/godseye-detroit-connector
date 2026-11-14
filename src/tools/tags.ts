@@ -54,6 +54,8 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   find_aircraft: 'aviation',
   get_aircraft_track: 'aviation',
   get_aircraft_info: 'aviation',
+  flights_near: 'aviation',
+  aircraft_lookup: 'aviation',
   vessels_in_area: 'maritime',
   find_vessel: 'maritime',
   get_vessel_track: 'maritime',

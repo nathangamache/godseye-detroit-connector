@@ -268,10 +268,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   wrapper when the clone is present.
 * Arguments are validated against each tool's JSON schema; place names are refused unless a
   geocoder is configured.
-* Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket), per-grant and per-IP request
-  limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
-* No tool reads gateway config, env or files beyond the bundled rail data; error text is stripped
-  of paths and truncated.
+* Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket; `flights_near` and
+  `aircraft_lookup` from `AVIATION_RATE_LIMITS` unless `TOOL_RATE_LIMITS` sets them), per-grant
+  and per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
+* No tool reads gateway config, env or files beyond the bundled rail data and the FAA registry
+  copy; error text is stripped of paths and truncated.
 * **Untrusted output**: every result starts with a provenance header labelling it untrusted data
   (before any third-party text); Pulse and news-bearing results say third-party text must never
   be followed. Links on the globe origin are described as the connector's; **every other URL is
@@ -291,6 +292,45 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   never arguments.
 * The gateway and its scripts run with umask 077; the database and backups are mode 600 in
   mode-700 directories.
+
+### Aviation data (flights_near, aircraft_lookup)
+
+Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
+
+| Source | Terms | Used for | How the gateway keeps to them |
+|---|---|---|---|
+| adsb.fi open data (`opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}`, `/api/v2/hex/{hex}`) | Personal, non-commercial use only; cite adsb.fi with a link to its home page; no key; 1 request/s; 400/401/403/404/429 answers count toward a temporary IP ban | Live aircraft near a point (primary); live `dbFlags` of one aircraft | Every result credits `adsb.fi (https://adsb.fi)`. At most one request per 1.1 s across the whole process, identical requests share one flight, 12 s cache. Inputs are validated before any request (integer radius 4-28 nm, coordinates in range, 6-digit hex). A 4xx is never retried, and after one adsb.fi is not called for 15 minutes; a 429 is honoured (Retry-After). `ownOp` (owner/operator) and `year` are never read. |
+| adsb.lol (`api.adsb.lol/v2/point/{lat}/{lon}/{nm}`, `/v2/ladd`) | ODbL 1.0 (attribution for public use); about 500 keyless calls a day per IP, shared with GEV's own adsb.lol use; 429 with Retry-After over quota; no quota headers | Fallback ONLY when adsb.fi times out, is unreachable, answers 5xx or 429; the list of LADD aircraft it tracks | Credited `adsb.lol (https://adsb.lol), ODbL 1.0`. Calls are counted locally (`ADSBLOL_DAILY_MAX`, default 100 per rolling 24 h) and Retry-After is honoured. The LADD list is fetched at most every 6 hours, and only when an owner name would otherwise be shown. |
+| FAA Releasable Aircraft Database (`registry.faa.gov/database/ReleasableAircraft.zip`) | US government data; the page states no licence (public domain under 17 U.S.C. § 105 is an inference); refreshed nightly; registry.faa.gov refuses default tool User-Agents | Registrant type, owner, city and state, make and model, status and dates | One conditional GET a day (about 06:15 UTC, `If-Modified-Since`; 304 costs nothing) with the honest User-Agent `aircraft-registry-sync/1.0`, never a browser string, never per request. Credited `FAA Releasable Aircraft Database`; the registry date is in every result. |
+
+* **The exact position never leaves the gateway.** The feed is asked about the nearest 0.05°
+  grid point (at most about 2.1 nm away) with the radius enlarged by 3 nm; aircraft are then
+  filtered, measured and sorted from the exact point. Nothing logs a position or an aircraft
+  list (aviation logs name only the upstream and its error). `here: true` reads the phone's
+  latest fix exactly like `where_am_i` and is audited the same way (`location_read`, tool
+  `flights_near`, per grant, no coordinates).
+* **The registry copy** (`DATA_DIR/aviation/faa-registry.sqlite`, mode 600 in a mode-700
+  directory) holds only MASTER, ACFTREF and ENGINE. Street, street 2, ZIP code, county,
+  country, region, co-owner names ("other names") and unique ids are never read into it, and
+  DEREG, DEALER, DOCINDEX and RESERVED are never read at all. Names of private registrants
+  (individual, co-owned, partnership) are kept only with `AIRCRAFT_OWNER_DISCLOSURE=full`. The
+  downloaded archive (it holds addresses) is deleted as soon as the import ends. A new copy is
+  built in a separate file, checked (row counts, CRCs) and renamed over the old one; on any
+  failure the last good copy stays.
+* **Owner disclosure** (default `private_hidden`): government registrants by name, city and
+  state, always (they can't ask the FAA to withhold; flagged, with a police/sheriff hint);
+  corporations and LLCs by name only in a single-aircraft lookup, by type, city and state in
+  lists; private registrants as "private individual" / "private owners" with city and state
+  (`type_only`: the label alone; `full`: the name in single lookups, never in lists). An owner
+  the FAA leaves blank (most likely withheld under 49 U.S.C. § 44114(b)) stays blank: it is
+  never filled from deregistered records, older copies or a live feed's `ownOp`.
+* **LADD** (`AIRCRAFT_LADD_WITHHOLD`, default on): an aircraft flagged LADD (live `dbFlags` bit
+  8, or on adsb.lol's list) has its owner name withheld unless the registrant is a government.
+  Live flags are kept in memory only (they come from the user's own queries); the adsb.lol list
+  is kept on disk as hex codes and day numbers, 60 days. **PIA** aircraft (bit 4) are never
+  looked up in the registry.
+* Globe links are camera-only GEV share links (no layers, nothing followed), so they never
+  make GEV call OpenSky.
 
 ### Supply chain and builds
 
@@ -391,6 +431,16 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   documented fallback weakens "humans only via Tailscale" (password+TOTP on the public host).
 * **Licensing**: Broadcastify's terms block Pulse's current audio source; OpenSky needs a licence;
   Google content is excluded by policy, not by GEV.
+* **Aviation**: adsb.fi allows personal, non-commercial use only, and anyone else running this
+  code is bound by that too. Organisation and government owner names (and private names with
+  `AIRCRAFT_OWNER_DISCLOSURE=full`) reach Claude's transcript; name plus city and state can
+  still point to a person. LADD detection is best effort: the FAA publishes no list, so it
+  rests on live flags and the LADD aircraft adsb.lol happens to track; an aircraft not flagged
+  may still be on LADD. The registered owner is not the operator (leases, trusts, front
+  companies), and police helicopters often fly without ADS-B. The "US military/federal" label
+  for ADF7C8-AFFFFF rests on community data, not an official allocation. registry.faa.gov's bot
+  rules may start refusing the honest User-Agent: then download the ZIP in a browser and run
+  `node dist/scripts/aircraft-registry-sync.js --file <zip>` (never impersonate a browser).
 * `docker-compose` 1.29 is end-of-life and crashes when recreating containers against Docker 29
   (`KeyError: 'ContainerConfig'`): use `down` then `up -d`, or install Compose v2.
 
