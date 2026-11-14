@@ -37,6 +37,7 @@ import { ToolRunner } from '../src/tools/runner.js';
 import { haversineM } from '../src/util/geo.js';
 import {
   FAKE_FLEET,
+  SECRET_POSTCODE,
   SECRET_STREET,
   SECRET_ZIP,
   fakeRegistryZip,
@@ -525,14 +526,23 @@ describe('aircraft_lookup', () => {
       drone: true,
       weight_class: 'UAV (drone) up to 55 lb',
     });
-    for (const r of [priv, co, blank, drone]) {
+    // Abroad, the FAA put a postal code into CITY: no CITY is shown at all.
+    const abroad = await h.run('aircraft_lookup', { registration: 'N111FR' });
+    expect(data(abroad).aircraft.registrant).toMatchObject({
+      owner: 'private individual',
+      withheld: 'policy',
+    });
+    expect(data(abroad).aircraft.registrant.city).toBeUndefined();
+    for (const r of [priv, co, blank, drone, abroad]) {
       const t = text(r);
       for (const leak of [
         'PRIVATE EXAMPLE PERSON',
         'COOWNED EXAMPLE PERSON',
         'COOWNER EXAMPLE',
+        'ABROAD EXAMPLE PERSON',
         SECRET_STREET,
         SECRET_ZIP,
+        SECRET_POSTCODE,
         'DEREG EXAMPLE PERSON',
       ])
         expect(t).not.toContain(leak);

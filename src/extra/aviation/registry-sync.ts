@@ -21,6 +21,7 @@ import Database from 'better-sqlite3';
 import type { Logger } from '../../log.js';
 import { REGISTRANT_TYPES } from './codes.js';
 import { REGISTRY_USER_AGENT, type FetchFn } from './http.js';
+import { registrantCity } from './owner.js';
 import {
   REGISTRY_FILE,
   REGISTRY_INDEXES,
@@ -189,7 +190,8 @@ export async function importRegistryZip(
     }
 
     // Only these MASTER columns are ever read. STREET, STREET2, ZIP CODE, COUNTY, COUNTRY,
-    // REGION, OTHER NAMES(1-5) and UNIQUE ID are not.
+    // REGION, OTHER NAMES(1-5) and UNIQUE ID are not. A CITY holding a digit (a postal code or
+    // house number, for registrants abroad) is not kept either.
     const insAc = db.prepare(
       'INSERT OR IGNORE INTO aircraft VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
@@ -222,7 +224,7 @@ export async function importRegistryZip(
           orNull(type),
           keepName ? rawName : null,
           rawName === '' ? 1 : 0,
-          orNull(g('CITY')),
+          registrantCity(g('CITY')) ?? null,
           orNull(g('STATE')),
           orNull(g('LAST ACTION DATE')),
           orNull(g('CERT ISSUE DATE')),

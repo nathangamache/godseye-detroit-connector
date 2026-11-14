@@ -211,6 +211,46 @@ describe('adsb.fi with adsb.lol fallback', () => {
     await expect(th.wait(undefined, 1000)).rejects.toThrow(/queued/);
   });
 
+  it('sends nothing queued behind the throttle once adsb.fi answers 4xx or 429', async () => {
+    // A real interval, so concurrent calls wait in the throttle while the first one fails.
+    const queued = (respond: Responder) => {
+      const f = scriptedFetch(respond);
+      const up = new Upstreams({ intervalMs: 40 });
+      const c = new LiveClient({ fetch: f, upstreams: up, lolDailyMax: 100, timeoutMs: 1000 });
+      return { f, c, fi: () => f.calls.filter((x) => x.url.includes('adsb.fi')).length };
+    };
+    const cells = [1, 2, 3, 4].map((i) => ({ lat: i, lon: i }));
+    const hexes = ['a00001', 'a00002', 'a00003', 'a00004', 'a00005'];
+
+    // 403 on near(): one request; the queued calls are refused without one, and no fallback.
+    const forbidden = queued((url) => (url.includes('adsb.fi') ? json({}, 403) : json(FEED)));
+    const near403 = await Promise.allSettled(cells.map((p) => forbidden.c.near(p, 8)));
+    expect(forbidden.fi()).toBe(1);
+    expect(forbidden.f.calls).toHaveLength(1);
+    for (const r of near403)
+      expect(r).toMatchObject({ status: 'rejected', reason: { kind: 'refused' } });
+
+    // 404 on byHex(): one request, null for every caller.
+    const missing = queued(() => json({}, 404));
+    expect(await Promise.all(hexes.map((h) => missing.c.byHex(h)))).toEqual(hexes.map(() => null));
+    expect(missing.fi()).toBe(1);
+
+    // 429 on near(): one request; the queued calls go to adsb.lol instead.
+    const limited = queued((url) =>
+      url.includes('adsb.fi') ? json({}, 429, { 'retry-after': '120' }) : json(FEED),
+    );
+    const near429 = await Promise.all(cells.slice(0, 3).map((p) => limited.c.near(p, 8)));
+    expect(limited.fi()).toBe(1);
+    expect(near429.map((s) => s.source)).toEqual(['adsb.lol', 'adsb.lol', 'adsb.lol']);
+    expect(near429.filter((s) => /asked to wait/.test(s.fallback_reason ?? ''))).toHaveLength(2);
+
+    // 429 on byHex(): one request, null for every caller.
+    const limitedHex = queued(() => json({}, 429));
+    const three = hexes.slice(0, 3);
+    expect(await Promise.all(three.map((h) => limitedHex.c.byHex(h)))).toEqual([null, null, null]);
+    expect(limitedHex.fi()).toBe(1);
+  });
+
   it('looks up one hex (live flags) and the LADD list', async () => {
     const { f, c } = client((url) =>
       url.endsWith('/v2/ladd')

@@ -12,7 +12,9 @@
  *  - LADD aircraft (AIRCRAFT_LADD_WITHHOLD, default true): no owner name unless government;
  *  - an owner the FAA file leaves blank stays blank (likely withheld at the owner's request under
  *    49 U.S.C. 44114(b)): never filled from deregistered records, old copies or a live feed.
- * No street address or ZIP code exists anywhere in the copy, so none can be shown.
+ * No street address or ZIP code exists anywhere in the copy, so none can be shown. For
+ * registrants abroad (STATE blank) the FAA sometimes puts a postal code or a house number into
+ * CITY, so a CITY with any digit in it is never stored or shown (`registrantCity`).
  */
 import {
   AIRCRAFT_CATEGORIES,
@@ -58,6 +60,16 @@ export interface OwnerView {
 
 const text = (v: string | null | undefined, max = 60) => cleanText(v ?? undefined, max);
 
+/**
+ * A registrant's CITY as it may be kept and shown, or undefined. A CITY holding any digit is a
+ * postal code or a house number put there by the FAA (registrants abroad): it is dropped whole,
+ * not split, since the words left over could still be part of a street address.
+ */
+export function registrantCity(v: string | null | undefined): string | undefined {
+  const city = text(v, 30);
+  return city && !/\p{N}/u.test(city) ? city : undefined;
+}
+
 export function ownerView(
   rec: RegistryRecord,
   policy: OwnerPolicy,
@@ -72,7 +84,7 @@ export function ownerView(
     registrant_kind: kind,
     government: kind === 'government',
   };
-  const place = { city: text(rec.city, 30), state: text(rec.state, 2) };
+  const place = { city: registrantCity(rec.city), state: text(rec.state, 2) };
   if (rec.name_blank) {
     return {
       ...base,

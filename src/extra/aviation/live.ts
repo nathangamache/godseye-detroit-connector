@@ -6,7 +6,8 @@
  * temporary IP ban, so: one request at a time with at least 1.1 s between them across the whole
  * process, identical requests share one flight (single-flight) and a 12 s cache, inputs are
  * validated before any request, and a 4xx is never retried (after one, adsb.fi is left alone
- * for 15 minutes).
+ * for 15 minutes; after a 429, for its Retry-After). Both holds are checked again once a request
+ * has waited its turn, so nothing already queued is sent after such an answer.
  *
  * Fallback: adsb.lol (ODbL 1.0), ONLY when adsb.fi times out, fails with a 5xx or answers 429.
  * It allows a few hundred keyless calls a day per IP (shared with anything else on this host)
@@ -237,6 +238,13 @@ function describe(e: HttpError): string {
 
 const hhmm = (t: number) => new Date(t).toISOString().slice(11, 16) + ' UTC';
 
+/** adsb.fi asked to wait (429): no request is sent, but a caller may use the fallback. */
+class FiCooldown extends LiveError {
+  constructor(until: number) {
+    super('retry_later', `adsb.fi asked to wait (rate limit) until ${hhmm(until)}`);
+  }
+}
+
 export class LiveClient {
   readonly up: Upstreams;
   private readonly now: () => number;
@@ -280,11 +288,21 @@ export class LiveClient {
     return undefined;
   }
 
+  /** Why adsb.fi must not be asked now: backed off after a 4xx, or asked to wait (429). */
+  private fiHold(): LiveError | undefined {
+    if (this.up.fiCooldownUntil > this.now()) return new FiCooldown(this.up.fiCooldownUntil);
+    return this.fiRefusal();
+  }
+
   /** One adsb.fi GET with the throttle and the 4xx/429 bookkeeping. */
   private async fiGet(url: string, signal?: AbortSignal): Promise<unknown> {
-    const refused = this.fiRefusal();
-    if (refused) throw refused;
+    const before = this.fiHold();
+    if (before) throw before;
     await this.up.fiThrottle.wait(signal);
+    // Checked again after the wait: a request queued behind one that earned a 4xx or 429 is
+    // not sent (adsb.fi counts every such answer toward its IP ban).
+    const after = this.fiHold();
+    if (after) throw after;
     try {
       return await this.get(url, signal);
     } catch (err) {
@@ -368,25 +386,22 @@ export class LiveClient {
 
   private async fetchNear(lat: string, lon: string, r: number, signal?: AbortSignal) {
     let fallback: string;
-    if (this.up.fiCooldownUntil > this.now()) {
-      fallback = `adsb.fi asked to wait (rate limit) until ${hhmm(this.up.fiCooldownUntil)}`;
-    } else {
-      try {
-        const json = await this.fiGet(`${this.fiBase}/v3/lat/${lat}/lon/${lon}/dist/${r}`, signal);
-        const feed = parseFeed(json);
-        return this.snapshot('adsb.fi', feed, r);
-      } catch (err) {
-        if (err instanceof LiveError) throw err;
-        if (!(err instanceof HttpError)) throw err;
-        if (err.kind === 'cancelled') throw new LiveError('cancelled', 'cancelled');
-        if (!err.transient) {
-          throw new LiveError(
-            err.kind === 'status' ? 'refused' : 'unavailable',
-            `adsb.fi answered ${describe(err)}; not retried`,
-          );
-        }
-        fallback = `adsb.fi ${describe(err)}`;
-      }
+    try {
+      const json = await this.fiGet(`${this.fiBase}/v3/lat/${lat}/lon/${lon}/dist/${r}`, signal);
+      const feed = parseFeed(json);
+      return this.snapshot('adsb.fi', feed, r);
+    } catch (err) {
+      // A 429 cool-down (now, or set while this call waited in the throttle): use adsb.lol.
+      if (err instanceof FiCooldown) fallback = err.message;
+      else if (err instanceof LiveError) throw err;
+      else if (!(err instanceof HttpError)) throw err;
+      else if (err.kind === 'cancelled') throw new LiveError('cancelled', 'cancelled');
+      else if (!err.transient)
+        throw new LiveError(
+          err.kind === 'status' ? 'refused' : 'unavailable',
+          `adsb.fi answered ${describe(err)}; not retried`,
+        );
+      else fallback = `adsb.fi ${describe(err)}`;
     }
     try {
       const json = await this.lolGet(`${this.lolBase}/v2/point/${lat}/${lon}/${r}`, signal);
@@ -423,7 +438,7 @@ export class LiveClient {
     const key = `hex:${h}`;
     const cached = this.up.cache.get(key);
     if (cached && this.now() - cached.at <= 30_000) return cached.value.aircraft[0];
-    if (this.up.fiCooldownUntil > this.now() || this.fiRefusal()) return null;
+    if (this.fiHold()) return null;
     try {
       return await this.once(key, async () => {
         const feed = parseFeed(await this.fiGet(`${this.fiBase}/v2/hex/${h}`, signal));

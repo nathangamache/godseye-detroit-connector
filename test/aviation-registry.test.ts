@@ -18,6 +18,7 @@ import {
   parseHex,
   toHex,
 } from '../src/extra/aviation/nnumber.js';
+import { ownerSentence, ownerView } from '../src/extra/aviation/owner.js';
 import { RegistryStore } from '../src/extra/aviation/registry-store.js';
 import {
   RegistrySync,
@@ -30,6 +31,8 @@ import { openZipEntry, readZipEntries } from '../src/extra/aviation/zip.js';
 import {
   FAKE_FLEET,
   SECRET_COOWNER,
+  SECRET_POSTCODE,
+  SECRET_POSTCODE_CITY,
   SECRET_STREET,
   SECRET_ZIP,
   fakeRegistryZip,
@@ -183,6 +186,32 @@ describe('importer', () => {
       name_blank: 1,
       type_registrant: '1',
     });
+    store.close();
+  });
+
+  it('drops a CITY that holds a postal code or house number, at import and when shown', async () => {
+    const { out } = await build(false);
+    const bytes = readFileSync(out).toString('latin1');
+    expect(bytes).not.toContain(SECRET_POSTCODE);
+    expect(bytes).not.toContain(SECRET_POSTCODE_CITY);
+    const store = new RegistryStore(dir);
+    const abroad = store.byNNumber('N111FR')!;
+    expect(abroad).toMatchObject({ type_registrant: '1', city: null, state: null });
+    // A copy built before this rule (or any other path) still never shows such a CITY.
+    const policy = { disclosure: 'private_hidden', laddWithhold: true } as const;
+    const priv = store.byNNumber('N101AA')!;
+    for (const city of [SECRET_POSTCODE_CITY, '98765 EXAMPLEBURG', '987 EXAMPLE ROAD EXAMPLETON']) {
+      for (const rec of [
+        { ...abroad, city },
+        { ...priv, city },
+      ])
+        for (const context of ['lookup', 'list'] as const) {
+          const view = ownerView(rec, policy, false, context);
+          expect(view.city).toBeUndefined();
+          expect(ownerSentence(view)).not.toMatch(/\d/);
+        }
+    }
+    expect(ownerView(priv, policy, false, 'lookup')).toMatchObject({ city: 'LANSING' });
     store.close();
   });
 

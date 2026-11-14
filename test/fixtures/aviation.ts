@@ -130,6 +130,12 @@ export interface FakeAircraft {
 export const SECRET_STREET = '123 EXAMPLE PRIVATE LANE';
 export const SECRET_ZIP = '00999-1234';
 export const SECRET_COOWNER = 'COOWNER EXAMPLE PERSON';
+/**
+ * A CITY the way the FAA sometimes fills it for a registrant abroad (STATE blank): a postal
+ * code, or a house number, in front of the town. Neither may be shown or stored.
+ */
+export const SECRET_POSTCODE = 'A-98765';
+export const SECRET_POSTCODE_CITY = `${SECRET_POSTCODE} EXAMPLESTADT`;
 
 export function masterRow(a: FakeAircraft): string[] {
   const n = a.n.replace(/^N/, '');
@@ -257,6 +263,8 @@ export const FAKE_FLEET: FakeAircraft[] = [
     state: 'MI',
     noModeS: true,
   },
+  // A private registrant abroad whose CITY holds a postal code (STATE blank).
+  { n: 'N111FR', type: '1', name: 'ABROAD EXAMPLE PERSON', city: SECRET_POSTCODE_CITY, state: '' },
 ];
 
 export function fakeRegistryZip(
