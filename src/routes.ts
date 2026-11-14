@@ -12,6 +12,7 @@ import { makeCimdFetcher, type CimdFetcher } from './oauth/cimd.js';
 import { ClientRegistry } from './oauth/clients.js';
 import { installOAuth } from './oauth/routes.js';
 import { installLocation } from './location/routes.js';
+import { installUi } from './ui/routes.js';
 
 export type RouteInstaller = (app: Express, ctx: AppContext, gw: GatewayCore) => void;
 
@@ -42,6 +43,8 @@ export function installAllRoutes(opts: RouteOptions = {}): RouteInstaller[] {
       installOAuth(app, ctx, { config, audit: gw.audit, tokens: gw.tokens, clients, login, csrf, locations: gw.locations, now: gw.now });
       installLocation(app, ctx, { config, locations: gw.locations, audit: gw.audit, login, logger: gw.logger, webRoot: WEB_ROOT, now: gw.now });
       opts.onReady?.({ login, csrf, clients });
+      // Must be last: "/" falls through to the GEV reverse proxy.
+      installUi(app, ctx, { config, login, logger: gw.logger });
     },
   ];
 }
