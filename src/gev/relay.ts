@@ -139,6 +139,12 @@ export function startRelay(opts: RelayOptions): Promise<Relay> {
         },
       );
       live.add(child);
+      // A spawn failure (missing wrapper or clone) ends this session, never the relay.
+      child.on('error', (err) => {
+        live.delete(child);
+        log('relay_spawn_failed', { peer, error: err.message });
+        sock.destroy();
+      });
       log('relay_session', { peer, tools: allow.length, pid: child.pid });
       const rest = buf.subarray(nl + 1);
       if (rest.length) child.stdin.write(rest);

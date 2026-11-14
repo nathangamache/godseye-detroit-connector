@@ -83,6 +83,31 @@ describe('GEV relay (child in its own container)', () => {
     expect(relay.sessions()).toBe(1);
   });
 
+  it('survives a child that cannot be spawned', async () => {
+    const events: string[] = [];
+    relay = await startRelay({
+      host: '127.0.0.1',
+      port: 0,
+      allowedPeers: ['127.0.0.1'],
+      healthPeers: [],
+      gevRoot: '/nonexistent-gev-root',
+      gevUrl: 'http://127.0.0.1:7701',
+      wrapper: MOCK_GEV,
+      log: (e) => events.push(e),
+    });
+    child = new GevChild({
+      connect: { host: '127.0.0.1', port: relay.port, allow: ['get_weather'] },
+      logger: nullLogger,
+      minBackoffMs: 10_000,
+    });
+    await child.start();
+    expect(child.isReady()).toBe(false);
+    await waitFor(() => events.includes('relay_spawn_failed'), 5000);
+    expect(relay.sessions()).toBe(0);
+    // The relay still serves the next session.
+    expect(relay.server.listening).toBe(true);
+  });
+
   it('refuses peers other than the gateway', async () => {
     relay = await mockRelay(['127.0.0.9']);
     child = new GevChild({
