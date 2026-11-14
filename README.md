@@ -113,9 +113,9 @@ every result carries its source's credit.
 | Tool | What it returns | Source | Key |
 |---|---|---|---|
 | `weather_alerts` | active NWS watches, warnings and advisories for the point: event, severity, urgency, certainty, headline, description, instruction, areas, onset, ends, issuing office, link; "No active alerts for zone …" when there are none | NWS `api.weather.gov` (public domain) | none |
-| `weather_forecast` | 12-hour periods (up to 7 days) or hourly (`hourly: true`), `periods` 1-14: temperature, wind, chance of precipitation, forecast text | NWS `/points` → forecast / forecastHourly; office/grid cached per ~1 km cell for 12 h | none |
+| `weather_forecast` | 12-hour periods (up to 7 days) or hourly (`hourly: true`), `periods` 1-14: temperature, wind, chance of precipitation, forecast text | NWS `/points` → forecast / forecastHourly; office/grid cached per ~1 km cell for 12 h; points NWS doesn't cover are remembered for 12 h (per ~100 m) or, far from every US area, never sent | none |
 | `water_levels_near` | Great Lakes and tide stations, stream gages and NWS river gauges within `radius_km` (5-60): value, units, datum, ~3 h trend, flood stage and NWS flood category when known, update time | NOAA CO-OPS, USGS Water Data OGC API, NWS National Water Prediction Service (public domain) | `USGS_API_KEY` optional (else the shared `DEMO_KEY`) |
-| `air_quality` | current AQI by pollutant and the agency forecast (with Action Days) for the nearest reporting area within `distance_mi` (5-50), passed through unaltered and labelled preliminary | EPA AirNow (Michigan EGLE for Michigan) | `AIRNOW_API_KEY`; **off** without it (`not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env`) |
+| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **off** without it (`not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env`) |
 
 Quotas (`WEATHER_TOOL_RATE_LIMITS`, overridable per bucket in `TOOL_RATE_LIMITS`): alerts 120/h,
 forecast 60/h, water levels 20/h, air quality 30/h. Outbound requests use https only, a fixed host

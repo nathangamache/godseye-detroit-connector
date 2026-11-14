@@ -296,16 +296,25 @@ as a location read.
 
 | Tool | Host(s) | Key | Terms / licence | Caching, limits |
 |---|---|---|---|---|
-| `weather_alerts`, `weather_forecast` | `api.weather.gov` | none (User-Agent required) | NWS: open data, free to use for any purpose, public domain; credit "National Weather Service" | office/grid per ~1 km cell 12 h, alerts 30 s, forecasts ≤ 10 min; 120/h and 60/h |
+| `weather_alerts`, `weather_forecast` | `api.weather.gov` | none (User-Agent required) | NWS: open data, free to use for any purpose, public domain; credit "National Weather Service" | office/grid per ~1 km cell 12 h, "no data here" per ~100 m cell 12 h, alerts 30 s, forecasts ≤ 10 min; 120/h and 60/h |
 | `water_levels_near` | `api.tidesandcurrents.noaa.gov` | none | NOAA CO-OPS, public domain | station list 24 h, flood levels 24 h |
 | | `api.waterdata.usgs.gov` | `USGS_API_KEY` (header `X-Api-Key`), else the shared `DEMO_KEY` | USGS, public domain; values provisional | 10 min (DEMO_KEY limits are low); 20/h for the tool |
 | | `api.water.noaa.gov` (NWPS) | none | NOAA NWS, public domain | gauge list 10 min, flood stages 24 h |
-| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **off** without it | AirNow Data Exchange Guidelines: preliminary data, credit the agency (Michigan EGLE) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
+| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **off** without it | AirNow Data Exchange Guidelines: preliminary data, credit the agency (as AirNow names it; Michigan EGLE in Michigan) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
 
-* AirNow retired its old lat/long services on 2026-09-30 (its June 2026 notice); the tool asks
-  the replacement services first with the old parameters, whose documentation is behind the
-  AirNow login (unverified), and falls back to the old paths on a path or parameter error.
-  Records in an unexpected format are passed through as received, never reinterpreted.
+* AirNow retired its old lat/long services on 2026-09-30 (its June 2026 notice). The tool asks
+  only the replacement services (`/aq/observation/current/ziplatlong/`, `/aq/forecast/current/`)
+  with `format`, `latitude`, `longitude` and the key; they pick the reporting area with their own
+  lookup boundary, so no distance is sent, and the retired paths are never tried. Their record
+  shape (nowcastAQI, aqiCategoryName, reportingAgency, dateValid, ...) matches responses recorded
+  from the live services in September 2026 by an open-source client's test suite; check it once
+  `AIRNOW_API_KEY` is set. AirNow's "There are no ..." answer is an empty result; any other
+  AirNow error message is shown with the key masked. Records in an unexpected format are passed
+  through as received, never reinterpreted.
+* NWS covers only the US, its territories and adjacent waters. A point far from all of them is
+  answered without a request; a `/points` 404 or an alerts "out of bounds" 400 is remembered for
+  12 h per ~100 m cell (fine enough that a cell can't span both banks of a border river), so the
+  same point doesn't earn the same 4xx again.
 * A missing key switches a tool off in the policy (hidden from `find_tools`; `run_tool` answers
   "not configured: set … in deploy/secrets/gateway.env") and the tool makes no request.
 

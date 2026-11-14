@@ -1,19 +1,24 @@
 /**
  * EPA AirNow (www.airnowapi.org, free key in AIRNOW_API_KEY; off without one): current AQI
- * observations and forecasts by reporting area near a point.
+ * observations and forecasts for the reporting area AirNow matches to a point.
  *
  * AirNow's Data Exchange Guidelines: observations are preliminary and must be shown as such;
- * credit the reporting agency (Michigan EGLE for Michigan) and EPA AirNow; values, forecasts,
- * advisories and their names must not be altered. So every value here is passed through as
- * received (an AQI of -1 included: AirNow's way of saying a forecast gives only a category).
+ * credit the reporting agency and EPA AirNow; values, forecasts, advisories and their names must
+ * not be altered. So every value here is passed through as received (an AQI of -1 included:
+ * AirNow's way of saying a forecast gives only a category).
  * AirNow recommends caching (observations change hourly, forecasts daily): answers are cached
  * for 30 minutes.
  *
- * AirNow's June 2026 notice retired the old lat/long services on 2026-09-30 in favour of
- * "Current Observations by Latitude/Longitude or ZIP Code" (/aq/observation/current/ziplatlong/)
- * and "Current Forecasts by Reporting Area" (/aq/forecast/current/). Their parameter docs are
- * behind the AirNow login, so the new paths are asked first with the old services' parameters,
- * and the old paths are tried if AirNow says the path or the parameters are wrong.
+ * The services are the ones AirNow's June 2026 notice introduced (the old lat/long services were
+ * retired on 2026-09-30, so they are never asked): "Current Observations by Latitude/Longitude or
+ * ZIP Code" (/aq/observation/current/ziplatlong/) and "Current Forecasts by Reporting Area"
+ * (/aq/forecast/current/). Both take format, latitude, longitude and the key. AirNow picks the
+ * reporting area with its own fixed lookup boundary, so no distance is sent. Records are
+ * lowerCamelCase: observations carry nowcastAQI, aqiCategoryName, reportingAreaName,
+ * hourObserved ("14:00"), siteName and reportingAgency, but no stateCode; forecasts carry aqi,
+ * categoryName, categoryNumber, reportingArea, stateCode, dateValid and forecastAgency.
+ * "Nothing matched" comes as {"WebServiceError":[{"Message":"There are no ..."}]}: an empty
+ * answer, not an error.
  */
 import { z } from 'zod';
 import type { ToolDef, ToolOutput } from '../../tools/types.js';
@@ -23,10 +28,12 @@ import {
   cleanText,
   coord,
   jsonSchemaOf,
+  oneLine,
   parseArgs,
   pointData,
   pointPhrase,
   resolvePoint,
+  str,
   type PhoneDeps,
   type ResolvedPoint,
 } from './common.js';
@@ -38,16 +45,17 @@ export const AIRNOW_ATTRIBUTION =
   'Preliminary data, not fully verified; source: the reporting air quality agency (Michigan EGLE for Michigan) and U.S. EPA AirNow (airnow.gov)';
 const CACHE_MS = 30 * 60_000;
 
-const PATHS = {
-  observations: ['/aq/observation/current/ziplatlong/', '/aq/observation/latLong/current/'],
-  forecast: ['/aq/forecast/current/', '/aq/forecast/latLong/'],
+export const AIRNOW_PATHS = {
+  observations: '/aq/observation/current/ziplatlong/',
+  forecast: '/aq/forecast/current/',
 } as const;
-/** Statuses that mean "not this path / not these parameters": try the older path. */
-const FALLBACK_STATUS = new Set([301, 302, 303, 307, 308, 400, 404, 410]);
+
+/** AirNow's wording for "nothing matched" (not an error). */
+const NO_DATA = /^(Error - )?There (are|is) no /i;
 
 type Rec = Record<string, unknown>;
 
-/** Case-insensitive field lookup (AirNow's JSON uses PascalCase). */
+/** Case-insensitive field lookup (exact names first). */
 function field(o: Rec, ...names: string[]): unknown {
   for (const n of names) if (n in o) return o[n];
   const lower = new Map(Object.keys(o).map((k) => [k.toLowerCase(), k]));
@@ -65,13 +73,20 @@ export interface AqValue {
   category_number: unknown;
 }
 
+export interface AqObservedValue extends AqValue {
+  /** The monitoring site the reading came from (AirNow: closest reading by pollutant). */
+  site: unknown;
+  agency: unknown;
+}
+
 export interface AqObservationArea {
   reporting_area: unknown;
   state: unknown;
   date_observed: unknown;
   hour_observed: unknown;
   time_zone: unknown;
-  values: AqValue[];
+  lookup_boundary: unknown;
+  values: AqObservedValue[];
 }
 
 export interface AqForecast extends AqValue {
@@ -79,6 +94,7 @@ export interface AqForecast extends AqValue {
   state: unknown;
   date_issue: unknown;
   date_forecast: unknown;
+  agency: unknown;
   action_day: unknown;
   discussion: string | null;
 }
@@ -94,18 +110,31 @@ function records(body: unknown): Rec[] {
   return [];
 }
 
+/** The messages of AirNow's {"WebServiceError":[{"Message":"..."}]} envelope, or null. */
+export function serviceErrors(body: unknown): string[] | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const list = field(body as Rec, 'WebServiceError');
+  if (!Array.isArray(list)) return null;
+  return list
+    .map((m) => (m && typeof m === 'object' ? field(m as Rec, 'Message') : m))
+    .filter((m): m is string => typeof m === 'string' && m.trim() !== '');
+}
+
+const trimmed = (v: unknown) => (typeof v === 'string' ? v.trim() : (v ?? null));
+
 function value(r: Rec): AqValue | null {
-  const pollutant = field(r, 'ParameterName', 'Parameter', 'Pollutant');
-  const aqi = field(r, 'AQI', 'Aqi');
+  const pollutant = field(r, 'parameterName', 'Parameter', 'Pollutant');
+  // Observations: nowcastAQI / aqiCategoryName; forecasts: aqi / categoryName.
+  const aqi = field(r, 'nowcastAQI', 'AQI');
   const cat = field(r, 'Category');
   const catName =
     cat && typeof cat === 'object'
       ? field(cat as Rec, 'Name', 'CategoryName')
-      : field(r, 'CategoryName');
+      : field(r, 'aqiCategoryName', 'categoryName');
   const catNum =
     cat && typeof cat === 'object'
       ? field(cat as Rec, 'Number', 'CategoryNumber')
-      : field(r, 'CategoryNumber');
+      : field(r, 'categoryNumber', 'aqiCategoryNumber');
   if (pollutant === undefined || (aqi === undefined && catName === undefined)) return null;
   return {
     pollutant,
@@ -124,25 +153,30 @@ export function parseObservations(body: unknown): { areas: AqObservationArea[]; 
       unparsed.push(r);
       continue;
     }
-    const area = field(r, 'ReportingArea', 'ReportingAreaName');
-    const state = field(r, 'StateCode', 'State');
-    const date = field(r, 'DateObserved');
-    const hour = field(r, 'HourObserved');
-    const tz = field(r, 'LocalTimeZone', 'TimeZone');
+    const area = field(r, 'reportingAreaName', 'ReportingArea');
+    const state = field(r, 'stateCode', 'State');
+    const date = field(r, 'dateObserved');
+    const hour = field(r, 'hourObserved');
+    const tz = field(r, 'localTimeZone', 'TimeZone');
     const key = JSON.stringify([area, state, date, hour, tz]);
     let a = areas.get(key);
     if (!a) {
       a = {
         reporting_area: area ?? null,
         state: state ?? null,
-        date_observed: typeof date === 'string' ? date.trim() : (date ?? null),
+        date_observed: trimmed(date),
         hour_observed: hour ?? null,
         time_zone: tz ?? null,
+        lookup_boundary: field(r, 'lookupBoundary') ?? null,
         values: [],
       };
       areas.set(key, a);
     }
-    a.values.push(v);
+    a.values.push({
+      ...v,
+      site: field(r, 'siteName') ?? null,
+      agency: field(r, 'reportingAgency', 'reportingAreaAgency') ?? null,
+    });
   }
   return { areas: [...areas.values()], unparsed };
 }
@@ -156,37 +190,51 @@ export function parseForecasts(body: unknown): { forecasts: AqForecast[]; unpars
       unparsed.push(r);
       continue;
     }
-    const issue = field(r, 'DateIssue');
-    const fc = field(r, 'DateForecast');
     forecasts.push({
-      reporting_area: field(r, 'ReportingArea', 'ReportingAreaName') ?? null,
-      state: field(r, 'StateCode', 'State') ?? null,
-      date_issue: typeof issue === 'string' ? issue.trim() : (issue ?? null),
-      date_forecast: typeof fc === 'string' ? fc.trim() : (fc ?? null),
+      reporting_area: field(r, 'reportingArea', 'reportingAreaName') ?? null,
+      state: field(r, 'stateCode', 'State') ?? null,
+      date_issue: trimmed(field(r, 'dateIssue')),
+      date_forecast: trimmed(field(r, 'dateValid', 'DateForecast')),
       ...v,
-      action_day: field(r, 'ActionDay') ?? null,
+      agency: field(r, 'forecastAgency', 'reportingAgency') ?? null,
+      action_day: field(r, 'actionDay') ?? null,
       // Agency text: kept whole up to a generous cap, never reworded.
-      discussion: cleanText(field(r, 'Discussion'), 6000),
+      discussion: cleanText(field(r, 'discussion'), 6000),
     });
   }
   return { forecasts, unparsed };
 }
 
-/** The credit line the guidelines ask for, naming Michigan EGLE for Michigan areas. */
-export function airnowLabel(states: unknown[]): string {
+/**
+ * The credit line the guidelines ask for: the agencies AirNow names on the records, else the
+ * state's agency (Michigan EGLE for Michigan), else the reporting agency in general.
+ */
+export function airnowLabel(states: unknown[], agencies: unknown[] = []): string {
+  const named = [
+    ...new Set(agencies.map((a) => str(a, 100)).filter((a): a is string => a !== null)),
+  ];
+  if (named.length) return `preliminary data; source: ${named.slice(0, 3).join(', ')} / EPA AirNow`;
   const s = new Set(
-    states.filter((x) => typeof x === 'string').map((x) => String(x).trim().toUpperCase()),
+    states
+      .filter((x): x is string => typeof x === 'string')
+      .map((x) => x.trim().toUpperCase())
+      .filter((x) => /^[A-Z]{2}$/.test(x)),
   );
-  if (s.size === 0 || (s.size === 1 && s.has('MI')))
-    return 'preliminary data; source: Michigan EGLE / EPA AirNow';
+  if (s.size === 0)
+    return 'preliminary data; source: the reporting air quality agency / EPA AirNow';
+  if (s.size === 1 && s.has('MI')) return 'preliminary data; source: Michigan EGLE / EPA AirNow';
   const other = [...s].filter((x) => x !== 'MI');
   return `preliminary data; source: ${s.has('MI') ? 'Michigan EGLE, ' : ''}the ${other.join('/')} air quality agency / EPA AirNow`;
 }
 
+/** AirNow explained what went wrong (its own message, cleaned, the key masked). */
+export class AirnowServiceError extends Error {}
+
+type Half<T> = T & { note: string | null };
+
 interface AirnowAnswer {
-  observations:
-    { areas: AqObservationArea[]; unparsed: Rec[]; service: string } | { error: string };
-  forecast: { forecasts: AqForecast[]; unparsed: Rec[]; service: string } | { error: string };
+  observations: Half<{ areas: AqObservationArea[]; unparsed: Rec[] }> | { error: string };
+  forecast: Half<{ forecasts: AqForecast[]; unparsed: Rec[] }> | { error: string };
   fetched_at: string;
 }
 
@@ -205,59 +253,64 @@ export class AirnowClient {
     return Boolean(this.apiKey);
   }
 
-  /** One AirNow service, the current path first, the older one on a path/parameter error. */
-  private async call(
-    kind: keyof typeof PATHS,
-    lat: number,
-    lon: number,
-    distanceMi: number,
-    signal?: AbortSignal,
-  ): Promise<{ body: unknown; service: string }> {
-    let first: unknown;
-    for (const path of PATHS[kind]) {
-      const u = new URL(`https://${AIRNOW_HOST}${path}`);
-      const params: Record<string, string> = {
-        format: 'application/json',
-        latitude: coord(lat),
-        longitude: coord(lon),
-        distance: String(distanceMi),
-      };
-      if (path === '/aq/forecast/latLong/') params.date = localDate(lon, this.now());
-      u.search = new URLSearchParams({ ...params, API_KEY: this.apiKey ?? '' }).toString();
-      try {
-        const { body } = await this.http.getJson(u, {
-          service: 'EPA AirNow',
-          allowedHosts: [AIRNOW_HOST],
-          signal,
-        });
-        return { body, service: path };
-      } catch (err) {
-        if (
-          err instanceof UpstreamError &&
-          err.kind === 'http' &&
-          FALLBACK_STATUS.has(err.status)
-        ) {
-          first ??= err;
-          continue;
-        }
-        throw err;
-      }
-    }
-    throw first;
+  /** AirNow's text, with the key masked before anything is cut, on one capped line. */
+  private clean(msgs: string[]): string {
+    let s = msgs.join(' ');
+    if (this.apiKey) s = s.split(this.apiKey).join('[key]');
+    return oneLine(s, 300);
   }
 
-  async lookup(
+  /** One AirNow service: its body, or [] with AirNow's message when nothing matched. */
+  private async call(
+    kind: keyof typeof AIRNOW_PATHS,
     lat: number,
     lon: number,
-    distanceMi: number,
     signal?: AbortSignal,
-  ): Promise<AirnowAnswer> {
-    const key = `${lat.toFixed(2)},${lon.toFixed(2)},${distanceMi}`;
+  ): Promise<{ body: unknown; note: string | null }> {
+    const u = new URL(`https://${AIRNOW_HOST}${AIRNOW_PATHS[kind]}`);
+    u.search = new URLSearchParams({
+      format: 'application/json',
+      latitude: coord(lat),
+      longitude: coord(lon),
+      API_KEY: this.apiKey ?? '',
+    }).toString();
+    let body: unknown;
+    try {
+      ({ body } = await this.http.getJson(u, {
+        service: 'EPA AirNow',
+        allowedHosts: [AIRNOW_HOST],
+        signal,
+      }));
+    } catch (err) {
+      // A 4xx carrying AirNow's envelope is read like a 200 one (a rejected key stays an error).
+      if (
+        !(err instanceof UpstreamError) ||
+        err.kind !== 'http' ||
+        err.status === 401 ||
+        err.status === 403 ||
+        !serviceErrors(err.body)
+      )
+        throw err;
+      body = err.body;
+    }
+    const msgs = serviceErrors(body);
+    if (!msgs) return { body, note: null };
+    if (msgs.length && msgs.every((m) => NO_DATA.test(m.trim())))
+      return { body: [], note: this.clean(msgs) };
+    throw new AirnowServiceError(
+      msgs.length
+        ? `EPA AirNow reported an error: ${this.clean(msgs)}`
+        : 'EPA AirNow reported an error',
+    );
+  }
+
+  async lookup(lat: number, lon: number, signal?: AbortSignal): Promise<AirnowAnswer> {
+    const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
     const [obs, fc] = await Promise.allSettled([
-      this.call('observations', lat, lon, distanceMi, signal),
-      this.call('forecast', lat, lon, distanceMi, signal),
+      this.call('observations', lat, lon, signal),
+      this.call('forecast', lat, lon, signal),
     ]);
     // A bad key or a rate limit fails both: report it once, as the tool's error.
     for (const r of [obs, fc])
@@ -269,11 +322,11 @@ export class AirnowClient {
     const answer: AirnowAnswer = {
       observations:
         obs.status === 'fulfilled'
-          ? { ...parseObservations(obs.value.body), service: obs.value.service }
+          ? { ...parseObservations(obs.value.body), note: obs.value.note }
           : { error: errText(obs.reason) },
       forecast:
         fc.status === 'fulfilled'
-          ? { ...parseForecasts(fc.value.body), service: fc.value.service }
+          ? { ...parseForecasts(fc.value.body), note: fc.value.note }
           : { error: errText(fc.reason) },
       fetched_at: new Date(this.now()).toISOString(),
     };
@@ -284,24 +337,16 @@ export class AirnowClient {
   }
 }
 
-/** The calendar date at the point (by longitude; close enough for "today's forecast"). */
-function localDate(lon: number, now: number): string {
-  return new Date(now + Math.round(lon / 15) * 3_600_000).toISOString().slice(0, 10);
-}
-
 function errText(err: unknown): string {
-  return err instanceof UpstreamError ? err.message : 'unavailable';
+  return err instanceof UpstreamError || err instanceof AirnowServiceError
+    ? err.message
+    : 'unavailable';
 }
 
-const AQ_ARGS = z.strictObject({
-  ...LOCATION_SHAPE,
-  distance_mi: z
-    .int()
-    .min(5)
-    .max(50)
-    .optional()
-    .describe('How far to look for a reporting area, in miles (default 25)'),
-});
+/** Ends a message with a full stop unless it already has one. */
+const sentence = (s: string) => (/[.!?]$/.test(s) ? s : `${s}.`);
+
+const AQ_ARGS = z.strictObject({ ...LOCATION_SHAPE });
 
 const AQ_TAGS = [
   'air quality',
@@ -326,10 +371,18 @@ const AQ_TAGS = [
 ];
 
 const aqiText = (v: AqValue) => {
-  const cat = typeof v.category === 'string' ? v.category : null;
+  const cat = str(v.category, 40);
   const n = typeof v.aqi === 'number' && v.aqi >= 0 ? `AQI ${v.aqi}` : null;
-  return `${String(v.pollutant)} ${[n, cat ? (n ? `(${cat})` : cat) : null].filter(Boolean).join(' ')}${n ? '' : ' (no AQI number given)'}`;
+  return `${str(v.pollutant, 20) ?? '?'} ${[n, cat ? (n ? `(${cat})` : cat) : null].filter(Boolean).join(' ')}${n ? '' : ' (no AQI number given)'}`;
 };
+
+/** "14:00" as given; a bare hour (15) as "15:00". */
+function hourText(h: unknown): string | null {
+  if (typeof h === 'number' && Number.isInteger(h)) return `${h}:00`;
+  if (typeof h !== 'string') return null;
+  const s = h.trim();
+  return /^\d{1,2}$/.test(s) ? `${s}:00` : str(s, 10);
+}
 
 const isActionDay = (v: unknown) =>
   v === true || (typeof v === 'string' && v.toLowerCase() === 'true');
@@ -346,7 +399,7 @@ export function airnowTools(deps: AirnowToolDeps): ToolDef[] {
       name: 'air_quality',
       title: 'Air quality (AQI) near a point',
       description:
-        "Current air quality and the agency forecast from EPA AirNow for the reporting area nearest a point or the user's phone location (here: true): AQI, category, pollutant (ozone, PM2.5, PM10), observation hour, forecast days and Air Quality Action Days. Preliminary data, credited to the reporting agency (Michigan EGLE in Michigan) and EPA AirNow; values are passed through unaltered.",
+        "Current air quality and the agency forecast from EPA AirNow for the reporting area AirNow matches to a point or the user's phone location (here: true): AQI, category, pollutant (ozone, PM2.5, PM10), monitoring site, observation hour, forecast days and Air Quality Action Days. Preliminary data, credited to the reporting agency AirNow names and EPA AirNow; values are passed through unaltered.",
       source: 'gateway',
       family: 'weather',
       inputSchema: jsonSchemaOf(AQ_ARGS),
@@ -364,10 +417,9 @@ export function airnowTools(deps: AirnowToolDeps): ToolDef[] {
         if (!a.ok) return a.out;
         const r = resolvePoint('air_quality', a.value, ctx, deps.phone);
         if (!r.ok) return r.out;
-        const distance = a.value.distance_mi ?? 25;
         let ans: AirnowAnswer;
         try {
-          ans = await airnow.lookup(r.point.lat, r.point.lon, distance, ctx.signal);
+          ans = await airnow.lookup(r.point.lat, r.point.lon, ctx.signal);
         } catch (err) {
           if (err instanceof UpstreamError && (err.status === 401 || err.status === 403))
             return {
@@ -376,6 +428,8 @@ export function airnowTools(deps: AirnowToolDeps): ToolDef[] {
               isError: true,
               errorKind: 'unavailable',
             };
+          if (err instanceof AirnowServiceError)
+            return { summary: sentence(err.message), isError: true, errorKind: 'unavailable' };
           if (err instanceof UpstreamError)
             return {
               summary: `${err.message}.${err.kind === 'rate_limited' ? ' AirNow limits calls per key per hour; try again next hour.' : ''}`,
@@ -385,46 +439,50 @@ export function airnowTools(deps: AirnowToolDeps): ToolDef[] {
             };
           throw err;
         }
-        return answerOutput(ans, r.point, distance);
+        return answerOutput(ans, r.point);
       },
     },
   ];
 }
 
-function answerOutput(ans: AirnowAnswer, pt: ResolvedPoint, distance: number): ToolOutput {
+function answerOutput(ans: AirnowAnswer, pt: ResolvedPoint): ToolOutput {
   const obs = 'error' in ans.observations ? undefined : ans.observations;
   const fc = 'error' in ans.forecast ? undefined : ans.forecast;
-  const states = [
-    ...(obs?.areas.map((x) => x.state) ?? []),
-    ...(fc?.forecasts.map((x) => x.state) ?? []),
-  ];
-  const label = airnowLabel(states);
+  const label = airnowLabel(
+    [...(obs?.areas.map((x) => x.state) ?? []), ...(fc?.forecasts.map((x) => x.state) ?? [])],
+    [
+      ...(obs?.areas.flatMap((x) => x.values.map((v) => v.agency)) ?? []),
+      ...(fc?.forecasts.map((x) => x.agency) ?? []),
+    ],
+  );
   const lines: string[] = [];
   for (const area of obs?.areas ?? []) {
     const when = [
-      area.date_observed,
-      area.hour_observed !== null ? `${String(area.hour_observed)}:00` : null,
-      area.time_zone,
+      str(area.date_observed, 20),
+      hourText(area.hour_observed),
+      str(area.time_zone, 10),
     ]
-      .filter((x) => x !== null && x !== undefined && x !== '')
-      .map(String)
+      .filter(Boolean)
       .join(' ');
+    const state = str(area.state, 10);
     lines.push(
-      `- Observed in ${String(area.reporting_area ?? 'the reporting area')}${area.state ? `, ${String(area.state)}` : ''}${when ? ` (${when})` : ''}: ${area.values.map(aqiText).join('; ')}.`,
+      `- Observed in ${str(area.reporting_area, 80) ?? 'the reporting area'}${state ? `, ${state}` : ''}${when ? ` (${when})` : ''}: ${area.values.map(aqiText).join('; ')}.`,
     );
   }
   for (const f of (fc?.forecasts ?? []).slice(0, 8)) {
+    const state = str(f.state, 10);
     lines.push(
-      `- Forecast for ${String(f.date_forecast ?? '?')}, ${String(f.reporting_area ?? '')}${f.state ? `, ${String(f.state)}` : ''}: ${aqiText(f)}${isActionDay(f.action_day) ? '; AIR QUALITY ACTION DAY' : ''}.`,
+      `- Forecast for ${str(f.date_forecast, 20) ?? '?'}, ${str(f.reporting_area, 80) ?? ''}${state ? `, ${state}` : ''}: ${aqiText(f)}${isActionDay(f.action_day) ? '; AIR QUALITY ACTION DAY' : ''}.`,
     );
   }
+  const said = (note: string | null | undefined) => (note ? ` (AirNow: ${note})` : '');
   if ('error' in ans.observations)
     lines.push(`- Current observations unavailable (${ans.observations.error}).`);
   else if (!obs?.areas.length)
-    lines.push(`- No current observations for a reporting area within ${distance} mi.`);
+    lines.push(`- No current observations for a reporting area near this point${said(obs?.note)}.`);
   if ('error' in ans.forecast) lines.push(`- Forecast unavailable (${ans.forecast.error}).`);
   else if (!fc?.forecasts.length)
-    lines.push(`- No forecast issued for a reporting area within ${distance} mi.`);
+    lines.push(`- No forecast issued for a reporting area near this point${said(fc?.note)}.`);
   const unparsed = [...(obs?.unparsed ?? []), ...(fc?.unparsed ?? [])];
   if (unparsed.length)
     lines.push(
@@ -435,15 +493,16 @@ function answerOutput(ans: AirnowAnswer, pt: ResolvedPoint, distance: number): T
     summary: `Air quality near ${pointPhrase(pt)} (${label}; values as reported, not altered):\n${lines.join('\n')}${actionDays ? '\nAn Air Quality Action Day is an agency advisory: relay it as issued.' : ''}`,
     data: {
       point: pointData(pt),
-      distance_mi: distance,
       note: label,
       observations: obs?.areas ?? [],
       forecast: (fc?.forecasts ?? []).map((f) => ({
         ...f,
         ...(f.discussion && f.discussion.endsWith('…') ? { discussion_truncated: true } : {}),
       })),
+      ...(obs?.note || fc?.note
+        ? { airnow_said: { observations: obs?.note ?? null, forecast: fc?.note ?? null } }
+        : {}),
       ...(unparsed.length ? { records_unrecognized: unparsed.slice(0, 10) } : {}),
-      services: { observations: obs?.service ?? null, forecast: fc?.service ?? null },
       retrieved_at: ans.fetched_at,
     },
   };

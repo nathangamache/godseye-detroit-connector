@@ -12,6 +12,7 @@ import { registerWeatherTools } from '../src/extra/weather/index.js';
 import { HttpClient, USER_AGENT, UpstreamError } from '../src/extra/weather/http.js';
 import { trendOf } from '../src/extra/weather/water.js';
 import { airnowLabel } from '../src/extra/weather/airnow.js';
+import { nwsMayCover } from '../src/extra/weather/nws.js';
 import { buildCore } from '../src/gateway.js';
 import type { LatestFix } from '../src/location/store.js';
 import { nullLogger } from '../src/log.js';
@@ -94,8 +95,8 @@ function harness(env: Record<string, string> = {}) {
     state,
     audits,
     grantReads,
-    /** Adds a route; later routes win. */
-    on(host: string, pathRe: RegExp, reply: Reply | ((u: URL) => Reply)) {
+    /** Adds a route; later routes win (a function answering undefined passes to earlier ones). */
+    on(host: string, pathRe: RegExp, reply: Reply | ((u: URL) => Reply | undefined)) {
       routes.push((u) =>
         u.hostname === host && pathRe.test(u.pathname)
           ? typeof reply === 'function'
@@ -609,16 +610,128 @@ describe('weather_forecast', () => {
     expect(r.isError).toBeFalsy();
     expect(h.calls.every((c) => c.url.hostname === NWS)).toBe(true);
   });
+});
 
-  it('a point outside NWS coverage gets a plain answer', async () => {
-    const h = harness();
-    h.on(NWS, /^\/points\//, {
+describe('points NWS does not cover', () => {
+  // Windsor City Hall, across the river from downtown Detroit: inside the coarse US boxes, but
+  // NWS answers /points with 404 and /alerts/active with 400 "out of bounds".
+  const WINDSOR = { lat: 42.3149, lon: -83.0364 };
+  const OUT_OF_BOUNDS = {
+    type: 'https://api.weather.gov/problems/InvalidParameter',
+    title: 'Invalid Parameter',
+    status: 400,
+    detail: 'Parameter "point" is invalid: out of bounds',
+    parameterErrors: [{ parameter: 'point', message: 'out of bounds' }],
+  };
+  const WINDSOR_POINTS = /^\/points\/42\.3149,-83\.0364$/;
+
+  function outsideAtWindsor(h: ReturnType<typeof harness>) {
+    h.on(NWS, WINDSOR_POINTS, {
       status: 404,
       body: { title: 'Data Unavailable For Requested Point', status: 404 },
     });
-    const { r, text } = await h.run('weather_forecast', { lat: 48.8584, lon: 2.2945 });
+    h.on(NWS, /^\/alerts\/active$/, (u) =>
+      u.searchParams.get('point') === '42.3149,-83.0364'
+        ? { status: 400, body: OUT_OF_BOUNDS }
+        : undefined,
+    );
+  }
+
+  it('weather_alerts for an outside point gets the plain answer, then asks nothing for 12 h', async () => {
+    const h = harness();
+    nwsBasics(h);
+    outsideAtWindsor(h);
+    const first = await h.run('weather_alerts', WINDSOR);
+    expect(first.r.isError).toBe(true);
+    expect(first.text).toMatch(/covers the United States/);
+    expect(first.text).not.toMatch(/HTTP 4\d\d/);
+    expect(h.calls).toHaveLength(2); // one /points 404 and one /alerts 400
+    // The same point again, a still phone's jitter (~30 m) and the forecast: nothing is sent.
+    await h.run('weather_alerts', WINDSOR);
+    await h.run('weather_alerts', { lat: 42.3151, lon: -83.0362 });
+    const fc = await h.run('weather_forecast', { ...WINDSOR, hourly: true });
+    expect(fc.r.isError).toBe(true);
+    expect(fc.text).toMatch(/covers the United States/);
+    expect(h.calls).toHaveLength(2);
+    // ~350 m away, inside the same ~1 km points cell: still asked, and here NWS has a grid.
+    const near = await h.run('weather_forecast', { lat: 42.312, lon: -83.042 });
+    expect(near.r.isError).toBeFalsy();
+    expect(h.callsTo(NWS, /^\/points\/42\.312,-83\.042$/)).toHaveLength(1);
+    // After 12 h the outside point is asked about again.
+    h.state.now += 12 * 3_600_000 + 60_000;
+    const later = await h.run('weather_forecast', WINDSOR);
+    expect(later.text).toMatch(/covers the United States/);
+    expect(h.callsTo(NWS, WINDSOR_POINTS)).toHaveLength(2);
+  });
+
+  it('a /points 404 seen by weather_forecast also spares weather_alerts its 400', async () => {
+    const h = harness();
+    nwsBasics(h);
+    outsideAtWindsor(h);
+    await h.run('weather_forecast', WINDSOR);
+    await h.run('weather_forecast', WINDSOR);
+    const { text } = await h.run('weather_alerts', WINDSOR);
+    expect(text).toMatch(/covers the United States/);
+    expect(h.callsTo(NWS, WINDSOR_POINTS)).toHaveLength(1);
+    expect(h.callsTo(NWS, /^\/alerts\//)).toHaveLength(0);
+  });
+
+  it('an alerts "out of bounds" is the outside answer, not an HTTP error, and is remembered', async () => {
+    const h = harness();
+    nwsBasics(h); // /points answers with a grid here; only the alerts service says no
+    h.on(NWS, /^\/alerts\/active$/, { status: 400, body: OUT_OF_BOUNDS });
+    const { r, text } = await h.run('weather_alerts', WINDSOR);
     expect(r.isError).toBe(true);
     expect(text).toMatch(/covers the United States/);
+    expect(text).not.toMatch(/HTTP 400/);
+    const sent = h.calls.length;
+    await h.run('weather_alerts', WINDSOR);
+    expect(h.calls).toHaveLength(sent);
+    // Any other 400 is still an upstream error, and not remembered.
+    const h2 = harness();
+    nwsBasics(h2);
+    h2.on(NWS, /^\/alerts\/active$/, {
+      status: 400,
+      body: { title: 'Bad Request', detail: 'Something else' },
+    });
+    const other = await h2.run('weather_alerts', DETROIT);
+    expect(other.text).toMatch(/returned HTTP 400.*do not assume there are none/);
+    await h2.run('weather_alerts', DETROIT);
+    expect(h2.callsTo(NWS, /^\/alerts\/active$/)).toHaveLength(2);
+  });
+
+  it('answers points far from every US area without asking NWS', async () => {
+    const h = harness();
+    const far = [
+      { lat: 48.8584, lon: 2.2945 }, // Eiffel Tower
+      { lat: 51.5007, lon: -0.1246 }, // Big Ben
+      { lat: -33.8568, lon: 151.2153 }, // Sydney Opera House
+      { lat: 90, lon: 180 },
+    ];
+    for (const pt of far)
+      for (const tool of ['weather_alerts', 'weather_forecast']) {
+        const { r, text } = await h.run(tool, pt);
+        expect(r.isError, `${tool} ${JSON.stringify(pt)}`).toBe(true);
+        expect(text).toMatch(/covers the United States/);
+      }
+    expect(h.calls).toHaveLength(0);
+    // The states, territories and their waters are all left for NWS to decide.
+    for (const [lat, lon] of [
+      [42.3314, -83.0458], // Detroit
+      [24.5551, -81.78], // Key West
+      [61.2181, -149.9003], // Anchorage
+      [71.2906, -156.7886], // Utqiagvik
+      [52.9, 172.9], // Attu Island
+      [21.3069, -157.8583], // Honolulu
+      [28.2072, -177.3735], // Midway Atoll
+      [18.4655, -66.1057], // San Juan
+      [18.3419, -64.9307], // Charlotte Amalie
+      [13.4757, 144.7489], // Hagåtña
+      [15.1778, 145.7508], // Saipan
+      [-14.2756, -170.702], // Pago Pago
+      [41.6, -82.0], // Lake Erie
+    ] as const)
+      expect(nwsMayCover(lat, lon), `${lat},${lon}`).toBe(true);
   });
 });
 
@@ -954,84 +1067,243 @@ describe('water_levels_near', () => {
 });
 
 // ---------------------------------------------------------------- AirNow fixtures
+// Shapes of AirNow's June 2026 services (the old lat/long services were retired 2026-09-30):
+// observations from /aq/observation/current/ziplatlong/, forecasts from /aq/forecast/current/.
 const AIRNOW = 'www.airnowapi.org';
+const OBS_PATH = /^\/aq\/observation\/current\/ziplatlong\/$/;
+const FC_PATH = /^\/aq\/forecast\/current\/$/;
+const MI_AGENCY = 'Michigan Department of Environment, Great Lakes, and Energy';
+const obsRec = (p: Record<string, unknown>) => ({
+  dateObserved: '2026-11-14',
+  hourObserved: '15:00',
+  localTimeZone: 'EST',
+  reportingAreaName: 'Detroit',
+  siteID: '000000001',
+  siteName: 'Monitor A',
+  parameterName: 'PM2.5',
+  nowcastAQI: 42,
+  aqiCategoryName: 'Good',
+  reportingAgency: MI_AGENCY,
+  lookupBehavior: 'Closest Reading By Pollutant',
+  consideredMonitors: 'All',
+  lookupBoundary: '50 Miles',
+  ...p,
+});
 const OBS = [
-  {
-    DateObserved: '2026-11-14 ',
-    HourObserved: 15,
-    LocalTimeZone: 'EST',
-    ReportingArea: 'Detroit',
-    StateCode: 'MI',
-    Latitude: 42.35,
-    Longitude: -83.06,
-    ParameterName: 'PM2.5',
-    AQI: 42,
-    Category: { Number: 1, Name: 'Good' },
-  },
-  {
-    DateObserved: '2026-11-14 ',
-    HourObserved: 15,
-    LocalTimeZone: 'EST',
-    ReportingArea: 'Detroit',
-    StateCode: 'MI',
-    ParameterName: 'O3',
-    AQI: 30,
-    Category: { Number: 1, Name: 'Good' },
-  },
+  obsRec({}),
+  obsRec({
+    siteID: '000000002',
+    siteName: 'Monitor B',
+    parameterName: 'OZONE',
+    nowcastAQI: 30,
+  }),
 ];
+const fcRec = (p: Record<string, unknown>) => ({
+  dateIssue: '2026-11-14',
+  dateValid: '2026-11-14',
+  reportingArea: 'Detroit',
+  reportingAreaCode: 'zz001',
+  stateCode: 'MI',
+  parameterName: 'PM2.5',
+  aqi: 45,
+  forecastAgency: MI_AGENCY,
+  categoryNumber: 1,
+  categoryName: 'Good',
+  actionDay: false,
+  discussion: '',
+  ...p,
+});
 const FC = [
-  {
-    DateIssue: '2026-11-14 ',
-    DateForecast: '2026-11-15 ',
-    ReportingArea: 'Detroit',
-    StateCode: 'MI',
-    ParameterName: 'PM2.5',
-    AQI: -1,
-    Category: { Number: 2, Name: 'Moderate' },
-    ActionDay: true,
-    Discussion: 'Light winds may let fine particles build up overnight.',
-  },
+  fcRec({}),
+  fcRec({
+    dateValid: '2026-11-15',
+    aqi: -1,
+    categoryNumber: 2,
+    categoryName: 'Moderate',
+    actionDay: true,
+    discussion: 'Light winds may let fine particles build up overnight.',
+  }),
 ];
+const noData = (message: string) => ({ WebServiceError: [{ Message: message }] });
+const OBS_NONE =
+  'There are no observations available for the requested latitude/longitude: No observations were found for all monitors within 50 miles.';
+const FC_NONE = 'Error - There is no reporting area at your searched location';
 
 function airnowBasics(h: ReturnType<typeof harness>) {
-  h.on(AIRNOW, /^\/aq\/observation\/current\/ziplatlong\/$/, { body: OBS });
-  h.on(AIRNOW, /^\/aq\/forecast\/current\/$/, { body: FC });
+  h.on(AIRNOW, OBS_PATH, { body: OBS });
+  h.on(AIRNOW, FC_PATH, { body: FC });
 }
 
 describe('air_quality', () => {
-  it('reports observations and forecast by reporting area, unaltered, labelled preliminary', async () => {
+  it('reads the 2026 services: observations and forecast by reporting area, unaltered, credited', async () => {
     const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
     airnowBasics(h);
-    const { r, text, data, all } = await h.run('air_quality', { ...DETROIT, distance_mi: 20 });
+    const { r, text, data, all } = await h.run('air_quality', DETROIT);
     expect(r.isError).toBeFalsy();
-    const q = h.callsTo(AIRNOW, /ziplatlong/)[0]!.url.searchParams;
+    const q = h.callsTo(AIRNOW, OBS_PATH)[0]!.url.searchParams;
     expect(q.get('latitude')).toBe('42.3314');
     expect(q.get('longitude')).toBe('-83.0458');
-    expect(q.get('distance')).toBe('20');
     expect(q.get('format')).toBe('application/json');
     expect(q.get('API_KEY')).toBe(AIRNOW_KEY);
-    expect(text).toMatch(/preliminary data; source: Michigan EGLE \/ EPA AirNow/);
+    // The 2026 services use their own lookup boundary: no distance is sent to either.
+    for (const c of h.callsTo(AIRNOW))
+      expect([...c.url.searchParams.keys()].sort()).toEqual([
+        'API_KEY',
+        'format',
+        'latitude',
+        'longitude',
+      ]);
+    expect(h.callsTo(AIRNOW)).toHaveLength(2);
+    expect(text).toMatch(new RegExp(`preliminary data; source: ${MI_AGENCY} / EPA AirNow`));
     expect(text).toMatch(
-      /Observed in Detroit, MI \(2026-11-14 15:00 EST\): PM2\.5 AQI 42 \(Good\); O3 AQI 30 \(Good\)/,
+      /Observed in Detroit \(2026-11-14 15:00 EST\): PM2\.5 AQI 42 \(Good\); OZONE AQI 30 \(Good\)\./,
     );
+    expect(text).not.toContain('15:00:00');
+    expect(text).toMatch(/Forecast for 2026-11-14, Detroit, MI: PM2\.5 AQI 45 \(Good\)\./);
     expect(text).toMatch(
       /Forecast for 2026-11-15, Detroit, MI: PM2\.5 Moderate \(no AQI number given\); AIR QUALITY ACTION DAY/,
     );
-    expect(data!.note).toBe('preliminary data; source: Michigan EGLE / EPA AirNow');
-    const obs = data!.observations as Array<{ values: Array<Record<string, unknown>> }>;
+    expect(text).not.toMatch(/No current observations|unexpected format|Forecast for \?/);
+    expect(data!.records_unrecognized).toBeUndefined();
+    expect(data!.note).toBe(`preliminary data; source: ${MI_AGENCY} / EPA AirNow`);
+    const obs = data!.observations as Array<Record<string, unknown>>;
+    expect(obs).toHaveLength(1);
+    expect(obs[0]).toMatchObject({
+      reporting_area: 'Detroit',
+      date_observed: '2026-11-14',
+      hour_observed: '15:00',
+      time_zone: 'EST',
+      lookup_boundary: '50 Miles',
+    });
     expect(obs[0]!.values).toEqual([
-      { pollutant: 'PM2.5', aqi: 42, category: 'Good', category_number: 1 },
-      { pollutant: 'O3', aqi: 30, category: 'Good', category_number: 1 },
+      {
+        pollutant: 'PM2.5',
+        aqi: 42,
+        category: 'Good',
+        category_number: null,
+        site: 'Monitor A',
+        agency: MI_AGENCY,
+      },
+      {
+        pollutant: 'OZONE',
+        aqi: 30,
+        category: 'Good',
+        category_number: null,
+        site: 'Monitor B',
+        agency: MI_AGENCY,
+      },
     ]);
     // Values as received: AQI -1 (category only) is not turned into anything else.
-    expect((data!.forecast as Array<Record<string, unknown>>)[0]).toMatchObject({
+    const fc = data!.forecast as Array<Record<string, unknown>>;
+    expect(fc.map((f) => f.date_forecast)).toEqual(['2026-11-14', '2026-11-15']);
+    expect(fc[1]).toMatchObject({
       aqi: -1,
       category: 'Moderate',
+      category_number: 2,
+      state: 'MI',
+      agency: MI_AGENCY,
       action_day: true,
       discussion: 'Light winds may let fine particles build up overnight.',
     });
     expect(all).toMatch(/Attribution: Preliminary data.*EGLE.*EPA AirNow/);
     expect(all).not.toContain(AIRNOW_KEY);
+  });
+
+  it('has no distance argument any more', async () => {
+    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    airnowBasics(h);
+    const schema = h.registry.get('air_quality')!.inputSchema;
+    expect(Object.keys(schema.properties as object).sort()).toEqual(['here', 'lat', 'lon']);
+    const { r, text } = await h.run('air_quality', { ...DETROIT, distance_mi: 20 });
+    expect(r.isError).toBe(true);
+    expect(text).toMatch(/distance_mi/);
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it('credits the agency AirNow names, never Michigan EGLE by default', async () => {
+    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    // Recorded 2026 shape for a Los Angeles area: observations name the agency, no stateCode.
+    h.on(AIRNOW, OBS_PATH, {
+      body: [
+        obsRec({
+          dateObserved: '2026-09-12',
+          hourObserved: '14:00',
+          localTimeZone: 'PDT',
+          reportingAreaName: 'NW Coastal LA',
+          parameterName: 'PM2.5',
+          nowcastAQI: 56,
+          aqiCategoryName: 'Moderate',
+          reportingAgency: 'South Coast AQMD',
+        }),
+      ],
+    });
+    h.on(AIRNOW, FC_PATH, { body: noData(FC_NONE) });
+    const { text, data } = await h.run('air_quality', { lat: 34.0537, lon: -118.2428 });
+    expect(text).toMatch(/preliminary data; source: South Coast AQMD \/ EPA AirNow/);
+    expect(text).not.toMatch(/preliminary data; source: Michigan/);
+    expect(text).toMatch(
+      /Observed in NW Coastal LA \(2026-09-12 14:00 PDT\): PM2\.5 AQI 56 \(Moderate\)/,
+    );
+    expect(data!.note).toBe('preliminary data; source: South Coast AQMD / EPA AirNow');
+  });
+
+  it('"There are no ..." is an empty answer with AirNow\'s words, and is cached', async () => {
+    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    h.on(AIRNOW, OBS_PATH, { body: noData(OBS_NONE) });
+    // The same envelope under a 4xx is read the same way.
+    h.on(AIRNOW, FC_PATH, { status: 404, body: noData(FC_NONE) });
+    const { r, text, data } = await h.run('air_quality', DETROIT);
+    expect(r.isError).toBeFalsy();
+    expect(text).toMatch(
+      /No current observations for a reporting area near this point \(AirNow: There are no observations available/,
+    );
+    expect(text).toMatch(
+      /No forecast issued for a reporting area near this point \(AirNow: Error - There is no reporting area at your searched location\)\./,
+    );
+    expect(text).not.toMatch(/unexpected format|preliminary data; source: Michigan/);
+    expect(text).toMatch(
+      /preliminary data; source: the reporting air quality agency \/ EPA AirNow/,
+    );
+    expect(data!.records_unrecognized).toBeUndefined();
+    expect(data!.observations).toEqual([]);
+    expect(data!.forecast).toEqual([]);
+    expect(data!.airnow_said).toEqual({ observations: OBS_NONE, forecast: FC_NONE });
+    await h.run('air_quality', DETROIT);
+    expect(h.callsTo(AIRNOW)).toHaveLength(2);
+  });
+
+  it('any other AirNow error message is an error, with the key masked, and not cached', async () => {
+    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    h.on(AIRNOW, OBS_PATH, {
+      body: noData(`Invalid request: API_KEY=${AIRNOW_KEY}&latitude was not understood`),
+    });
+    h.on(AIRNOW, FC_PATH, { body: FC });
+    const part = await h.run('air_quality', DETROIT);
+    expect(part.r.isError).toBeFalsy();
+    expect(part.text).toMatch(
+      /Current observations unavailable \(EPA AirNow reported an error: Invalid request: API_KEY=\[key\]&latitude was not understood\)/,
+    );
+    expect(part.all).not.toContain(AIRNOW_KEY);
+    await h.run('air_quality', DETROIT);
+    expect(h.callsTo(AIRNOW)).toHaveLength(4);
+
+    const h2 = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    h2.on(AIRNOW, /./, { status: 400, body: noData('Invalid parameter: latitude') });
+    const both = await h2.run('air_quality', DETROIT);
+    expect(both.r.isError).toBe(true);
+    expect(both.text).toMatch(/EPA AirNow reported an error: Invalid parameter: latitude\./);
+  });
+
+  it('never falls back to the services AirNow retired on 2026-09-30', async () => {
+    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
+    h.on(AIRNOW, OBS_PATH, { status: 404, body: {} });
+    h.on(AIRNOW, FC_PATH, { status: 410, body: {} });
+    h.on(AIRNOW, /latLong/, { body: [] });
+    const { r, text } = await h.run('air_quality', DETROIT);
+    expect(r.isError).toBe(true);
+    expect(text).toMatch(/EPA AirNow returned HTTP 404/);
+    expect(h.callsTo(AIRNOW)).toHaveLength(2);
+    expect(h.callsTo(AIRNOW, /latLong/)).toHaveLength(0);
   });
 
   it('caches an answer for 30 minutes', async () => {
@@ -1048,23 +1320,6 @@ describe('air_quality', () => {
     expect(h.callsTo(AIRNOW)).toHaveLength(4);
   });
 
-  it('falls back to the older lat/long services when the current ones say not found', async () => {
-    const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
-    h.on(AIRNOW, /^\/aq\/observation\/current\/ziplatlong\/$/, { status: 404, body: {} });
-    h.on(AIRNOW, /^\/aq\/forecast\/current\/$/, { status: 302, body: {} });
-    h.on(AIRNOW, /^\/aq\/observation\/latLong\/current\/$/, { body: OBS });
-    h.on(AIRNOW, /^\/aq\/forecast\/latLong\/$/, { body: FC });
-    const { r, data } = await h.run('air_quality', DETROIT);
-    expect(r.isError).toBeFalsy();
-    expect(data!.services).toEqual({
-      observations: '/aq/observation/latLong/current/',
-      forecast: '/aq/forecast/latLong/',
-    });
-    expect(h.callsTo(AIRNOW, /forecast\/latLong/)[0]!.url.searchParams.get('date')).toBe(
-      '2026-11-14',
-    );
-  });
-
   it('a rejected key says which setting to check, without echoing the key', async () => {
     const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
     h.on(AIRNOW, /./, { status: 401, body: { WebServiceError: [{ Message: 'Invalid API key' }] } });
@@ -1076,18 +1331,30 @@ describe('air_quality', () => {
 
   it('passes records in an unexpected format through as received', async () => {
     const h = harness({ AIRNOW_API_KEY: AIRNOW_KEY });
-    h.on(AIRNOW, /ziplatlong/, { body: [{ Something: 'new', Value: 7 }] });
-    h.on(AIRNOW, /^\/aq\/forecast\/current\/$/, { body: [] });
+    h.on(AIRNOW, OBS_PATH, { body: [{ Something: 'new', Value: 7 }] });
+    h.on(AIRNOW, FC_PATH, { body: [] });
     const { r, text, data } = await h.run('air_quality', DETROIT);
     expect(r.isError).toBeFalsy();
     expect(text).toMatch(/unexpected format are passed through as received/);
     expect(data!.records_unrecognized).toEqual([{ Something: 'new', Value: 7 }]);
   });
 
-  it('names the agency per state', () => {
+  it('names the agency AirNow gives, else by state, else in general', () => {
+    expect(airnowLabel([], ['South Coast AQMD'])).toBe(
+      'preliminary data; source: South Coast AQMD / EPA AirNow',
+    );
+    expect(airnowLabel(['MI'], [MI_AGENCY, MI_AGENCY, null])).toBe(
+      `preliminary data; source: ${MI_AGENCY} / EPA AirNow`,
+    );
     expect(airnowLabel(['MI'])).toBe('preliminary data; source: Michigan EGLE / EPA AirNow');
     expect(airnowLabel(['OH'])).toBe(
       'preliminary data; source: the OH air quality agency / EPA AirNow',
+    );
+    expect(airnowLabel([])).toBe(
+      'preliminary data; source: the reporting air quality agency / EPA AirNow',
+    );
+    expect(airnowLabel([null, 'not a state'])).toBe(
+      'preliminary data; source: the reporting air quality agency / EPA AirNow',
     );
   });
 });

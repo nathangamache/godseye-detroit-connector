@@ -7,6 +7,12 @@
  * (0.01°) is cached and re-checked every 12 h, or at once when NWS says the grid is gone.
  * Gridpoint forecasts fail now and then with 500/503: those are retried twice, politely.
  * Text and data are public domain; results credit the National Weather Service.
+ *
+ * Points NWS doesn't cover are not asked about again and again: a point far from every US area
+ * is answered without a request, and NWS's own "no data here" (a /points 404, or /alerts/active
+ * saying the point is out of bounds) is remembered for 12 h per ~100 m cell. The cell is finer
+ * than the ~1 km points cell on purpose: a 1 km cell can span both banks of a border river, and
+ * a US point must never inherit its neighbour's "outside".
  */
 import { z } from 'zod';
 import type { ToolDef, ToolOutput } from '../../tools/types.js';
@@ -62,6 +68,35 @@ export interface PointInfo {
 /** Thrown when NWS has no data for a point (outside the US and its waters). */
 export class OutsideCoverageError extends Error {}
 
+/**
+ * Coarse boxes [latMin, latMax, lonMin, lonMax] around everything NWS covers: the states,
+ * territories and adjacent waters. Generous on purpose: NWS itself decides every point inside
+ * them; a point outside all of them is answered "outside" without a request.
+ */
+const NWS_BOXES: ReadonlyArray<readonly [number, number, number, number]> = [
+  [14, 60, -140, -50], // lower 48, Puerto Rico, US Virgin Islands and adjacent waters
+  [48, 75, -180, -125], // Alaska east of 180°
+  [48, 60, 165, 180], // the western Aleutians
+  [15, 32, -180, -150], // Hawaii and the Northwestern Hawaiian Islands
+  [10, 23, 140, 150], // Guam and the Northern Mariana Islands
+  [-17, -10, -174, -165], // American Samoa
+];
+
+/** False when a point is far from every area NWS covers. */
+export function nwsMayCover(lat: number, lon: number): boolean {
+  return NWS_BOXES.some(([a, b, c, d]) => lat >= a && lat <= b && lon >= c && lon <= d);
+}
+
+/** NWS's 400 for /alerts/active?point= outside its area ("Parameter "point" is invalid: out of bounds"). */
+function isOutOfBounds(err: unknown): boolean {
+  if (!(err instanceof UpstreamError) || err.kind !== 'http' || err.status !== 400) return false;
+  const b = (err.body ?? {}) as { detail?: unknown; parameterErrors?: unknown };
+  const texts = [b.detail];
+  if (Array.isArray(b.parameterErrors))
+    for (const p of b.parameterErrors) texts.push((p as { message?: unknown } | null)?.message);
+  return texts.some((t) => typeof t === 'string' && /out of bounds/i.test(t));
+}
+
 const GRID_PATH = /^\/gridpoints\/[A-Z]{3}\/\d{1,3},\d{1,3}\/forecast(\/hourly)?$/;
 
 /** A forecast URL from /points, used only if it is the expected api.weather.gov gridpoint path. */
@@ -100,6 +135,7 @@ export class NwsClient {
   private readonly points: TtlCache<PointInfo>;
   private readonly alerts: TtlCache<unknown>;
   private readonly forecasts: TtlCache<unknown>;
+  private readonly outside: TtlCache<true>;
 
   constructor(
     private readonly http: HttpClient,
@@ -108,6 +144,23 @@ export class NwsClient {
     this.points = new TtlCache(2_000, now);
     this.alerts = new TtlCache(500, now);
     this.forecasts = new TtlCache(500, now);
+    this.outside = new TtlCache(2_000, now);
+  }
+
+  private static outsideCell(lat: number, lon: number): string {
+    return `${lat.toFixed(3)},${lon.toFixed(3)}`;
+  }
+
+  /** True when NWS can't cover the point: far from every US area, or NWS said so recently. */
+  knownOutside(lat: number, lon: number): boolean {
+    return (
+      !nwsMayCover(lat, lon) || this.outside.get(NwsClient.outsideCell(lat, lon)) !== undefined
+    );
+  }
+
+  private markOutside(lat: number, lon: number): OutsideCoverageError {
+    this.outside.set(NwsClient.outsideCell(lat, lon), true, POINTS_TTL_MS);
+    return new OutsideCoverageError();
   }
 
   private get(path: string, signal?: AbortSignal) {
@@ -121,6 +174,7 @@ export class NwsClient {
 
   /** office/grid/zone for the ~1 km cell around a point (cached; re-checked every 12 h). */
   async point(lat: number, lon: number, signal?: AbortSignal, fresh = false): Promise<PointInfo> {
+    if (this.knownOutside(lat, lon)) throw new OutsideCoverageError();
     const cell = `${lat.toFixed(2)},${lon.toFixed(2)}`;
     if (!fresh) {
       const hit = this.points.get(cell);
@@ -131,7 +185,7 @@ export class NwsClient {
       ({ body } = await this.get(`/points/${coord(lat)},${coord(lon)}`, signal));
     } catch (err) {
       if (err instanceof UpstreamError && err.kind === 'http' && err.status === 404)
-        throw new OutsideCoverageError();
+        throw this.markOutside(lat, lon);
       throw err;
     }
     const p = (body.properties ?? {}) as Record<string, unknown>;
@@ -173,10 +227,17 @@ export class NwsClient {
   }
 
   async activeAlerts(lat: number, lon: number, signal?: AbortSignal): Promise<unknown> {
+    if (this.knownOutside(lat, lon)) throw new OutsideCoverageError();
     const key = `${coord(lat)},${coord(lon)}`;
     const hit = this.alerts.get(key);
     if (hit) return hit;
-    const { body } = await this.get(`/alerts/active?status=actual&point=${key}`, signal);
+    let body: Record<string, unknown>;
+    try {
+      ({ body } = await this.get(`/alerts/active?status=actual&point=${key}`, signal));
+    } catch (err) {
+      if (isOutOfBounds(err)) throw this.markOutside(lat, lon);
+      throw err;
+    }
     this.alerts.set(key, body, ALERTS_TTL_MS);
     return body;
   }
@@ -421,22 +482,24 @@ export function nwsTools(deps: NwsToolDeps): ToolDef[] {
         const r = resolvePoint('weather_alerts', a.value, ctx, deps.phone);
         if (!r.ok) return r.out;
         const pt = r.point;
+        // Far away, or NWS said "no data here" recently: answered without a request.
+        if (nws.knownOutside(pt.lat, pt.lon))
+          return { summary: OUTSIDE, isError: true, errorKind: 'unsupported' };
         // The zone (for "no active alerts for <zone>") is a nice-to-have; alerts are not.
         const [zoneR, alertsR] = await Promise.allSettled([
           nws.point(pt.lat, pt.lon, ctx.signal),
           nws.activeAlerts(pt.lat, pt.lon, ctx.signal),
         ]);
-        if (alertsR.status === 'rejected') {
-          if (zoneR.status === 'rejected' && zoneR.reason instanceof OutsideCoverageError)
-            return { summary: OUTSIDE, isError: true, errorKind: 'unsupported' };
+        const outside = (x: PromiseSettledResult<unknown>) =>
+          x.status === 'rejected' && x.reason instanceof OutsideCoverageError;
+        if (outside(zoneR) || outside(alertsR))
+          return { summary: OUTSIDE, isError: true, errorKind: 'unsupported' };
+        if (alertsR.status === 'rejected')
           return upstreamOutput(
             alertsR.reason,
             'Alerts could not be checked: do not assume there are none; weather.gov shows the official list.',
           );
-        }
         const info = zoneR.status === 'fulfilled' ? zoneR.value : undefined;
-        if (!info && zoneR.status === 'rejected' && zoneR.reason instanceof OutsideCoverageError)
-          return { summary: OUTSIDE, isError: true, errorKind: 'unsupported' };
         const { alerts, total, updated } = parseAlerts(alertsR.value);
         const where = zoneLabel(info);
         const zone = info
@@ -493,6 +556,8 @@ export function nwsTools(deps: NwsToolDeps): ToolDef[] {
         const pt = r.point;
         const hourly = a.value.hourly === true;
         const periods = a.value.periods ?? (hourly ? 12 : 14);
+        if (nws.knownOutside(pt.lat, pt.lon))
+          return { summary: OUTSIDE, isError: true, errorKind: 'unsupported' };
         try {
           return await forecastFor(nws, pt, hourly, periods, ctx.signal);
         } catch (err) {
