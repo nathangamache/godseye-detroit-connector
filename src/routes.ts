@@ -3,7 +3,7 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 import type { AppContext, Mount } from './app.js';
 import { Csrf } from './auth/csrf.js';
-import { Login } from './auth/login.js';
+import { Login, safeNext } from './auth/login.js';
 import { REPO_ROOT } from './config.js';
 import type { GatewayCore } from './gateway.js';
 import { installLocate, installLocationIngest } from './location/routes.js';
@@ -17,6 +17,7 @@ export type RouteInstaller = (app: Express, ctx: AppContext, gw: GatewayCore) =>
 export interface RouteSet {
   public: RouteInstaller[];
   private: RouteInstaller[];
+  ui?: RouteInstaller[];
 }
 
 export interface RouteOptions {
@@ -72,6 +73,10 @@ export function installAllRoutes(opts: RouteOptions = {}): RouteSet {
       limiter: ctx.limiter,
       kind,
       origin: ctx.sec.publicOrigin,
+      // The UI listener has no login page of its own; dev password logins happen on the
+      // private (auth) origin and may return to the UI origin.
+      loginOrigin: ctx.listener === 'ui' ? gw.config.privateOrigin : undefined,
+      nextOrigins: ctx.listener === 'private' ? [gw.config.uiOrigin] : [],
       now: gw.now,
     });
     return { csrf, login };
@@ -110,6 +115,16 @@ export function installAllRoutes(opts: RouteOptions = {}): RouteSet {
         oauth.admin(app, ctx, login, csrf);
         installLocationIngest(app, ctx, locationDeps(gw));
         installLocate(app, ctx, locationDeps(gw), login);
+        // The globe and Pulse live on the UI origin; send the owner there.
+        app.get(['/', '/pulse', /^\/pulse\/.*/], login.require(), (req, res) => {
+          res.redirect(302, gw.config.uiOrigin + safeNext(req.originalUrl));
+        });
+      },
+    ],
+    ui: [
+      (app, ctx, gw) => {
+        app.use('/gw/static', staticAssets());
+        const { login } = loginFor(gw, ctx, gw.config.loginProvider);
         // Must be last: "/" falls through to the GEV reverse proxy.
         installUi(app, ctx, { config: gw.config, login, logger: gw.logger });
       },

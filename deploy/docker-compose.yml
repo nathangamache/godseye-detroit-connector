@@ -2,8 +2,11 @@
 #
 #   gev          GEV preview (read-only clone)                        gev:7701 on the network
 #   tailscale    sidecar; the gateway joins its network namespace.    tailnet https://godseye.<tailnet>.ts.net
-#                `tailscale serve` -> 127.0.0.2:7702 (gateway PRIVATE listener: UI, authorize, admin)
-#   gateway      PUBLIC listener 172.30.77.20:7700 (tunnel only) + PRIVATE listener 127.0.0.2:7702
+#                `tailscale serve` https :443  -> 127.0.0.2:7702 (PRIVATE listener: authorize, consent,
+#                                                  admin, /locate)
+#                `tailscale serve` https :8443 -> 127.0.0.2:7703 (UI listener: GEV globe, /pulse; a
+#                                                  separate origin from the owner pages)
+#   gateway      PUBLIC listener 172.30.77.20:7700 (tunnel only) + PRIVATE 127.0.0.2:7702 + UI 127.0.0.2:7703
 #
 # Why 127.0.0.2 and the bridge address: the sidecar uses Tailscale's userspace netstack, which
 # re-dials every tailnet connection on a port serve does not own to 127.0.0.1:<same port>. A
@@ -128,6 +131,8 @@ services:
       PORT: "7700"
       PRIVATE_HOST: 127.0.0.2
       PRIVATE_PORT: "7702"
+      UI_HOST: 127.0.0.2
+      UI_PORT: "7703"
       # tailscale serve connects from 127.0.0.1; only it may assert Tailscale-User-Login.
       TAILSCALE_TRUSTED_PROXY_IPS: 127.0.0.1
       DATA_DIR: /data

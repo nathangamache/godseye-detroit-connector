@@ -48,6 +48,10 @@ export interface LoginDeps {
   kind: 'tailscale' | 'password' | 'none';
   /** Origin the browser sees for this listener (cookies are Secure when https). */
   origin: string;
+  /** Where /auth/login lives when this listener has none (the UI listener; default: here). */
+  loginOrigin?: string;
+  /** Absolute origins a login may return to (the UI origin). */
+  nextOrigins?: string[];
   now: () => number;
 }
 
@@ -103,8 +107,12 @@ export class Login {
   challenge(req: Request, res: Response): void {
     pageHeaders(res);
     if (this.kind === 'password' && (req.method === 'GET' || req.method === 'HEAD')) {
-      const nextPath = safeNext(req.originalUrl);
-      res.redirect(302, `/auth/login?next=${encodeURIComponent(nextPath)}`);
+      const here = this.d.loginOrigin && this.d.loginOrigin !== this.d.origin;
+      const nextPath = here ? this.d.origin + safeNext(req.originalUrl) : safeNext(req.originalUrl);
+      res.redirect(
+        302,
+        `${here ? this.d.loginOrigin : ''}/auth/login?next=${encodeURIComponent(nextPath)}`,
+      );
       return;
     }
     if (this.kind === 'none') {
@@ -138,7 +146,7 @@ export class Login {
     app.get('/auth/login', (req, res) => {
       pageHeaders(res);
       const token = this.d.csrf.issue(req, res, 'login', 'anon');
-      const nextPath = safeNext(String(req.query.next ?? '/'));
+      const nextPath = safeNext(String(req.query.next ?? '/'), this.d.nextOrigins);
       res.send(
         page(
           'Sign in',
@@ -210,7 +218,7 @@ export class Login {
         maxAgeS: this.d.config.SESSION_TTL_S,
       });
       this.d.audit.record('login_success', { ip, subject: 'owner' });
-      res.redirect(303, safeNext(String(req.body?.next ?? '/')));
+      res.redirect(303, safeNext(String(req.body?.next ?? '/'), this.d.nextOrigins));
     });
 
     app.post('/auth/logout', urlencoded, (req, res) => {
@@ -224,8 +232,19 @@ export class Login {
   }
 }
 
-/** Only same-site relative paths (no //host, no backslashes, no scheme). */
-export function safeNext(p: string): string {
+/**
+ * Only same-site relative paths (no //host, no backslashes, no scheme), or an absolute URL
+ * on one of `origins` (exact origin match).
+ */
+export function safeNext(p: string, origins: string[] = []): string {
+  if (typeof p === 'string' && origins.length && !/[\r\n\\]/.test(p)) {
+    try {
+      const u = new URL(p);
+      if (origins.includes(u.origin) && !u.username && !u.password) return u.href.slice(0, 2000);
+    } catch {
+      /* not absolute */
+    }
+  }
   if (
     typeof p !== 'string' ||
     !p.startsWith('/') ||

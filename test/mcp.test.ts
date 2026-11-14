@@ -19,6 +19,7 @@ beforeAll(async () => {
     GATEWAY_MODE: 'test',
     PORT: '0',
     PRIVATE_PORT: '0',
+    UI_PORT: '0',
     DATA_DIR: dir,
     PUBLIC_ORIGIN: 'https://godseye.gamachecloud.com',
     PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
@@ -188,7 +189,7 @@ describe('/mcp tools', () => {
     const text = (r.content as Array<{ text: string }>).map((c) => c.text).join('\n');
     expect(r.isError).toBeFalsy();
     expect(text).toMatch(/Clear/);
-    expect(text).toContain('https://godseye.example-tailnet.ts.net/#v=2');
+    expect(text).toContain('https://godseye.example-tailnet.ts.net:8443/#v=2');
     expect(text).not.toContain('127.0.0.1:7701');
   });
 

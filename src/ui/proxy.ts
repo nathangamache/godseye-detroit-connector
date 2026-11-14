@@ -173,9 +173,19 @@ export function createProxy(opts: ProxyOptions) {
       (up) => {
         const outHeaders: Record<string, string | string[]> = {};
         for (const [k, v] of Object.entries(up.headers)) {
-          if (v === undefined || HOP_BY_HOP.has(k)) continue;
+          // No upstream cookies: cookies ignore ports, so a cookie set by the UI origin would
+          // also reach the owner pages' origin (cookie tossing). GEV never gets ours back anyway.
+          if (v === undefined || HOP_BY_HOP.has(k) || k === 'set-cookie') continue;
           outHeaders[k] = v;
         }
+        // The UI may frame itself, never be framed by anything else (an extra CSP header is
+        // enforced in addition to GEV's own).
+        const csp = outHeaders['content-security-policy'];
+        outHeaders['content-security-policy'] = [
+          ...(Array.isArray(csp) ? csp : csp ? [csp] : []),
+          "frame-ancestors 'self'",
+        ];
+        if (!outHeaders['x-frame-options']) outHeaders['x-frame-options'] = 'SAMEORIGIN';
         const loc = up.headers.location;
         if (typeof loc === 'string' && loc.startsWith(target.origin)) {
           outHeaders.location =

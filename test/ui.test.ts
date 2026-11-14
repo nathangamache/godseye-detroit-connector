@@ -130,19 +130,62 @@ describe('UI routes (dev / password login)', () => {
     if (pulseDir) rmSync(pulseDir, { recursive: true, force: true });
   });
 
-  it('requires login before proxying anything', async () => {
+  it('requires login before proxying anything (the login lives on the auth origin)', async () => {
     const before = gev.seen.length;
-    const r = await fetch(`${t.privateOrigin}/`, { redirect: 'manual' });
+    const r = await fetch(`${t.uiOrigin}/`, { redirect: 'manual' });
     expect(r.status).toBe(302);
-    expect(r.headers.get('location')).toMatch(/^\/auth\/login/);
+    const loc = new URL(r.headers.get('location')!);
+    expect(loc.origin + loc.pathname).toBe(`${t.privateOrigin}/auth/login`);
+    expect(loc.searchParams.get('next')).toBe(`${t.uiOrigin}/`);
     expect(gev.seen.length).toBe(before);
   });
 
+  it('serves the globe and /pulse only on the UI origin, never beside consent and admin', async () => {
+    const before = gev.seen.length;
+    // On the auth origin, "/" and /pulse just send the owner to the UI origin.
+    const home = await fetch(`${t.privateOrigin}/`, {
+      headers: { cookie: jar.header() },
+      redirect: 'manual',
+    });
+    expect(home.status).toBe(302);
+    expect(home.headers.get('location')).toBe(`${t.uiOrigin}/`);
+    const pulse = await fetch(`${t.privateOrigin}/pulse/x?y=1`, {
+      headers: { cookie: jar.header() },
+      redirect: 'manual',
+    });
+    expect(pulse.headers.get('location')).toBe(`${t.uiOrigin}/pulse/x?y=1`);
+    expect(
+      (await fetch(`${t.privateOrigin}/api/tomtom/status`, { headers: { cookie: jar.header() } }))
+        .status,
+    ).toBe(404);
+    expect(gev.seen.length).toBe(before);
+    // On the UI origin, the owner pages don't exist.
+    for (const p of [
+      '/oauth/admin',
+      '/oauth/authorize',
+      '/oauth/stepup',
+      '/locate/',
+      '/auth/login',
+    ])
+      expect(
+        (await fetch(`${t.uiOrigin}${p}`, { headers: { cookie: jar.header() } })).status,
+        p,
+      ).toBe(404);
+    expect(gev.seen.length).toBe(before);
+  });
+
+  it('a login started from the UI origin returns there; other absolute next URLs are refused', async () => {
+    const { safeNext } = await import('../src/auth/login.js');
+    expect(safeNext(`${t.uiOrigin}/x?y=1`, [t.uiOrigin])).toBe(`${t.uiOrigin}/x?y=1`);
+    expect(safeNext('https://evil.example/', [t.uiOrigin])).toBe('/');
+    expect(safeNext(`${t.uiOrigin}/x`)).toBe('/');
+  });
+
   it('proxies to GEV with clean headers', async () => {
-    const r = await fetch(`${t.privateOrigin}/api/tomtom/status?x=1`, {
+    const r = await fetch(`${t.uiOrigin}/api/tomtom/status?x=1`, {
       headers: {
         cookie: jar.header(),
-        origin: t.privateOrigin,
+        origin: t.uiOrigin,
         'cf-connecting-ip': '203.0.113.9',
         'x-forwarded-for': '203.0.113.9',
         'x-forwarded-proto': 'https',
@@ -159,41 +202,51 @@ describe('UI routes (dev / password login)', () => {
     expect(got.host).toBe(new URL(gev.url).host);
     expect(got.origin).toBe(gev.url);
     expect(got.cookie).toBeUndefined();
-    expect(r.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+    // GEV's own CSP is kept, plus frame-ancestors 'self'; upstream cookies never pass.
+    expect(r.headers.get('content-security-policy')).toBe(
+      "frame-ancestors 'none', frame-ancestors 'self'",
+    );
+    expect(r.headers.get('set-cookie')).toBeNull();
   });
 
   it('blocks GEV setup/oauth/mcp/panel routes without contacting GEV', async () => {
     const before = gev.seen.length;
     for (const p of ['/api/setup/keys', '/api/realtime/oauth-start', '/panel/', '/@vite/client']) {
-      const r = await fetch(`${t.origin}${p}`, { headers: { cookie: jar.header() } });
+      const r = await fetch(`${t.uiOrigin}${p}`, { headers: { cookie: jar.header() } });
       expect(r.status, p).toBe(404);
     }
     expect(gev.seen.length).toBe(before);
     // /mcp lives only on the public listener; on the private one it is reserved (404), never GEV's.
-    expect(
-      (await fetch(`${t.privateOrigin}/mcp`, { headers: { cookie: jar.header() } })).status,
-    ).toBe(404);
+    expect((await fetch(`${t.uiOrigin}/mcp`, { headers: { cookie: jar.header() } })).status).toBe(
+      404,
+    );
     expect((await fetch(`${t.origin}/mcp`, { method: 'POST', body: '{}' })).status).toBe(401);
     // Gateway-reserved paths don't fall through either.
     expect(
-      (await fetch(`${t.privateOrigin}/oauth/nothing`, { headers: { cookie: jar.header() } }))
-        .status,
+      (await fetch(`${t.uiOrigin}/oauth/nothing`, { headers: { cookie: jar.header() } })).status,
     ).toBe(404);
     expect(gev.seen.length).toBe(before);
   });
 
   it('refuses cross-origin requests at the proxy', async () => {
-    const r = await fetch(`${t.privateOrigin}/api/realtime/token`, {
+    const r = await fetch(`${t.uiOrigin}/api/realtime/token`, {
       method: 'POST',
       headers: { cookie: jar.header(), origin: 'https://evil.example' },
       body: '{}',
     });
     expect(r.status).toBe(403);
+    // The auth origin is "cross-origin" to the UI proxy too.
+    const r2 = await fetch(`${t.uiOrigin}/api/realtime/token`, {
+      method: 'POST',
+      headers: { cookie: jar.header(), origin: t.privateOrigin },
+      body: '{}',
+    });
+    expect(r2.status).toBe(403);
   });
 
   it('streams SSE without buffering and rewrites Location', async () => {
     const t0 = Date.now();
-    const r = await fetch(`${t.privateOrigin}/api/ghostmaps/events`, {
+    const r = await fetch(`${t.uiOrigin}/api/ghostmaps/events`, {
       headers: { cookie: jar.header(), accept: 'text/event-stream' },
     });
     const reader = r.body!.getReader();
@@ -201,20 +254,24 @@ describe('UI routes (dev / password login)', () => {
     expect(first).toContain('data: first');
     expect(Date.now() - t0).toBeLessThan(350);
     await reader.cancel();
-    const red = await fetch(`${t.privateOrigin}/redirect`, {
+    const red = await fetch(`${t.uiOrigin}/redirect`, {
       headers: { cookie: jar.header() },
       redirect: 'manual',
     });
-    expect(red.headers.get('location')).toBe(`${t.privateOrigin}/landing`);
+    expect(red.headers.get('location')).toBe(`${t.uiOrigin}/landing`);
   });
 
   it('/pulse shows a placeholder when no build is configured', async () => {
-    const r = await fetch(`${t.privateOrigin}/pulse/`, { headers: { cookie: jar.header() } });
+    const r = await fetch(`${t.uiOrigin}/pulse/`, { headers: { cookie: jar.header() } });
     expect(r.status).toBe(200);
-    expect(await r.text()).toMatch(/Pulse isn't running/);
+    const html = await r.text();
+    expect(html).toMatch(/Pulse isn't running/);
+    // Nav links point at each page's own origin.
+    expect(html).toContain(`href="${t.uiOrigin}/"`);
+    expect(html).toContain(`href="${t.privateOrigin}/oauth/admin"`);
     expect(
       (
-        await fetch(`${t.privateOrigin}/pulse`, {
+        await fetch(`${t.uiOrigin}/pulse`, {
           redirect: 'manual',
           headers: { cookie: jar.header() },
         })
@@ -222,8 +279,9 @@ describe('UI routes (dev / password login)', () => {
     ).toBe(301);
   });
 
-  it('/healthz returns only {ok:true} on both listeners', async () => {
+  it('/healthz returns only {ok:true} on every listener', async () => {
     expect(await (await fetch(`${t.privateOrigin}/healthz`)).json()).toEqual({ ok: true });
+    expect(await (await fetch(`${t.uiOrigin}/healthz`)).json()).toEqual({ ok: true });
     expect(await (await fetch(`${t.origin}/healthz`)).json()).toEqual({ ok: true });
   });
 
@@ -257,7 +315,7 @@ describe('UI routes (dev / password login)', () => {
     });
     try {
       const j = await passwordLogin(t2);
-      const r = await fetch(`${t2.privateOrigin}/pulse/incidents/123`, {
+      const r = await fetch(`${t2.uiOrigin}/pulse/incidents/123`, {
         headers: { cookie: j.header() },
       });
       expect(await r.text()).toMatch(/Pulse UI/);
@@ -279,6 +337,7 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
       ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
+      UI_PORT: String(await freePort()),
       OWNER_TAILSCALE_LOGIN: OWNER,
       DATA_DIR: dir,
       GEV_URL: gev.url,
@@ -298,11 +357,18 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
 
   it('rejects requests without the Tailscale identity header or from a non-owner login', async () => {
     const before = gev.seen.length;
-    for (const p of ['/', '/assets/app.js', '/pulse/', '/locate/', '/oauth/admin']) {
-      expect((await fetch(gw.privateUrl + p, { redirect: 'manual' })).status, p).toBe(403);
+    for (const [base, p] of [
+      [gw.uiUrl, '/'],
+      [gw.uiUrl, '/assets/app.js'],
+      [gw.uiUrl, '/pulse/'],
+      [gw.privateUrl, '/'],
+      [gw.privateUrl, '/locate/'],
+      [gw.privateUrl, '/oauth/admin'],
+    ] as const) {
+      expect((await fetch(base + p, { redirect: 'manual' })).status, p).toBe(403);
       expect(
         (
-          await fetch(gw.privateUrl + p, {
+          await fetch(base + p, {
             redirect: 'manual',
             headers: { 'tailscale-user-login': 'someone@else.com' },
           })
@@ -311,7 +377,7 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
       ).toBe(403);
       expect(
         (
-          await fetch(gw.privateUrl + p, {
+          await fetch(base + p, {
             redirect: 'manual',
             headers: { 'tailscale-user-login': '' },
           })
@@ -323,11 +389,13 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
   });
 
   it('accepts the owner and proxies to GEV without forwarding identity headers', async () => {
-    const r = await fetch(gw.privateUrl + '/', {
+    expect(gw.config.uiOrigin).toBe('https://godseye.example-tailnet.ts.net:8443');
+    expect(gw.uiUrl).toBe(`http://127.0.0.2:${gw.uiPort}`);
+    const r = await fetch(gw.uiUrl + '/', {
       headers: {
         'tailscale-user-login': OWNER,
         'tailscale-user-name': 'Owner',
-        origin: 'https://godseye.example-tailnet.ts.net',
+        origin: 'https://godseye.example-tailnet.ts.net:8443',
       },
     });
     expect(r.status).toBe(200);
@@ -347,6 +415,7 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
       ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
+      UI_PORT: String(await freePort()),
       OWNER_TAILSCALE_LOGIN: OWNER,
       // A loopback alias nothing connects from: the real peer (127.0.0.1) is not trusted.
       TAILSCALE_TRUSTED_PROXY_IPS: '127.0.0.9',

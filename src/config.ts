@@ -198,9 +198,17 @@ const schema = z.object({
   PRIVATE_PORT: int(7702, 0, 65535),
   /** The browser-facing origin of the private listener, e.g. https://godseye.<tailnet>.ts.net */
   PRIVATE_ORIGIN: optionalString,
+  /**
+   * UI listener: the GEV globe and /pulse, on a SEPARATE origin from authorize/consent/admin
+   * and /locate, so script running in those third-party UIs can't read or drive the owner
+   * pages. Default host: PRIVATE_HOST. Default origin: PRIVATE_ORIGIN on port 8443.
+   */
+  UI_HOST: optionalString,
+  UI_PORT: int(7703, 0, 65535),
+  UI_ORIGIN: optionalString,
   /** authorization_endpoint advertised in AS metadata (default: PRIVATE_ORIGIN/oauth/authorize). */
   AUTHORIZATION_ENDPOINT: optionalString,
-  /** Origin used for links in tool results (default: PRIVATE_ORIGIN, where the globe lives). */
+  /** Origin used for globe links in tool results (default: UI_ORIGIN, where the globe lives). */
   LINK_ORIGIN: optionalString,
   /** FALLBACK: serve /oauth/authorize on the public listener behind password+TOTP. Off by default. */
   PUBLIC_AUTHORIZE_FALLBACK: z.enum(['off', 'password']).default('off'),
@@ -246,6 +254,10 @@ export interface Config extends RawConfig {
   /** Host allowlist for the private listener. */
   privateAllowedHosts: string[];
   privateOrigin: string;
+  /** Host allowlist and origin of the UI listener (GEV, /pulse). */
+  uiAllowedHosts: string[];
+  uiOrigin: string;
+  uiHost: string;
   authorizationEndpoint: string;
   linkOrigin: string;
   /** Login provider on the private listener. */
@@ -328,14 +340,20 @@ function isLoopbackV4(ip: string): boolean {
 export function checkProductionBinds(raw: {
   HOST: string;
   PRIVATE_HOST: string;
+  UI_HOST?: string;
   TRUSTED_PROXY_IPS: string[];
   TAILSCALE_TRUSTED_PROXY_IPS: string[];
 }): void {
-  if (isNetstackReachable(raw.PRIVATE_HOST) || !isLoopbackV4(raw.PRIVATE_HOST)) {
-    throw new ConfigError(
-      `production requires PRIVATE_HOST to be a loopback alias other than 127.0.0.1 (use 127.0.0.2), not "${raw.PRIVATE_HOST}": ` +
-        "Tailscale's userspace netstack forwards raw tailnet connections to 127.0.0.1:<port>, bypassing tailscale serve",
-    );
+  for (const [name, host] of [
+    ['PRIVATE_HOST', raw.PRIVATE_HOST],
+    ['UI_HOST', raw.UI_HOST ?? raw.PRIVATE_HOST],
+  ] as const) {
+    if (isNetstackReachable(host) || !isLoopbackV4(host)) {
+      throw new ConfigError(
+        `production requires ${name} to be a loopback alias other than 127.0.0.1 (use 127.0.0.2), not "${host}": ` +
+          "Tailscale's userspace netstack forwards raw tailnet connections to 127.0.0.1:<port>, bypassing tailscale serve",
+      );
+    }
   }
   if (isNetstackReachable(raw.HOST) || isIP(raw.HOST) === 0) {
     throw new ConfigError(
@@ -385,6 +403,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     raw.PRIVATE_ORIGIN ?? `http://127.0.0.1:${raw.PRIVATE_PORT}`,
   );
   const privateOrigin = privateUrl.origin;
+  const uiHost = raw.UI_HOST ?? raw.PRIVATE_HOST;
+  let uiDefault = `http://127.0.0.1:${raw.UI_PORT}`;
+  if (raw.PRIVATE_ORIGIN && privateUrl.protocol === 'https:') {
+    const u = new URL(privateOrigin);
+    u.port = '8443';
+    uiDefault = u.origin;
+  }
+  const uiUrl = originOf('UI_ORIGIN', raw.UI_ORIGIN ?? uiDefault);
+  const uiOrigin = uiUrl.origin;
+  // (Both defaults with port 0, as in tests, are just placeholders.)
+  if (uiOrigin === privateOrigin && (raw.PRIVATE_ORIGIN || raw.UI_ORIGIN))
+    throw new ConfigError(
+      'UI_ORIGIN must differ from PRIVATE_ORIGIN (e.g. the same name on port 8443): the GEV and Pulse UIs must not share an origin with consent and admin',
+    );
   const passwordConfigured = Boolean(raw.GATEWAY_PASSWORD_HASH && raw.GATEWAY_TOTP_SECRET);
   const tailscaleConfigured = Boolean(raw.OWNER_TAILSCALE_LOGIN);
   const publicAuthorize = raw.PUBLIC_AUTHORIZE_FALLBACK === 'password';
@@ -397,6 +429,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'production requires an https PRIVATE_ORIGIN (the tailnet URL, e.g. https://godseye.<tailnet>.ts.net)',
       );
     }
+    if (uiUrl.protocol !== 'https:')
+      throw new ConfigError(
+        'production requires an https UI_ORIGIN (default: PRIVATE_ORIGIN:8443)',
+      );
     if (!tailscaleConfigured) {
       throw new ConfigError('production mode requires OWNER_TAILSCALE_LOGIN (fail closed)');
     }
@@ -441,7 +477,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const authorizationEndpoint =
     raw.AUTHORIZATION_ENDPOINT ??
     (publicAuthorize ? `${issuer}/oauth/authorize` : `${privateOrigin}/oauth/authorize`);
-  const linkOrigin = (raw.LINK_ORIGIN ?? privateOrigin).replace(/\/+$/, '');
+  const linkOrigin = (raw.LINK_ORIGIN ?? uiOrigin).replace(/\/+$/, '');
 
   const gevUrl = new URL(raw.GEV_URL);
   const gevApiOrigins = new Set<string>([gevUrl.origin]);
@@ -462,6 +498,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const privateAllowedHosts = Array.from(
     new Set([privateUrl.hostname, '127.0.0.1', 'localhost', ...bindHost(raw.PRIVATE_HOST)]),
   );
+  const uiAllowedHosts = Array.from(
+    new Set([uiUrl.hostname, '127.0.0.1', 'localhost', ...bindHost(uiHost)]),
+  );
 
   return {
     ...raw,
@@ -473,6 +512,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedHosts,
     privateAllowedHosts,
     privateOrigin,
+    uiAllowedHosts,
+    uiOrigin,
+    uiHost,
     authorizationEndpoint,
     linkOrigin,
     loginProvider,

@@ -12,9 +12,14 @@
  * Everything else: 404.
  *
  * PRIVATE listener (PRIVATE_PORT on PRIVATE_HOST: 127.0.0.2 in production, reached only
- * through tailscale serve, which connects from 127.0.0.1):
- *   /, /pulse, /locate, /oauth/authorize, consent, /oauth/admin, /api/location (for the PWA),
- *   login pages in dev. Identity: Tailscale-User-Login from the trusted proxy.
+ * through tailscale serve on https 443, which connects from 127.0.0.1):
+ *   /oauth/authorize, consent, /oauth/admin, /oauth/stepup, /locate, /api/location (for the
+ *   PWA), login pages in dev. Identity: Tailscale-User-Login from the trusted proxy.
+ *
+ * UI listener (UI_PORT on UI_HOST, tailscale serve on https 8443: a different origin):
+ *   / (GEV globe, reverse proxy), /pulse. Third-party UI code and data render here, so they
+ *   can't script the owner pages above (cross-origin: no reads, and POSTs fail the Origin
+ *   check).
  *
  * Client IPs: CF-Connecting-IP is honoured only on the public listener and only from
  * TRUSTED_PROXY_IPS (cloudflared's fixed address). The private listener never trusts a
@@ -54,7 +59,7 @@ export interface AppDeps {
   limiter?: RateLimiter;
 }
 
-export type Listener = 'public' | 'private';
+export type Listener = 'public' | 'private' | 'ui';
 
 export interface AppContext {
   listener: Listener;
@@ -72,6 +77,15 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
       trustedProxies: config.TRUSTED_PROXY_IPS,
       clientIpHeader: 'cf-connecting-ip',
       hsts: config.PUBLIC_ORIGIN.startsWith('https://'),
+    };
+  }
+  if (listener === 'ui') {
+    return {
+      allowedHosts: config.uiAllowedHosts,
+      publicOrigin: config.uiOrigin,
+      trustedProxies: [],
+      clientIpHeader: 'x-forwarded-for',
+      hsts: config.uiOrigin.startsWith('https://'),
     };
   }
   return {
@@ -178,6 +192,14 @@ export function createPrivateApp(deps: AppDeps, mounts: Mount[] = []): Express {
   const limiter = deps.limiter ?? new RateLimiter();
   const app = baseApp(sec, limiter);
   for (const m of mounts) m(app, { listener: 'private', sec, limiter });
+  return finish(app, deps.logger);
+}
+
+export function createUiApp(deps: AppDeps, mounts: Mount[] = []): Express {
+  const sec = securityConfig(deps.config, 'ui');
+  const limiter = deps.limiter ?? new RateLimiter();
+  const app = baseApp(sec, limiter);
+  for (const m of mounts) m(app, { listener: 'ui', sec, limiter });
   return finish(app, deps.logger);
 }
 

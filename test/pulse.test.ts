@@ -57,6 +57,7 @@ async function gatewayWith(pulseUrl: string, pulseToken?: string) {
     GATEWAY_MODE: 'test',
     PORT: '0',
     PRIVATE_PORT: '0',
+    UI_PORT: '0',
     DATA_DIR: dir,
     PULSE_URL: pulseUrl,
     PULSE_API_TOKEN: pulseToken,

@@ -71,8 +71,10 @@ export interface TestGateway {
   gw: Gateway;
   /** Public listener (tunnel side). */
   origin: string;
-  /** Private listener (tailnet side). */
+  /** Private listener (tailnet side): consent, admin, /locate. */
   privateOrigin: string;
+  /** UI listener (tailnet side, its own origin): GEV globe, /pulse. */
+  uiOrigin: string;
   provider: 'tailscale' | 'password';
   password: string;
   totpSecret: string;
@@ -99,8 +101,10 @@ async function start(
 ): Promise<TestGateway> {
   const port = await freePort();
   const privatePort = await freePort();
+  const uiPort = await freePort();
   const origin = `http://127.0.0.1:${port}`;
   const privateOrigin = `http://127.0.0.1:${privatePort}`;
+  const uiOrigin = `http://127.0.0.1:${uiPort}`;
   const dir = mkdtempSync(path.join(tmpdir(), 'gw-oauth-'));
   const password = 'correct horse battery staple';
   const totpSecret = generateTotpSecret();
@@ -109,8 +113,10 @@ async function start(
     HOST: '127.0.0.1',
     PORT: String(port),
     PRIVATE_PORT: String(privatePort),
+    UI_PORT: String(uiPort),
     PUBLIC_ORIGIN: origin,
     PRIVATE_ORIGIN: privateOrigin,
+    UI_ORIGIN: uiOrigin,
     DATA_DIR: dir,
     LOGIN_PROVIDER: provider,
     ...(provider === 'tailscale' ? { OWNER_TAILSCALE_LOGIN: OWNER_TS_LOGIN } : {}),
@@ -135,6 +141,7 @@ async function start(
     gw,
     origin,
     privateOrigin,
+    uiOrigin,
     provider,
     password,
     totpSecret,

@@ -13,7 +13,7 @@ import type { Csrf } from '../auth/csrf.js';
 import type { Config } from '../config.js';
 import { ipOf, pageHeaders, rateLimit, sameOriginPost } from '../http/security.js';
 import type { LocationStore } from '../location/store.js';
-import { esc, page } from '../ui/html.js';
+import { esc, navFor, page } from '../ui/html.js';
 import { ClientError, type ClientRegistry, type OAuthClient } from './clients.js';
 import { verifyPkce, type TokenStore } from './tokens.js';
 
@@ -679,7 +679,7 @@ ${recent ? `<div class="card warn"><p><strong>${recent} grant(s) created in the 
 <h2>Token grants</h2><div class="card"><table><tr><th>Grant</th><th>Client</th><th>Issued</th><th>Last used</th><th>Refresh expires</th><th></th></tr>${famRows || '<tr><td colspan="6">None</td></tr>'}</table></div>
 <h2>Location devices</h2><div class="card"><table><tr><th>Name</th><th>Created</th><th>Last fix</th><th></th></tr>${devRows || '<tr><td colspan="4">None</td></tr>'}</table><p class="muted">Add devices with <code>npm run devices -- add NAME</code> on the server.</p></div>
 <h2>Recent audit events</h2><div class="card"><table><tr><th>Time</th><th>Event</th><th>Client</th><th>IP</th></tr>${auditRows}</table></div>`,
-          { nav: true },
+          { nav: navFor(config) },
         ),
       );
     });

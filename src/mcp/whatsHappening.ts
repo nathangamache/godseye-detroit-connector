@@ -59,7 +59,10 @@ export function whereAmI(store: LocationStore, config: Config, now = Date.now())
   if (!pos) {
     return {
       content: [
-        { type: 'text', text: noFixMessage(config.linkOrigin, config.LOCATION_RETENTION_HOURS) },
+        {
+          type: 'text',
+          text: noFixMessage(config.privateOrigin, config.LOCATION_RETENTION_HOURS),
+        },
         { type: 'text', text: JSON.stringify({ found: false }) },
       ],
     };
@@ -71,7 +74,7 @@ export function whereAmI(store: LocationStore, config: Config, now = Date.now())
   if (pos.stale) {
     lines.push(
       `STALE: this fix is older than ${config.LOCATION_STALE_MINUTES} minutes, so Nathan may have moved. ` +
-        `Say how old it is, and suggest he opens ${config.linkOrigin}/locate/ (needs Tailscale) or checks OwnTracks.`,
+        `Say how old it is, and suggest he opens ${config.privateOrigin}/locate/ (needs Tailscale) or checks OwnTracks.`,
     );
   }
   return {
@@ -221,7 +224,7 @@ export async function whatsHappeningHere(
         content: [
           {
             type: 'text',
-            text: noFixMessage(deps.config.linkOrigin, deps.config.LOCATION_RETENTION_HOURS),
+            text: noFixMessage(deps.config.privateOrigin, deps.config.LOCATION_RETENTION_HOURS),
           },
         ],
       };

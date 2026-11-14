@@ -1,6 +1,7 @@
 /**
- * Owner-only UI: /pulse (static build or placeholder), optional /pulse/api
- * proxy, and the GEV globe at "/" (reverse proxy). Installed last.
+ * Owner-only UI on the UI listener (its own origin, tailscale serve :8443): /pulse (static
+ * build or placeholder), optional /pulse/api proxy, and the GEV globe at "/" (reverse
+ * proxy). Installed last. Consent, admin and /locate live on the other private origin.
  *
  * Shared nav injection into GEV's index.html is intentionally skipped: GEV's
  * CSP forbids inline scripts/styles, its UI owns the whole viewport, and an
@@ -15,7 +16,7 @@ import type { Login } from '../auth/login.js';
 import type { Config } from '../config.js';
 import { pageHeaders } from '../http/security.js';
 import type { Logger } from '../log.js';
-import { page } from './html.js';
+import { navFor, page } from './html.js';
 import { createProxy } from './proxy.js';
 
 /** Gateway-owned path prefixes that must never fall through to GEV. */
@@ -88,7 +89,7 @@ export function installUi(app: Express, ctx: AppContext, d: UiDeps): void {
           `<h1>Detroit Pulse</h1>
 <div class="card"><p>Pulse isn't running on this server yet, so there is no scanner-radio map to show.</p>
 <p class="muted">When a Pulse UI build exists, set <code>PULSE_STATIC_DIR</code> to its directory (built with <code>base: '/pulse/'</code>) and restart the gateway. The API contract is in <code>docs/pulse-api-contract.md</code>.</p></div>`,
-          { nav: true },
+          { nav: navFor(config) },
         ),
       );
     });
@@ -114,7 +115,7 @@ export function installUi(app: Express, ctx: AppContext, d: UiDeps): void {
       unavailableHtml: page(
         "God's Eye View unavailable",
         "<h1>God's Eye View is not running</h1><p>Start the GEV service and reload.</p>",
-        { nav: true },
+        { nav: navFor(config) },
       ),
     });
     app.use(owner, (req, res) => gev(req, res));

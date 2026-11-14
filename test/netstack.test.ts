@@ -91,6 +91,7 @@ beforeAll(async () => {
     ...PROD_ENV,
     PORT: String(await freePort()),
     PRIVATE_PORT: String(await freePort()),
+    UI_PORT: String(await freePort()),
     DATA_DIR: dir,
     GEV_MCP_ENABLED: 'false',
     GEV_PROXY_ENABLED: 'false',

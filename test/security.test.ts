@@ -275,7 +275,14 @@ describe('production configuration', () => {
     expect(c.authorizationEndpoint).toBe('https://godseye.example-tailnet.ts.net/oauth/authorize');
     expect(c.issuer).toBe('https://godseye.gamachecloud.com');
     expect(c.mcpResource).toBe('https://godseye.gamachecloud.com/mcp');
-    expect(c.linkOrigin).toBe('https://godseye.example-tailnet.ts.net');
+    // Globe links open the UI origin, a different origin from consent and admin.
+    expect(c.linkOrigin).toBe('https://godseye.example-tailnet.ts.net:8443');
+    expect(c.uiOrigin).toBe('https://godseye.example-tailnet.ts.net:8443');
+    expect(() => loadConfig({ ...prod, UI_ORIGIN: prod.PRIVATE_ORIGIN })).toThrow(/UI_ORIGIN/);
+    expect(() =>
+      loadConfig({ ...prod, UI_ORIGIN: 'http://godseye.example-tailnet.ts.net:8443' }),
+    ).toThrow(/https UI_ORIGIN/);
+    expect(() => loadConfig({ ...prod, UI_HOST: '127.0.0.1' })).toThrow(/UI_HOST/);
     expect(c.publicAuthorize).toBe(false);
   });
   it('the public authorize fallback is opt-in and needs password+TOTP', () => {
@@ -302,6 +309,7 @@ describe('production mode listeners', () => {
       ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
+      UI_PORT: String(await freePort()),
       OWNER_TAILSCALE_LOGIN: OWNER,
       DATA_DIR: dir,
       GEV_MCP_ENABLED: 'false',

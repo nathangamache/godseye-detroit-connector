@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { Express } from 'express';
-import { createPrivateApp, createPublicApp, hardenServer } from './app.js';
+import { createPrivateApp, createPublicApp, createUiApp, hardenServer } from './app.js';
 import { Audit } from './audit.js';
 import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import type { Config } from './config.js';
@@ -57,13 +57,17 @@ export interface GatewayCore {
 export interface Gateway extends GatewayCore {
   app: Express;
   privateApp: Express;
+  uiApp: Express;
   server: Server;
   privateServer: Server;
+  uiServer: Server;
   /** Public listener port and URL (127.0.0.1 or the bind host). */
   port: number;
   url: string;
   privatePort: number;
   privateUrl: string;
+  uiPort: number;
+  uiUrl: string;
   close(): Promise<void>;
 }
 
@@ -189,6 +193,7 @@ export async function startGateway(
   const deps = { ...core };
   const app = createPublicApp(deps, bind(overrides.routes?.public ?? [], core));
   const privateApp = createPrivateApp(deps, bind(overrides.routes?.private ?? [], core));
+  const uiApp = createUiApp(deps, bind(overrides.routes?.ui ?? [], core));
   const listen = (a: Express, port: number, host: string) =>
     new Promise<Server>((resolve, reject) => {
       const s = a.listen(port, host, () => resolve(s));
@@ -197,15 +202,24 @@ export async function startGateway(
   const server = await listen(app, config.PORT, config.HOST);
   hardenServer(server);
   let privateServer: Server;
+  let uiServer: Server;
   try {
     privateServer = await listen(privateApp, config.PRIVATE_PORT, config.PRIVATE_HOST);
+    try {
+      uiServer = await listen(uiApp, config.UI_PORT, config.uiHost);
+    } catch (err) {
+      privateServer.close();
+      throw err;
+    }
   } catch (err) {
     server.close();
     throw err;
   }
   hardenServer(privateServer);
+  hardenServer(uiServer);
   const port = (server.address() as AddressInfo).port;
   const privatePort = (privateServer.address() as AddressInfo).port;
+  const uiPort = (uiServer.address() as AddressInfo).port;
   const fmt = (h: string, p: number) =>
     `http://${h.includes(':') ? `[${h}]` : h === '0.0.0.0' ? '127.0.0.1' : h}:${p}`;
 
@@ -226,6 +240,7 @@ export async function startGateway(
   logger.info('gateway_listening', {
     public: `${config.HOST}:${port}`,
     private: `${config.PRIVATE_HOST}:${privatePort}`,
+    ui: `${config.uiHost}:${uiPort}`,
     mode: config.mode,
     login: config.loginProvider,
     public_authorize_fallback: config.publicAuthorize,
@@ -239,16 +254,20 @@ export async function startGateway(
     ...core,
     app,
     privateApp,
+    uiApp,
     server,
     privateServer,
+    uiServer,
     port,
     url: fmt(config.HOST, port),
     privatePort,
     privateUrl: fmt(config.PRIVATE_HOST, privatePort),
+    uiPort,
+    uiUrl: fmt(config.uiHost, uiPort),
     async close() {
       clearInterval(prune);
       await core.gev?.stop();
-      await Promise.all([closeServer(server), closeServer(privateServer)]);
+      await Promise.all([closeServer(server), closeServer(privateServer), closeServer(uiServer)]);
       core.db.close();
     },
   };
