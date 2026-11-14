@@ -124,7 +124,9 @@ to start in production otherwise.
 5. **Your login name**: shown on the admin console Users page (e.g. `you@example.com` or
    `you@github`). That exact value goes in `OWNER_TAILSCALE_LOGIN`.
 6. Keep **Funnel off** for this node (`serve.json` also sets `AllowFunnel: false` on both
-   ports), and don't advertise subnet routes or an exit node from it.
+   ports), and don't advertise subnet routes or an exit node from it. Never enable Tailscale
+   SSH on it (no `--ssh` in `TS_EXTRA_ARGS`): a shell in the sidecar shares the gateway's
+   network namespace, private listener on `127.0.0.2` included.
 
 ## Production: the sidecar container
 

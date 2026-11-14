@@ -4,8 +4,9 @@
 `/mcp`. Everything a human logs into is reachable only over the owner's tailnet, and the two
 actions that matter most (approving a grant, admin) also need an authenticator code. This
 document is the threat model, the controls that answer it, what's left over, and the checklist
-to pass before the tunnel goes live. It was revised after an adversarial review (2026-11-14);
-claims that review disproved have been removed or corrected.
+to pass before the tunnel goes live. It was revised after an adversarial review (2026-11-14)
+and again after an independent verification of those fixes; claims either disproved have been
+removed or corrected.
 
 ## Architecture in one picture
 
@@ -69,9 +70,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   listener binds the sidecar's compose-network address `172.30.77.20:7700`, not `0.0.0.0`, so
   the tailnet can't reach it either (which would also have skipped the Cloudflare WAF).
 * **Production refuses to start** if the private or UI host is `127.0.0.1`, `::1`, `localhost`, a
-  wildcard, or not a loopback alias; if the public host is a wildcard or loopback; if
+  wildcard, or not a bare dotted loopback alias; if the public host is a wildcard or loopback; if
   `TRUSTED_PROXY_IPS` is empty or contains loopback; or if `TAILSCALE_TRUSTED_PROXY_IPS` is not
-  loopback.
+  loopback. Addresses are **parsed**, not compared as text, so every spelling counts:
+  `0:0:0:0:0:0:0:0`, `::0`, `0::`, `::ffff:0:0`, `::ffff:7f00:1`, `0:0:0:0:0:ffff:7f00:1`,
+  brackets, zones and whitespace are refused exactly like `::`, `0.0.0.0` and `127.0.0.1`.
 * `test/netstack.test.ts` reproduces the review's netstack stand-in (accept on the node address,
   re-dial `127.0.0.1:<port>`) and shows it reaches neither listener nor owner identity, while a
   serve stand-in proxying to `127.0.0.2` still does.
@@ -120,11 +123,18 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   UI origin the owner pages are 404. Production refuses `UI_ORIGIN == PRIVATE_ORIGIN`.
 * A script in a GEV or Pulse page is cross-origin to the owner pages: it can't read their
   responses (no CORS headers), and its POSTs fail the Origin/`Sec-Fetch-Site: same-origin`
-  check. It also can't read `/locate`'s device token from that origin's storage.
-* Cookies ignore ports, so the GEV proxy drops upstream `Set-Cookie` (no cookie tossing from the
-  UI origin) and all gateway cookies are `__Host-`, HttpOnly, SameSite=Strict. Gateway pages send
-  `frame-ancestors 'none'` and `X-Frame-Options: DENY`; proxied UI responses add
-  `frame-ancestors 'self'`.
+  check. In production the Origin must equal the configured https origin exactly
+  (`PRIVATE_ORIGIN` for consent, admin, step-up and `/locate`), never `http://<Host>`. It also
+  can't read `/locate`'s device token from that origin's storage.
+* Cookies and `Clear-Site-Data` ignore ports, so the GEV proxy drops upstream `Set-Cookie` (no
+  cookie tossing from the UI origin) and `Clear-Site-Data` (no wiping the owner origin's step-up
+  and CSRF cookies), and all gateway cookies are `__Host-`, HttpOnly, SameSite=Strict. It also
+  drops upstream CORS (`Access-Control-*`, `Timing-Allow-Origin`), so no other site can read the
+  owner-only UI with the owner's ambient identity. Gateway pages send `frame-ancestors 'none'`
+  and `X-Frame-Options: DENY`; proxied UI responses add `frame-ancestors 'self'`.
+* Each listener has its **own rate limiter**. Behind `tailscale serve` all requests come from
+  `127.0.0.1`, so with a shared one heavy globe use (or a script on the UI origin) would have
+  answered 429 on consent and admin.
 
 ### Process and network isolation (production)
 
@@ -145,14 +155,20 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * **Host firewall** (`docs/host-firewall.md`, needs root): `DOCKER-USER` and `INPUT` rules drop
   traffic from the godseye subnets to RFC 1918, the CGNAT tailnet range (`100.64.0.0/10`), and
   every address of the host itself, so a compromised container can't reach host services, the
-  LAN or the tailnet (as the host's node). Containers use public DNS with no search domain (no
-  LAN resolver, no MagicDNS, no tailnet names).
+  LAN or the tailnet (as the host's node). `tailscaled` puts its own `ts-forward` jump (which
+  accepts everything out of `tailscale0`) back above `DOCKER-USER` whenever it starts, so
+  `godseye-firewall-check.service` re-orders the jumps on every `tailscaled` start and from a
+  timer, inserting before deleting so no chain is ever without its jump. Containers use public
+  DNS with no search domain (no LAN resolver, no MagicDNS, no tailnet names).
 * Mounts: the GEV clone **read-only** (gev, gev-mcp); three small writable volumes for the paths
   GEV writes; the gateway's data volume; the Tailscale state volume; the serve config read-only.
   No docker socket, no home directory, no `~/.ssh`, no other `.env`. No published host ports
   (`docker-compose.debug.yml` can publish the public listener on `127.0.0.1:7700` for debugging).
-* Secrets come from mode-600 env files read by compose; images contain no secrets. npm and
-  corepack are removed from the runtime image.
+* Secrets come from mode-600 env files read by compose; images contain no secrets
+  (`.dockerignore` keeps `deploy/secrets` and `.env*` out of the build context). npm and
+  corepack are removed from the runtime image. The image's files are root-owned and
+  normalised to 644/755 in the build stage (no group/other write, no set-id bits), so it works
+  for uid 10001 even when built from a `umask 077` checkout.
 
 ### Bypassed-by-design public paths each carry their own auth
 
@@ -185,10 +201,13 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   device tokens and setup codes are stored as SHA-256 hashes; comparisons are constant time.
 * **CIMD**: only client_id URLs on `CIMD_ALLOWED_CLIENT_IDS` (claude.ai and Claude Code) are
   fetched: https on 443 only, no credentials or fragments, DNS resolved once with every address
-  checked against private/loopback/link-local/CGNAT/multicast/reserved ranges, the socket pinned
-  to the checked address (no rebinding window; the pinned lookup answers Node 24's
-  `{all: true}` form), no redirects, 5 s timeout, 64 KB cap, JSON only, and `client_id` must
-  equal the URL. Cached per `max-age` (60 s–24 h). Tested against a local TLS server.
+  checked against private/loopback/link-local/CGNAT/multicast/reserved ranges (parsed, so any
+  spelling counts), each connection pinned to one checked address (no rebinding window; the
+  pinned lookup answers Node 24's `{all: true}` form, always asynchronously, so a connect that
+  fails at once is an ordinary error rather than an uncaught exception), the checked addresses
+  tried in order when one can't be reached, no connection reuse, no redirects, 5 s in total,
+  64 KB cap, JSON only, and `client_id` must equal the URL. Cached per `max-age` (60 s–24 h).
+  Tested against a local TLS server, including an address that fails synchronously.
 * **Consent page** (consent phishing): for every client it says to approve only a connection you
   started yourself on this device in the last few minutes, and that approving gives the
   *requesting* account access to your location; it shows the client, whether CIMD verified it
@@ -224,7 +243,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 
 * Owner-only before proxying. Strips the nine proxy headers GEV checks plus every `cf-*` and
   `tailscale-*` header, cookies, `Authorization` and `Referer`; rewrites Host/Origin to the
-  upstream; refuses foreign Origins (the private origin included); drops upstream `Set-Cookie`.
+  upstream; refuses foreign Origins (the private origin included). From responses it drops
+  every header that acts beyond the response itself: `Set-Cookie`, `Clear-Site-Data`,
+  `Access-Control-*`, `Timing-Allow-Origin`, `Strict-Transport-Security` (per host, so
+  `max-age=0` would undo the gateway's own for the owner pages), `Alt-Svc`, `NEL`, `Report-To`
+  and `Reporting-Endpoints`.
 * Blocks `/api/setup`, `/api/realtime/oauth*`, `/api/openai/oauth*`, GEV's `/mcp`, `/panel`, Vite
   internals, `/node_modules`, `/src/` and dotfiles; rejects traversal and encoded separators.
   Gateway-reserved prefixes never fall through to GEV.
@@ -275,20 +298,38 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * Images pinned by digest: `node:24.22.3-bookworm-slim@sha256:dc26ae92…`,
   `tailscale/tailscale:v1.104.4@sha256:ed6480b3…`, `cloudflare/cloudflared:2026.11.0@sha256:bf723075…`.
 * **GEV is built in a sandbox** (`scripts/build-gev.sh`): the pinned node image, the caller's uid
-  with no capabilities, a read-only root, only the clone mounted, `--ignore-scripts`, only
-  `CESIUM_ION_TOKEN` passed, on its own network that the host firewall keeps off the LAN and
-  tailnet. Review upstream diffs before rebuilding; GEV code runs in the gev and gev-mcp
-  containers.
-* `scripts/tighten-permissions.sh` removes group/other write from the repo and the GEV clone and
-  locks `deploy/secrets` and the data directories, so another local account in your group can't
-  change what later runs with your docker rights.
+  with no capabilities, a read-only root, `--ignore-scripts`, only `CESIUM_ION_TOKEN` passed, on
+  its own network that the host firewall keeps off the LAN and tailnet. The container gets a
+  throwaway **copy** of the clone's working tree: no `.git` (build code can't plant a
+  `core.fsmonitor`, hook or filter that a later host `git` command would run), no `.env*`
+  files, logs or caches. Only `dist/` and `node_modules/` come back, only as real directories
+  (a symlink in their place is refused, never followed), with modes set by `find -P` on
+  directories and regular files only (readable by uid 10001, no set-id bits). The `git status`
+  it suggests runs with `-c core.fsmonitor= -c core.hooksPath=/dev/null --no-pager`, and it
+  warns if the clone's `.git` already carries such settings from an earlier, unconfined build.
+  Review upstream diffs before rebuilding; GEV code runs in the gev and gev-mcp containers.
+* `scripts/tighten-permissions.sh` removes group/other write (and set-id bits in the GEV clone)
+  from the repo and the GEV clone and locks `deploy/secrets` and the data directories, so another
+  local account in your group can't change what later runs with your docker rights. It never
+  chmods through a symlink.
 
 ## Residual risks
 
-* **The host firewall needs root and must be installed** (`docs/host-firewall.md`). Until it is,
-  any compromised container reaches host services bound to `0.0.0.0`, the LAN and the tailnet as
-  the host's node. Docker's network isolation already blocks the godseye networks from each
-  other where the compose file separates them.
+* **The host firewall needs root and must be installed** (`docs/host-firewall.md`), the check
+  unit and timer included. Until it is, any compromised container reaches host services bound
+  to `0.0.0.0`, the LAN and the tailnet as the host's node. Docker's network isolation already
+  blocks the godseye networks from each other where the compose file separates them. Once it
+  is installed, these gaps remain:
+  * after a `tailscaled` start, `ts-forward` sits above `DOCKER-USER` until the check unit's
+    next look (about 2 s); other reorderings are caught within about 30 s. Tailscale's
+    `--netfilter-mode=nodivert` would close that window but changes the host's own Tailscale
+    firewalling, so it is not set up;
+  * the rules are IPv4 only (the compose networks are IPv4 only; add `ip6tables` rules if that
+    changes);
+  * traffic to the home's own public address is "internet" to the rules. If the router does
+    hairpin NAT, port-forwarded LAN services are reachable that way (possibly seen as coming
+    from a LAN address). Forward no ports you don't need, or block the WAN address in
+    `GODSEYE-EGRESS` too.
 * **Host processes can reach the containers.** `DOCKER-USER` filters traffic *from* containers,
   not to them: any process on the host can call `gev:7701` on its bridge address and spend GEV's
   quotas (GEV's routes trust requests without proxy headers), or try the relay (it refuses every
@@ -297,7 +338,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   can open the UIs and `/locate` as the owner, and can start (but not approve) a consent. The
   step-up code is what stands between it and a grant or admin. An attacker with that ambient
   identity can also burn the step-up lockout (5 wrong codes) and keep you out of admin for up to
-  an hour.
+  an hour: all tailnet traffic arrives from `127.0.0.1`, so the per-client limits on the private
+  listener (authorize, consent, step-up, admin) are effectively one bucket for all your devices.
+  The UI listener has its own limiter, so the globe can't exhaust them.
 * **Same browser, two origins.** The UI origin is cross-origin to the owner pages but same-site:
   it can navigate the browser to a consent page (you still need the code), and SameSite=Strict
   cookies are sent on such same-site requests. Cookie tossing through GEV responses is blocked
@@ -318,11 +361,20 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   `127.0.0.1:7702`/`7703` and assert the identity header, and no container isolation applies. The
   step-up code still guards consent and admin. Not for go-live.
 * **Shared network namespace**: restarting the sidecar without the gateway leaves the gateway
-  without networking until it is recreated (availability only).
+  without networking until it is recreated (availability only). Anything that gets a shell in
+  the sidecar shares the namespace with `127.0.0.2`, which is why the sidecar must never run
+  Tailscale SSH (`--ssh` in `TS_EXTRA_ARGS`).
 * **Rate limits** are single-process and reset on restart; the global budgets (failed token
-  requests, registrations, unauthenticated audit rows) can be exhausted by an attacker past the
-  WAF, which delays legitimate refreshes or registrations (availability only). Cloudflare's rate
-  limiting rule is the durable layer.
+  requests, registrations, unauthenticated audit rows, tool quotas) can be exhausted by an
+  attacker past the WAF, which delays legitimate refreshes or registrations (availability
+  only). They are kept apart from the per-client keys, so churning through client keys (for
+  example `/healthz` from many addresses) can no longer evict and so reset them. Cloudflare's
+  rate limiting rule is the durable layer.
+* **GEV builds still run upstream code with internet access** (the npm registry), now only
+  against a copy of the clone, and what they produce (`dist/`, `node_modules/`) runs in the gev
+  and gev-mcp containers. A clone built with the earlier in-place version of
+  `scripts/build-gev.sh` may already carry a planted `.git` setting or hook: the script warns
+  about those; re-clone GEV if it does, and use only the hardened `git` command until then.
 * **Prompt injection** can't be eliminated by labelling; Claude may still be swayed by crafted
   transcripts or headlines. Tools are read-only, which bounds the damage to bad answers.
 * **Location sensitivity**: Claude (and Anthropic's retention) sees the coordinates it asks for.
@@ -339,8 +391,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 Build and tests
 
 - [ ] `npm ci && npm run build && npm test` passes (typecheck, unit + integration tests, audit with no high/critical) and `npm run lint` is clean.
-- [ ] GEV clone `git status` is clean, built with `scripts/build-gev.sh` (not on the host); no mode-600 `.env` inside the clone.
+- [ ] GEV built with the current `scripts/build-gev.sh` (a copy in a container, never on the host). It printed **no** `WARNING ... .git` (if it did, re-clone GEV and build again), and the hardened `git -c core.fsmonitor= -c core.hooksPath=/dev/null --no-pager -C <clone> status --short` it prints last shows nothing. No mode-600 `.env` inside the clone.
 - [ ] `scripts/tighten-permissions.sh` prints nothing under "Still group/other-writable", `deploy/secrets` is 700, and your shell profile sets `umask 077`. No other local account is in your primary group, or you accept that it can read (not write) the repo.
+- [ ] The runtime image was rebuilt after the last pull, and works for uid 10001: `docker run --rm --network none --user 10001:10001 godseye-runtime:0.1.0 node -e "require('fs').readFileSync('/app/package.json')"` exits 0.
 
 Secrets and configuration
 
@@ -351,11 +404,12 @@ Tailnet (`docs/tailscale-setup.md`)
 
 - [ ] Policy: the default allow-all rule is gone; `tag:godseye` is reachable only from your personal devices (`group:owner`) on tcp 443 and 8443; the policy's `tests` pass.
 - [ ] Every server, the docker host included, is tagged `tag:server`; `tailscale whois <host 100.x>` shows the tag and no user.
-- [ ] MagicDNS + HTTPS certificates on; Funnel off; no subnet routes or exit node on the godseye node; a tagged, pre-approved, non-reusable auth key in `tailscale.env` (removed after first login).
+- [ ] MagicDNS + HTTPS certificates on; Funnel off; no subnet routes or exit node on the godseye node; a tagged, pre-approved, non-reusable auth key in `tailscale.env` (removed after first login); `TS_EXTRA_ARGS` is only `--advertise-tags=tag:godseye` (never `--ssh`).
 
 Host firewall (`docs/host-firewall.md`, sudo)
 
-- [ ] `godseye-firewall.service` installed from root-owned copies, enabled and `active (exited)`; `sudo iptables -S FORWARD | sed -n 2p` is `-A FORWARD -j DOCKER-USER`.
+- [ ] `godseye-firewall.service`, `godseye-firewall-check.service` and `godseye-firewall-check.timer` installed from root-owned copies and enabled; the first is `active (exited)` and `systemctl list-timers godseye-firewall-check.timer` shows a next run; `sudo iptables -S FORWARD | sed -n 2p` is `-A FORWARD -j DOCKER-USER`.
+- [ ] `sudo systemctl restart tailscaled`, wait 15 s: `sudo iptables -S FORWARD | sed -n 2p` is still `-A FORWARD -j DOCKER-USER`, and `sudo iptables -S INPUT` lists the four `GODSEYE-HOST` jumps before `-j ts-input`.
 - [ ] The three `egress-probe.js` runs from that page print only `PASS` (gev, gateway, gev-mcp): no host, LAN, tailnet or `100.100.100.100`; internet yes (except gev-mcp).
 - [ ] `docker exec godseye-gev cat /etc/resolv.conf` shows no `search …ts.net` line.
 
@@ -371,6 +425,7 @@ Tailnet checks
 - [ ] From a personal device: `nc -vz -w 3 godseye.<tailnet>.ts.net 7700`, `7702`, `7703` and `22` all fail.
 - [ ] From a tagged server and from the docker host: `curl -m 5 https://godseye.<tailnet>.ts.net/oauth/admin` and `:8443/` don't connect; with a temporary `tag:server -> tag:godseye tcp:443` grant they answer **403**; grant removed again.
 - [ ] From a personal device: `https://godseye.<tailnet>.ts.net:8443/api/setup/status` → 404, `:8443/panel/` → 404, `https://godseye.<tailnet>.ts.net:8443/oauth/admin` → 404.
+- [ ] From a personal device: `curl -sI https://godseye.<tailnet>.ts.net:8443/ | grep -iE '^(access-control|clear-site-data|set-cookie)'` prints nothing.
 
 Cloudflare (`docs/cloudflare-setup.md`)
 
