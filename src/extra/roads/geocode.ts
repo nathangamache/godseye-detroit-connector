@@ -78,9 +78,22 @@ export interface GeocoderOptions {
 }
 
 const HIT_TTL = 30 * 86_400_000;
+/** An answer found while an earlier link in the chain errored (a better source may come back). */
+const PARTIAL_HIT_TTL = 86_400_000;
 const MISS_TTL = 86_400_000;
 const REVERSE_TTL = 30 * 86_400_000;
 const BIAS = bboxCenter(SE_MICHIGAN);
+
+/**
+ * How long to keep a lookup, or 0 to keep nothing. Every answer with places is kept (Nominatim's
+ * policy requires its results to be cached, whatever failed before it); an empty answer is kept
+ * briefly, and not at all when it may be empty only because a source errored or a budget ran out.
+ */
+function cacheTtl(r: Cached): number {
+  const failed = r.attempts.some((a) => a.status === 'error' || a.status === 'quota');
+  if (r.places.length) return failed ? PARTIAL_HIT_TTL : HIT_TTL;
+  return failed ? 0 : MISS_TTL;
+}
 
 /** "2100 Woodward Ave" (but not "8 Mile Rd"). */
 export function looksLikeAddress(q: string): boolean {
@@ -203,9 +216,8 @@ export class Geocoder {
     if (!hit) {
       cached = false;
       hit = await this.lookup(q, signal);
-      // An error or a spent budget is not an answer; an empty answer is kept only briefly.
-      if (!hit.attempts.some((a) => a.status === 'error' || a.status === 'quota'))
-        this.o.cache.set(key, hit, hit.places.length ? HIT_TTL : MISS_TTL);
+      const ttl = cacheTtl(hit);
+      if (ttl) this.o.cache.set(key, hit, ttl);
     }
     let places = hit.places.map((p) => ({ ...p }));
     if (opts.near) {

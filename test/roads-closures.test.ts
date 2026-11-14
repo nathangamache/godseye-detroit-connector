@@ -320,6 +320,61 @@ describe('road_closures with every source on', () => {
     expect(x.mock.count(/work_zone_information/)).toBe(2);
   });
 
+  it('waits 5 minutes before polling a failing MDOT RIDE dataset again', async () => {
+    const x = h(ALL_KEYS, {
+      routes: [[/mdotridedata\.state\.mi\.us\/.*\/traffic_events\/query/, () => json({}, 404)]],
+    });
+    const first = await x.run('road_closures', { ...DETROIT });
+    expect(sourcesOf(first).find((s) => s.source === 'mdot_ride')!.note).toContain(
+      'traffic events: MDOT RIDE returned HTTP 404',
+    );
+    for (const step of [61_000, 61_000, 61_000, 116_000]) {
+      x.clock.now += step;
+      const out = await x.run('road_closures', { ...DETROIT });
+      expect(sourcesOf(out).find((s) => s.source === 'mdot_ride')!.note).toContain('HTTP 404');
+    }
+    // 299 s after the failed poll: still not asked again.
+    expect(x.mock.count(/traffic_events/)).toBe(1);
+    x.clock.now += 2_000;
+    await x.run('road_closures', { ...DETROIT });
+    expect(x.mock.count(/traffic_events/)).toBe(2);
+    // A failing work-zone dataset is held just as long.
+    const y = h(ALL_KEYS, {
+      routes: [[/work_zone_information/, () => json({}, 503)]],
+    });
+    await y.run('road_closures', { ...DETROIT });
+    y.clock.now += 120_000;
+    await y.run('road_closures', { ...DETROIT });
+    expect(y.mock.count(/work_zone_information/)).toBe(1);
+  });
+
+  it('keeps the TomTom box inside valid coordinates near the antimeridian and the poles', async () => {
+    const x = h(ALL_KEYS);
+    for (const p of [
+      { lat: 60, lon: 179.9 },
+      { lat: -60, lon: -179.9 },
+      { lat: 89.9, lon: 170 },
+      { lat: -89.9, lon: -10 },
+      { lat: 90, lon: 180 },
+    ]) {
+      const before = x.mock.count(/tomtom/);
+      await x.run('road_closures', { ...p, radius_km: 50 });
+      expect(x.mock.count(/tomtom/)).toBe(before + 1);
+      const [w, s, e, n] = x.mock
+        .last(/tomtom/)!
+        .url.searchParams.get('bbox')!
+        .split(',')
+        .map(Number) as [number, number, number, number];
+      expect(w).toBeGreaterThanOrEqual(-180);
+      expect(e).toBeLessThanOrEqual(180);
+      expect(s).toBeGreaterThanOrEqual(-90);
+      expect(n).toBeLessThanOrEqual(90);
+      expect(w).toBeLessThan(e);
+      expect(s).toBeLessThan(n);
+      expect(bboxAreaKm2([w, s, e, n])).toBeLessThanOrEqual(10_000);
+    }
+  });
+
   it('caches the provincial Ontario lists and keeps only Windsor/Essex', async () => {
     const x = h(ALL_KEYS);
     const out = await x.run('road_closures', { ...WINDSOR_CITY_HALL, radius_km: 15 });

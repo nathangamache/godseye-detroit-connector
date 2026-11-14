@@ -33,6 +33,7 @@ import {
   VALHALLA_ATTRIBUTION,
   routeAvoidingClosures,
   routeSummary,
+  routingSources,
   type Router,
 } from './route.js';
 import { ONTARIO_DISCLAIMER } from './sources/ontario511.js';
@@ -385,7 +386,9 @@ async function resolveEndpoint(
   v: string | Point,
   ctx: ToolContext,
   near: Point | undefined,
-): Promise<{ point: Point; label: string; note?: string } | { error: string }> {
+): Promise<
+  { point: Point; label: string; note?: string; attribution?: string } | { error: string }
+> {
   if (typeof v !== 'string') return { point: v, label: `${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}` };
   if (v.trim().toLowerCase() === 'here') {
     const h = resolveHere(deps.here, 'route_avoiding_closures', ctx);
@@ -397,11 +400,19 @@ async function resolveEndpoint(
     return {
       error: `Could not find "${cleanText(v, 80)}" (tried ${r.attempts.map((t) => `${t.source} ${t.status}`).join(', ')}). Pass {lat, lon} instead.`,
     };
-  return { point: { lat: p.lat, lon: p.lon }, label: `${p.name} [${p.source}]` };
+  return {
+    point: { lat: p.lat, lon: p.lon },
+    label: `${p.name} [${p.source}]`,
+    attribution: p.attribution,
+  };
 }
 
 function routeTool(deps: RoadsToolDeps): ToolDef {
   const schema = jsonSchema(routeSchema);
+  const credit = [
+    VALHALLA_ATTRIBUTION,
+    ...routingSources(deps.closures).map((s) => s.attribution),
+  ].join('; ');
   return {
     name: 'route_avoiding_closures',
     title: 'Driving route that avoids road closures',
@@ -425,7 +436,7 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
       'valhalla',
       'alternate route',
     ],
-    attribution: VALHALLA_ATTRIBUTION,
+    attribution: credit,
     untrustedText: true,
     async run(args, ctx) {
       const parsed = routeSchema.safeParse(args);
@@ -449,8 +460,18 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
           r.closures_avoided.length || r.warnings.length
             ? ' Closure descriptions are third-party text.'
             : '';
+        // Every source whose data the answer carries is credited, in the summary and the data.
+        const credits = r.attributions.length ? ` Closure data: ${r.attributions.join('; ')}.` : '';
+        const ontario = r.closureSources.includes('ontario511') ? ` ${ONTARIO_DISCLAIMER}` : '';
+        const attribution = [
+          ...new Set([
+            VALHALLA_ATTRIBUTION,
+            ...[from.attribution, to.attribution].filter((a): a is string => Boolean(a)),
+            ...r.attributions,
+          ]),
+        ];
         return {
-          summary: `${notes ? `${notes} ` : ''}${routeSummary(r, from.label, to.label)}${extra}`,
+          summary: `${notes ? `${notes} ` : ''}${routeSummary(r, from.label, to.label)}${extra}${credits}${ontario}`,
           data: {
             from: from.label,
             to: to.label,
@@ -463,7 +484,8 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
             warnings: r.warnings,
             ...(r.sources ? { closure_sources: r.sources } : {}),
             note: 'Durations assume free-flowing traffic (no live traffic data).',
-            attribution: VALHALLA_ATTRIBUTION,
+            attribution,
+            ...(ontario ? { disclaimer: ONTARIO_DISCLAIMER } : {}),
           },
         };
       } catch (err) {

@@ -5,8 +5,15 @@
  * second to the server, from every caller together.
  */
 import { haversineM } from '../../util/geo.js';
-import type { ClosureService, RoadItem } from './closures.js';
+import type {
+  ClosureQuery,
+  ClosureService,
+  ClosureSource,
+  RoadItem,
+  SourceId,
+} from './closures.js';
 import {
+  COVERAGE,
   SegmentGrid,
   bboxOf,
   decodePolyline,
@@ -207,9 +214,25 @@ export interface RouteAnswer {
   }>;
   warnings: string[];
   sources?: unknown;
+  /** The closure sources whose items (or counts of them) the answer reports. */
+  closureSources: SourceId[];
+  /** Their attribution lines, in source order. */
+  attributions: string[];
 }
 
 const MAX_MANEUVERS = 60;
+
+/** The closure sources routing may use (TomTom, for one, skips every route query). */
+export function routingSources(closures: ClosureService): ClosureSource[] {
+  const probe: ClosureQuery = {
+    bbox: COVERAGE,
+    when: 'now',
+    include: new Set(['incident', 'work_zone']),
+    now: 0,
+    purpose: 'route',
+  };
+  return closures.sources.filter((s) => !s.skip?.(probe));
+}
 
 function describe(it: RoadItem): string {
   const where = it.road
@@ -246,6 +269,8 @@ export async function routeAvoidingClosures(
   let trip = first;
   const avoided: RouteAnswer['closures_avoided'] = [];
   let sources: unknown;
+  let attributions: string[] = [];
+  const used = new Set<SourceId>();
   if (opts.avoid && deps.closures && first.shape.length > 1) {
     const box = bboxOf(first.shape, 1)!;
     const ans = await deps.closures.query(
@@ -261,6 +286,9 @@ export async function routeAvoidingClosures(
     );
     sources = ans.reports;
     const on = closuresOnRoute(ans.items, first.shape);
+    // Every on-route item is reported: avoided, in a warning, or in the count of the rest.
+    for (const it of on) used.add(it.source);
+    attributions = deps.closures.sources.filter((s) => used.has(s.id)).map((s) => s.attribution);
     const nearEnd = (it: RoadItem) => atTripEnds(it, first.shape, [from, to]);
     const blocking = on.filter((it) => it.full_closure && !nearEnd(it));
     const atEnds = on.filter((x) => x.full_closure && nearEnd(x));
@@ -325,6 +353,8 @@ export async function routeAvoidingClosures(
     closures_avoided: avoided,
     warnings,
     ...(sources ? { sources } : {}),
+    closureSources: [...used],
+    attributions,
   };
 }
 

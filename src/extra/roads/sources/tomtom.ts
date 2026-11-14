@@ -15,7 +15,7 @@ import {
   type FetchResult,
   type RoadItem,
 } from '../closures.js';
-import { clampBox, round6, type BBox, type LonLat } from '../geo.js';
+import { clampBox, clampToWorld, round6, type BBox, type LonLat } from '../geo.js';
 import type { DailyCounter, Http } from '../http.js';
 import { cleanText } from '../text.js';
 
@@ -141,7 +141,10 @@ export function tomtomSource(o: TomTomOptions): ClosureSource {
         ? "not used for routing (TomTom's terms exclude navigation use)"
         : undefined,
     async fetch(q: ClosureQuery, signal: AbortSignal): Promise<FetchResult> {
-      const box: BBox = clampBox(q.bbox, TOMTOM_MAX_KM2);
+      // Valid coordinates first (TomTom refuses lon > 180 or lat > 90, and the refusal would
+      // still spend a call of the daily cap), then the area limit around the trimmed centre.
+      const world = clampToWorld(q.bbox);
+      const box: BBox = clampBox(world, TOMTOM_MAX_KM2);
       if (!o.daily.take())
         throw new QuotaError(
           `daily cap of ${o.daily.max} TomTom incident requests reached; resets at midnight (Detroit time)`,
@@ -154,11 +157,13 @@ export function tomtomSource(o: TomTomOptions): ClosureSource {
       u.searchParams.set('categoryFilter', TOMTOM_CATEGORIES);
       u.searchParams.set('timeValidityFilter', 'present,future');
       const j = await o.http.json('TomTom incidents', u, { signal, maxBytes: 4 * 1024 * 1024 });
+      const trimmed =
+        world !== q.bbox ? 'the search area was trimmed at the antimeridian or a pole' : undefined;
       const clipped =
-        box !== q.bbox ? 'searched the 10,000 km² TomTom allows around the centre' : undefined;
+        box !== world ? 'searched the 10,000 km² TomTom allows around the centre' : undefined;
       return {
         items: parseTomTom(j),
-        note: [clipped, `${o.daily.remaining()} of ${o.daily.max} requests left today`]
+        note: [trimmed, clipped, `${o.daily.remaining()} of ${o.daily.max} requests left today`]
           .filter(Boolean)
           .join('; '),
       };

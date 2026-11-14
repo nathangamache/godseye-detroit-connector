@@ -48,6 +48,17 @@ export function bboxAreaKm2(b: BBox): number {
   return Math.abs(w * h);
 }
 
+/**
+ * Trims a box to valid coordinates, [-180, 180] x [-90, 90]. A box around a point near the
+ * antimeridian or a pole runs past them otherwise; the part beyond is dropped, not wrapped.
+ */
+export function clampToWorld(b: BBox): BBox {
+  const lon = (v: number) => Math.min(180, Math.max(-180, v));
+  const lat = (v: number) => Math.min(90, Math.max(-90, v));
+  const out: BBox = [lon(b[0]), lat(b[1]), lon(b[2]), lat(b[3])];
+  return out.every((v, i) => v === b[i]) ? b : out;
+}
+
 /** Shrinks a box around its centre until its area is at most maxKm2. */
 export function clampBox(b: BBox, maxKm2: number): BBox {
   const area = bboxAreaKm2(b);

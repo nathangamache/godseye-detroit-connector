@@ -7,14 +7,27 @@ import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RoadItem } from '../src/extra/roads/closures.js';
-import { ringPerimeterM } from '../src/extra/roads/geo.js';
+import { decodePolyline, ringPerimeterM } from '../src/extra/roads/geo.js';
 import { Pacer } from '../src/extra/roads/http.js';
-import { parseIntersection, roadFilter } from '../src/extra/roads/geocode.js';
-import { atTripEnds, closuresOnRoute, excludeRings } from '../src/extra/roads/route.js';
+import {
+  ATTRIBUTION as GEO_ATTRIBUTION,
+  parseIntersection,
+  roadFilter,
+} from '../src/extra/roads/geocode.js';
+import {
+  VALHALLA_ATTRIBUTION,
+  atTripEnds,
+  closuresOnRoute,
+  excludeRings,
+} from '../src/extra/roads/route.js';
+import { DETROIT_ATTRIBUTION } from '../src/extra/roads/sources/detroitRow.js';
+import { MDOT_ATTRIBUTION } from '../src/extra/roads/sources/mdotRide.js';
+import { ONTARIO_ATTRIBUTION, ONTARIO_DISCLAIMER } from '../src/extra/roads/sources/ontario511.js';
 import {
   ALL_KEYS,
   COMERICA_PARK,
   MDOT_WORK_ZONES,
+  ONTARIO_CONSTRUCTION,
   encodePolyline,
   harness,
   header,
@@ -139,6 +152,43 @@ describe('geocode_place', () => {
     expect(
       JSON.parse(readFileSync(path.join(x.dir, 'cache', 'nominatim-usage.json'), 'utf8')).count,
     ).toBe(2);
+  });
+
+  it('caches a Nominatim answer even when an earlier geocoder errored', async () => {
+    const x = h({}, { routes: [[/photon\.komoot\.io\/api/, () => json({}, 503)]] });
+    const out = await x.run('geocode_place', { query: 'Belle Isle' });
+    expect(placesOf(out)[0]).toMatchObject({ name: 'Belle Isle Park', source: 'nominatim' });
+    expect(triedOf(out).map((t) => `${t.source}:${t.status}`)).toEqual([
+      'photon:error',
+      'nominatim:ok',
+    ]);
+    const again = await x.run('geocode_place', { query: 'Belle Isle' });
+    expect(placesOf(again)[0]!.name).toBe('Belle Isle Park');
+    expect((again.data as { cached: boolean }).cached).toBe(true);
+    expect(again.summary).toContain('(cached answer)');
+    expect(x.mock.count(/nominatim/)).toBe(1);
+    expect(x.mock.count(/photon/)).toBe(1);
+    // Kept for a day, not a month: Photon gets another chance once it is back.
+    x.clock.now += 86_400_000 + 1_000;
+    await x.run('geocode_place', { query: 'Belle Isle' });
+    expect(x.mock.count(/photon/)).toBe(2);
+  });
+
+  it('does not cache an empty answer when a geocoder errored', async () => {
+    const x = h(
+      {},
+      {
+        routes: [
+          [/photon\.komoot\.io\/api/, () => json({}, 503)],
+          [/nominatim\.openstreetmap\.org\/search/, () => json({}, 503)],
+        ],
+      },
+    );
+    const out = await x.run('geocode_place', { query: 'Belle Isle' });
+    expect(out).toMatchObject({ isError: true, errorKind: 'upstream' });
+    await x.run('geocode_place', { query: 'Belle Isle' });
+    expect(x.mock.count(/photon/)).toBe(2);
+    expect(x.mock.count(/nominatim/)).toBe(2);
   });
 
   it('never calls Nominatim when its daily max is 0', async () => {
@@ -377,9 +427,14 @@ describe('route_avoiding_closures', () => {
         description: 'All lanes closed, follow detour',
       }),
     ]);
-    expect(d.attribution).toBe(
+    // Valhalla's credit, and MDOT's for the closure text it returns (never TomTom's: unused).
+    expect(d.attribution).toEqual([
       'Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL); fix the map: https://www.openstreetmap.org/fixthemap',
-    );
+      MDOT_ATTRIBUTION,
+    ]);
+    expect(out.summary).toContain(`Closure data: ${MDOT_ATTRIBUTION}.`);
+    expect(out.data).not.toHaveProperty('disclaimer');
+    expect(out.summary).not.toContain('"as is"');
     expect(out.summary).toContain('Avoids 1 closure(s)');
     // TomTom is never used for routing (no navigation use under its terms).
     expect(x.mock.count(/tomtom/)).toBe(0);
@@ -418,6 +473,76 @@ describe('route_avoiding_closures', () => {
     expect((out.data as { warnings: string[] }).warnings).toEqual([
       'Closures were not checked (avoid_closures=false).',
     ]);
+    // No closure data used: Valhalla's credit only.
+    expect((out.data as { attribution: string[] }).attribution).toEqual([VALHALLA_ATTRIBUTION]);
+    expect(out.summary).not.toContain('Closure data:');
+  });
+
+  it('credits Ontario 511, with its "as is" disclaimer, for an Ontario closure it avoids', async () => {
+    // A Windsor route straight along the Hwy 401 full-closure fixture, and a detour south of it.
+    const closure = decodePolyline(ONTARIO_CONSTRUCTION[0]!.EncodedPolyline);
+    const from = { lat: 42.225, lon: -82.99 };
+    const to = { lat: 42.255, lon: -82.93 };
+    const at = (p: [number, number]) => ({ lat: p[1], lon: p[0] });
+    const direct = [
+      ...line(from, at(closure[0]!), 10),
+      ...line(at(closure[0]!), at(closure[closure.length - 1]!), 10),
+      ...line(at(closure[closure.length - 1]!), to, 10),
+    ];
+    const detour = line(from, { lat: 42.2, lon: -82.95 }, 10).concat(
+      line({ lat: 42.2, lon: -82.95 }, to, 10),
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    const x = h(
+      { ...ALL_KEYS },
+      {
+        routes: [
+          [
+            /valhalla/,
+            (_u, init) => {
+              const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+              seen.push(body);
+              return json({
+                trip: {
+                  summary: { length: 4, time: 600 },
+                  legs: [
+                    {
+                      shape: encodePolyline(body.exclude_polygons ? detour : direct, 6),
+                      maneuvers: [],
+                    },
+                  ],
+                },
+              });
+            },
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', { from, to });
+    expect(out.isError).toBeFalsy();
+    expect(seen).toHaveLength(2);
+    const d = out.data as {
+      closures_avoided: Array<{ road: string; source: string }>;
+      attribution: string[];
+      disclaimer?: string;
+    };
+    expect(d.closures_avoided).toEqual([
+      expect.objectContaining({ road: 'Hwy 401', source: 'ontario511' }),
+    ]);
+    expect(d.attribution).toEqual([VALHALLA_ATTRIBUTION, ONTARIO_ATTRIBUTION]);
+    expect(d.disclaimer).toBe(ONTARIO_DISCLAIMER);
+    expect(out.summary).toContain(ONTARIO_ATTRIBUTION);
+    expect(out.summary).toContain(ONTARIO_DISCLAIMER);
+    // The tool's own credit line names every closure source routing can use (not TomTom).
+    const credit = x.tools.route_avoiding_closures!.attribution!;
+    for (const a of [
+      VALHALLA_ATTRIBUTION,
+      DETROIT_ATTRIBUTION,
+      MDOT_ATTRIBUTION,
+      ONTARIO_ATTRIBUTION,
+    ])
+      expect(credit).toContain(a);
+    expect(credit).not.toContain('TomTom');
   });
 
   it('geocodes place names for from and to', async () => {
@@ -432,6 +557,11 @@ describe('route_avoiding_closures', () => {
     const locs = seen[0]!.locations as Array<{ lat: number; lon: number }>;
     expect(locs[0]!.lat).toBeCloseTo(COMERICA_PARK.lat, 3);
     expect(out.summary).toContain('Comerica Park [photon]');
+    // The geocoder that placed an endpoint is credited too.
+    expect((out.data as { attribution: string[] }).attribution).toEqual([
+      VALHALLA_ATTRIBUTION,
+      GEO_ATTRIBUTION.photon,
+    ]);
     const bad = await x.run('route_avoiding_closures', { from: 'Nowhere Atall', to: BELLE_ISLE });
     expect(bad.isError).toBe(true);
     expect(bad.summary).toContain('Could not find "Nowhere Atall"');
@@ -596,6 +726,12 @@ describe('route_avoiding_closures', () => {
     ).toBe(true);
     expect(w[3]).toContain('7 more work site(s) on the route');
     expect(x.mock.count(/photon\.komoot\.io\/reverse/)).toBe(3);
+    // City permit text in the warnings carries the city's credit.
+    expect((out.data as { attribution: string[] }).attribution).toEqual([
+      VALHALLA_ATTRIBUTION,
+      DETROIT_ATTRIBUTION,
+    ]);
+    expect(out.summary).toContain(`Closure data: ${DETROIT_ATTRIBUTION}.`);
   });
 
   it('reports Valhalla failures as errors', async () => {

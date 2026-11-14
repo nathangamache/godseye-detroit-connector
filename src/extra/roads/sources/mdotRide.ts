@@ -2,7 +2,7 @@
  * MDOT RIDE (Real-Time Data Exchange): "Work Zone Location Information" (WZDx v4, listed in the
  * USDOT WZDx registry as mdot_4: GeoJSON, 5-minute updates, api_key header) and "Traffic
  * Events". Off until MDOT_RIDE_API_KEY is set. Polled at most every MDOT_RIDE_CACHE_S (≥ 5 min)
- * per dataset, whoever asks.
+ * per dataset, whoever asks, whether the last poll worked or failed.
  *
  * The RIDE documentation sits behind a MiLogin for Business login, so the Traffic Events dataset
  * name and its record shape are unverified: the slug is configurable and the parser accepts
@@ -213,9 +213,11 @@ export function parseRideRecord(
 }
 
 export function mdotRideSource(o: MdotOptions): ClosureSource {
+  // A failed poll is held as long as a good one, so a failing dataset (an unverified events
+  // slug, an outage) is still asked at most once per MDOT_RIDE_CACHE_S.
   const caches = {
-    work_zones: new TtlCache<RoadItem[]>(o.cacheMs, o.now, 60_000),
-    events: new TtlCache<RoadItem[]>(o.cacheMs, o.now, 60_000),
+    work_zones: new TtlCache<RoadItem[]>(o.cacheMs, o.now, o.cacheMs),
+    events: new TtlCache<RoadItem[]>(o.cacheMs, o.now, o.cacheMs),
   };
   const load = async (dataset: string, kind: Kind): Promise<RoadItem[]> => {
     const u = new URL(`${o.baseUrl}/${encodeURIComponent(dataset)}/query`);
