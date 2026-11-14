@@ -1,0 +1,41 @@
+{
+  "built_at": "2026-11-14T06:16:42.602Z",
+  "license": "Public domain: works of the U.S. Government (17 U.S.C. § 105); FRA dataset licence \"Public Domain\".",
+  "sources": {
+    "crossings": {
+      "name": "FRA Crossing Inventory Data (Form 71) - Current",
+      "publisher": "Federal Railroad Administration, Office of Safety",
+      "dataset": "https://data.transportation.gov/Railroads/Crossing-Inventory-Data-Form-71-Current/m2f8-22s6",
+      "query": "https://data.transportation.gov/resource/m2f8-22s6.csv?statename=MICHIGAN&$limit=50000",
+      "input_sha256": "51eff4ee4fde9048ef273dae5d05385b7b901caa45c4fe4c83dc0acfc8177acc",
+      "input_mtime": "2026-11-14T05:19:18.050Z",
+      "rows": 13498,
+      "closed_excluded": 5966,
+      "missing_or_bad_coordinates_excluded": 36,
+      "kept": 7496,
+      "latest_revision": "2026-11-12"
+    },
+    "lines": {
+      "name": "NTAD North American Rail Network Lines",
+      "publisher": "U.S. DOT Bureau of Transportation Statistics / FRA",
+      "dataset": "https://doi.org/10.21949/1528950",
+      "query": "https://services.arcgis.com/xOi1kZaI0eWDREZv/arcgis/rest/services/NTAD_North_American_Rail_Network_Lines/FeatureServer/0/query?where=STATEAB%3D%27MI%27&outFields=*&f=geojson",
+      "input_sha256": {
+        "narn_mi_0.geojson": "61b091528d82e2ec2cdf559eb25039135eddf87e02c5af94e2cd77ad739a6aa8",
+        "narn_mi_2000.geojson": "1b69b69d929d60cb53f58047db07757b318ad769cf4cf4b25484df02ccf48643",
+        "narn_mi_4000.geojson": "f14b1b1e495e0c4a2e2684cdf2f30bf6742b8fce518c6c7b83ab2ea30e8078df"
+      },
+      "segments": 5185,
+      "inactive_excluded": 263,
+      "kept": 4922,
+      "active_net_codes": [
+        "M",
+        "O",
+        "Y",
+        "I",
+        "S"
+      ],
+      "coordinate_precision": "1e-5 degrees (~1 m)"
+    }
+  }
+}

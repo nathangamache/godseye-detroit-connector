@@ -1,5 +1,7 @@
 /** Wires storage, tool backends, the MCP surface and HTTP routes into a running gateway. */
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { Express } from 'express';
@@ -12,6 +14,8 @@ import { makeGevCaller } from './gev/tools.js';
 import { LocationStore } from './location/store.js';
 import { createLogger, type Logger } from './log.js';
 import { TokenStore } from './oauth/tokens.js';
+import { RailIndex } from './rail/index.js';
+import { railTools } from './rail/tools.js';
 import { ToolPolicy } from './tools/policy.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/runner.js';
@@ -41,6 +45,7 @@ export interface GatewayCore {
   limiter: RateLimiter;
   sessionSecret: string;
   gev?: GevChild;
+  rail?: RailIndex;
   now: () => number;
 }
 
@@ -94,6 +99,14 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
       maxImages: config.MAX_IMAGES_PER_RESULT,
     },
   });
+  let rail: RailIndex | undefined;
+  if (existsSync(path.join(config.RAIL_DATA_DIR, 'meta.json'))) {
+    rail = RailIndex.load(config.RAIL_DATA_DIR);
+    for (const t of railTools(rail)) registry.register(t);
+    logger.info('rail_data_loaded', { lines: rail.lines.length, crossings: rail.crossings.length, as_of: rail.datasetAsOf() });
+  } else {
+    logger.warn('rail_data_missing', { dir: config.RAIL_DATA_DIR });
+  }
   for (const t of overrides.extraTools ?? []) registry.register(t);
   return {
     config,
@@ -106,6 +119,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     runner,
     limiter,
     sessionSecret: sessionSecretFor(config, db),
+    rail,
     now,
   };
 }
