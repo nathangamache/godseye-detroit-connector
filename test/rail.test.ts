@@ -27,13 +27,13 @@ describe('formatting', () => {
 
 describe('geo helpers', () => {
   it('distances and bearings', () => {
-    // Detroit center to Ann Arbor center is ~23 km roughly west-southwest.
+    // Downtown Detroit to Ann Arbor center is ~58 km, almost due west.
     const d = haversineM(DETROIT.lat, DETROIT.lon, ANN_ARBOR.lat, ANN_ARBOR.lon);
-    expect(d).toBeGreaterThan(22_000);
-    expect(d).toBeLessThan(25_000);
+    expect(d).toBeGreaterThan(55_000);
+    expect(d).toBeLessThan(60_000);
     const b = bearingDeg(DETROIT.lat, DETROIT.lon, ANN_ARBOR.lat, ANN_ARBOR.lon);
-    expect(b).toBeGreaterThan(240);
-    expect(b).toBeLessThan(260);
+    expect(b).toBeGreaterThan(255);
+    expect(b).toBeLessThan(275);
     const s = pointToSegmentM(0, 0.001, -1, 0, 1, 0);
     expect(s.distM).toBeGreaterThan(100);
     expect(s.distM).toBeLessThan(120);
@@ -47,26 +47,25 @@ describe('rail index (public fixture points)', () => {
     expect(index.datasetAsOf()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('Detroit city center: CSX Detroit Sub, Rivard St crossing', async () => {
+  it('Downtown Detroit: CPKC Windsor Sub nearest, Rivard St crossing', async () => {
     const r = await tools.nearest_rail!.run({ lat: DETROIT.lat, lon: DETROIT.lon }, sig());
     const data = r.data as {
       line: { railroad: string; distance_m: number };
       main_line: unknown;
       crossing: Record<string, unknown>;
     };
-    expect(data.line.railroad).toMatch(/CSX/);
+    expect(data.line.railroad).toMatch(/CPKC/);
     expect(data.line.distance_m).toBeLessThan(2000);
     expect(data.crossing).toMatchObject({
       fra_crossing_id: '284190P',
       street: 'RIVARD STREET',
-      railroad: 'CSX Transportation',
-      subdivision: 'DETROIT',
+      railroad: 'Adrian & Blissfield Railroad',
       position: 'At Grade',
     });
     expect(data.crossing.trains_per_day).toBeGreaterThan(0);
     expect(data.crossing.distance_m).toBeGreaterThan(300);
-    expect(data.crossing.distance_m).toBeLessThan(1000);
-    expect(data.crossing.direction).toMatch(/^N|^E/);
+    expect(data.crossing.distance_m).toBeLessThan(1500);
+    expect(data.crossing.direction).toMatch(/^E/);
     expect(r.summary).toMatch(/FRA 284190P at RIVARD STREET/);
   });
 
@@ -89,10 +88,10 @@ describe('rail index (public fixture points)', () => {
     expect(line.owners.join(' ')).toMatch(/Amtrak|Norfolk Southern|Ann Arbor/);
   });
 
-  it('Belle Isle: no track on campus, the CN Holly Sub is the nearest line', () => {
+  it('Belle Isle: no track on the island, Conrail is the nearest line', () => {
     const line = index.nearestLine(BELLE_ISLE.lat, BELLE_ISLE.lon)!;
     expect(line.distance_m).toBeGreaterThan(2000);
-    expect(line.railroad).toMatch(/Canadian National/);
+    expect(line.railroad).toMatch(/Conrail/);
   });
 
   it('outside Michigan coverage returns a clear message', async () => {

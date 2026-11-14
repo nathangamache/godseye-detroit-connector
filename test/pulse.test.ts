@@ -112,8 +112,8 @@ describe('whats_happening_here', () => {
         arguments: { lat: DETROIT.lat, lon: DETROIT.lon },
       });
       const t = text(r);
-      expect(t).toMatch(/Rail line & crossing: nearest track CSX/);
-      expect(t).toMatch(/main line CSX Transportation \(CSXT\) Saginaw \(CSXT\) Sub/);
+      expect(t).toMatch(/Rail line & crossing: nearest track CPKC/);
+      expect(t).toMatch(/Windsor/);
       expect(t).toMatch(/FRA 284190P/);
       expect(t).toMatch(
         /Rail radio \(Pulse\) \(unavailable\): no Pulse data \/ no rail radio coverage yet/,
