@@ -17,6 +17,7 @@ import type { Config } from '../config.js';
 import { ipOf, pageHeaders, rateLimit, sameOriginPost } from '../http/security.js';
 import type { Logger } from '../log.js';
 import { isValidLatLon } from '../util/geo.js';
+import { rateKeyIp } from '../util/net.js';
 import type { Fix, LocationStore } from './store.js';
 
 export interface LocationDeps {
@@ -100,7 +101,7 @@ export function installLocationIngest(app: Express, ctx: AppContext, d: Location
       const token = deviceTokenFrom(req);
       const device = token ? d.locations.verifyDeviceToken(token) : null;
       if (!device) {
-        const r = ctx.limiter.hit(`loc-auth-fail:${ip(req)}`, 20, 15 * 60_000);
+        const r = ctx.limiter.hit(`loc-auth-fail:${rateKeyIp(ip(req))}`, 20, 15 * 60_000);
         if (!r.ok) {
           res
             .status(429)

@@ -10,6 +10,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { request } from 'node:https';
 import type { LookupAddress } from 'node:dns';
+import type { LookupFunction } from 'node:net';
 import { isPrivateIp } from '../util/net.js';
 
 export interface FetchedDoc {
@@ -45,9 +46,10 @@ export function checkCimdUrl(raw: string): URL {
 export async function resolvePublic(
   host: string,
   resolver: Resolver = defaultResolver,
+  isPrivate: (ip: string) => boolean = isPrivateIp,
 ): Promise<LookupAddress> {
   if (isLiteralIp(host)) {
-    if (isPrivateIp(stripBrackets(host)))
+    if (isPrivate(stripBrackets(host)))
       throw new CimdFetchError('client_id host resolves to a non-public address');
     return { address: stripBrackets(host), family: host.includes(':') ? 6 : 4 };
   }
@@ -59,7 +61,7 @@ export async function resolvePublic(
   }
   if (!addrs.length) throw new CimdFetchError('client_id host does not resolve');
   for (const a of addrs) {
-    if (isPrivateIp(a.address))
+    if (isPrivate(a.address))
       throw new CimdFetchError('client_id host resolves to a non-public address');
   }
   return addrs[0]!;
@@ -72,20 +74,46 @@ function isLiteralIp(h: string): boolean {
   return /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.startsWith('[') || h.includes(':');
 }
 
-export function makeCimdFetcher(
-  opts: { timeoutMs?: number; maxBytes?: number; resolver?: Resolver } = {},
-): CimdFetcher {
+/**
+ * A `lookup` for https.request that always answers with the address we validated.
+ * Node 24's net.connect uses autoSelectFamily and calls lookup with {all: true}, expecting
+ * an array; answering with a bare address there fails every fetch with
+ * ERR_INVALID_IP_ADDRESS (review OA-3), so both forms are honoured.
+ */
+export function pinnedLookup(addr: LookupAddress): LookupFunction {
+  return ((_host: string, options: unknown, cb: (...args: unknown[]) => void) => {
+    const all =
+      typeof options === 'object' && options !== null && (options as { all?: boolean }).all;
+    if (all) cb(null, [{ address: addr.address, family: addr.family }]);
+    else cb(null, addr.address, addr.family);
+  }) as unknown as LookupFunction;
+}
+
+export interface CimdFetcherOptions {
+  timeoutMs?: number;
+  maxBytes?: number;
+  resolver?: Resolver;
+  /** Tests only: the port actually connected to (the URL must still say 443). */
+  connectPort?: number;
+  /** Tests only: extra CA for the local TLS test server. */
+  ca?: string | Buffer;
+  /** Tests only: the private-address check (default isPrivateIp). */
+  isPrivate?: (ip: string) => boolean;
+}
+
+export function makeCimdFetcher(opts: CimdFetcherOptions = {}): CimdFetcher {
   const timeoutMs = opts.timeoutMs ?? 5000;
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   return async (raw) => {
     const url = checkCimdUrl(raw);
-    const addr = await resolvePublic(url.hostname, opts.resolver);
+    const addr = await resolvePublic(url.hostname, opts.resolver, opts.isPrivate);
     return new Promise<FetchedDoc>((resolve, reject) => {
       const req = request(
         {
           host: url.hostname,
           servername: url.hostname,
-          port: 443,
+          port: opts.connectPort ?? 443,
+          ...(opts.ca ? { ca: opts.ca } : {}),
           path: url.pathname + url.search,
           method: 'GET',
           headers: {
@@ -93,12 +121,8 @@ export function makeCimdFetcher(
             'user-agent': 'godseye-detroit-connector/0.1 (oauth client metadata)',
           },
           timeout: timeoutMs,
-          // Pin the connection to the address we validated.
-          lookup: (
-            _h: string,
-            _o: unknown,
-            cb: (err: Error | null, address: string, family: number) => void,
-          ) => cb(null, addr.address, addr.family),
+          // Pin the connection to the address we validated (no DNS-rebinding window).
+          lookup: pinnedLookup(addr),
         },
         (res) => {
           if (res.statusCode !== 200) {

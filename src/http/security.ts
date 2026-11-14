@@ -1,6 +1,7 @@
 /** Cross-cutting HTTP protections: headers, Host/Origin checks, rate limits, body caps. */
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { clientIp } from '../util/net.js';
+import { isIP } from 'node:net';
+import { clientIp, rateKeyIp } from '../util/net.js';
 import type { RateLimiter } from '../util/ratelimit.js';
 
 export interface SecurityConfig {
@@ -114,7 +115,9 @@ export function rateLimit(
   keyFn: (req: Request) => string,
 ): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
-    const r = limiter.hit(`http:${name}:${keyFn(req)}`, limit, windowMs);
+    const k = keyFn(req);
+    // Client addresses are keyed per /64 for IPv6 (see rateKeyIp).
+    const r = limiter.hit(`http:${name}:${isIP(k) ? rateKeyIp(k) : k}`, limit, windowMs);
     if (!r.ok) {
       res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
       res.status(429).json({ error: 'rate_limited', error_description: 'Too many requests' });

@@ -128,6 +128,12 @@ const MIGRATIONS: string[] = [
     expires_at INTEGER NOT NULL
   );
   `,
+  // 3: audit classes (per-class caps and retention).
+  `
+  ALTER TABLE audit_log ADD COLUMN class TEXT NOT NULL DEFAULT 'security';
+  CREATE INDEX audit_class_id ON audit_log(class, id);
+  CREATE INDEX audit_class_ts ON audit_log(class, ts);
+  `,
 ];
 
 export function openDb(file: string): DB {

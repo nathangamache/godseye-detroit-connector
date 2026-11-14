@@ -63,6 +63,11 @@ export interface OAuthDeps {
 
 /** How long a consent page stays approvable. */
 const PENDING_TTL_MS = 10 * 60_000;
+/** Failed /oauth/token requests allowed per window, all clients together. */
+export const TOKEN_FAIL_LIMIT = 300;
+export const TOKEN_FAIL_WINDOW_MS = 10 * 60_000;
+/** DCR registrations per hour, all clients together. */
+export const REGISTER_GLOBAL_PER_HOUR = 200;
 
 function oauthError(res: Response, status: number, error: string, description: string): void {
   res
@@ -107,9 +112,25 @@ export function createOAuthRoutes(d: OAuthDeps) {
     });
 
     // ---------------- /oauth/token ----------------
+    // Global (all clients) budget for FAILED token requests, on top of the per-IP limit, so a
+    // spread-out flood of garbage codes costs bounded CPU and audit rows (review OA-6).
+    const TOKEN_FAIL_KEY = 'token-fail:global';
+    const tokenFailBudget = (req: Request, res: Response, next: express.NextFunction) => {
+      const r = ctx.limiter.peek(TOKEN_FAIL_KEY, TOKEN_FAIL_LIMIT, TOKEN_FAIL_WINDOW_MS);
+      if (!r.ok) {
+        res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
+        return oauthError(res, 429, 'slow_down', 'too many failed token requests; retry later');
+      }
+      res.on('finish', () => {
+        if (res.statusCode >= 400 && res.statusCode !== 429)
+          ctx.limiter.record(TOKEN_FAIL_KEY, TOKEN_FAIL_WINDOW_MS);
+      });
+      next();
+    };
     app.post(
       '/oauth/token',
       rateLimit(ctx.limiter, 'token', 60, 60_000, ip),
+      tokenFailBudget,
       form,
       json,
       (req, res) => {
@@ -173,7 +194,16 @@ export function createOAuthRoutes(d: OAuthDeps) {
         if (grantType === 'refresh_token') {
           const rt = str(b.refresh_token) ?? '';
           if (!rt) return oauthError(res, 400, 'invalid_request', 'refresh_token is required');
-          const r = tokens.refresh(rt, clientId);
+          const requested = str(b.scope);
+          const r = tokens.refresh(rt, clientId, requested);
+          if (!r.ok && r.reason === 'invalid_scope') {
+            audit.record('refresh_rejected', {
+              ip: ip(req),
+              clientId,
+              detail: { reason: 'invalid_scope' },
+            });
+            return oauthError(res, 400, 'invalid_scope', 'scope exceeds the original grant');
+          }
           if (!r.ok) {
             if (r.familyRevoked) {
               audit.record('refresh_reuse_detected', {
@@ -189,13 +219,6 @@ export function createOAuthRoutes(d: OAuthDeps) {
               });
             }
             return oauthError(res, 400, 'invalid_grant', 'invalid refresh token');
-          }
-          const requested = str(b.scope);
-          if (
-            requested &&
-            requested.split(' ').some((s) => !r.grant.scope.split(' ').includes(s))
-          ) {
-            return oauthError(res, 400, 'invalid_scope', 'scope exceeds the original grant');
           }
           clients.touch(clientId);
           audit.record('token_refreshed', {
@@ -219,6 +242,8 @@ export function createOAuthRoutes(d: OAuthDeps) {
     app.post(
       '/oauth/register',
       rateLimit(ctx.limiter, 'register', 20, 3_600_000, ip),
+      // ...and a global ceiling: registrations are unauthenticated writes.
+      rateLimit(ctx.limiter, 'register-global', REGISTER_GLOBAL_PER_HOUR, 3_600_000, () => 'all'),
       json,
       (req, res) => {
         res.set('Cache-Control', 'no-store');
@@ -260,17 +285,21 @@ export function createOAuthRoutes(d: OAuthDeps) {
         const token = str(b.token);
         if (!token) return oauthError(res, 400, 'invalid_request', 'token is required');
         const clientId = str(b.client_id);
-        // Only revoke when the presenting client (if named) owns the token.
-        const r = tokens.revokeToken(token);
-        if (r) {
-          if (clientId && clientId !== r.clientId) {
+        // Check ownership BEFORE revoking (RFC 7009 2.1, review OA-5): a named client must
+        // own the token, otherwise nothing changes. 200 either way, so the response says
+        // nothing about the token.
+        const owner = tokens.tokenClient(token);
+        if (owner) {
+          if (clientId && clientId !== owner) {
             audit.record('revoke_client_mismatch', { ip: ip(req), clientId });
           } else {
-            audit.record('token_revoked', {
-              ip: ip(req),
-              clientId: r.clientId,
-              detail: { kind: r.kind, family: r.familyId },
-            });
+            const r = tokens.revokeToken(token);
+            if (r)
+              audit.record('token_revoked', {
+                ip: ip(req),
+                clientId: r.clientId,
+                detail: { kind: r.kind, family: r.familyId },
+              });
           }
         }
         res.status(200).end();
@@ -658,8 +687,9 @@ ${canApprove ? '<button type="submit" name="decision" value="approve">Approve</b
             }</td></tr>`,
         )
         .join('');
+      const unauth24h = audit.countSince('unauthenticated', d.now() - 86_400_000);
       const auditRows = audit
-        .recent(50)
+        .recent(50, 'security')
         .map(
           (a) =>
             `<tr><td>${fmt(a.ts)}</td><td>${esc(a.event)}</td><td class="mono">${esc((a.client_id ?? '').slice(0, 40))}</td><td class="mono">${esc(a.ip ?? '')}</td></tr>`,
@@ -678,7 +708,8 @@ ${recent ? `<div class="card warn"><p><strong>${recent} grant(s) created in the 
 <h2>OAuth clients</h2><div class="card"><table><tr><th>Client</th><th>Kind</th><th>Registered</th><th>Last used</th><th></th></tr>${clientRows || '<tr><td colspan="5">None</td></tr>'}</table></div>
 <h2>Token grants</h2><div class="card"><table><tr><th>Grant</th><th>Client</th><th>Issued</th><th>Last used</th><th>Refresh expires</th><th></th></tr>${famRows || '<tr><td colspan="6">None</td></tr>'}</table></div>
 <h2>Location devices</h2><div class="card"><table><tr><th>Name</th><th>Created</th><th>Last fix</th><th></th></tr>${devRows || '<tr><td colspan="4">None</td></tr>'}</table><p class="muted">Add devices with <code>npm run devices -- add NAME</code> on the server.</p></div>
-<h2>Recent audit events</h2><div class="card"><table><tr><th>Time</th><th>Event</th><th>Client</th><th>IP</th></tr>${auditRows}</table></div>`,
+<h2>Recent audit events</h2><div class="card"><table><tr><th>Time</th><th>Event</th><th>Client</th><th>IP</th></tr>${auditRows}</table>
+<p class="muted">Grants, approvals, revocations, admin and step-up only. ${unauth24h} unauthenticated rejection/registration event(s) in the last 24 h are kept separately (capped, rate-limited).</p></div>`,
           { nav: navFor(config) },
         ),
       );

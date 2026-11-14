@@ -248,6 +248,7 @@ export async function startGateway(
   }, 10 * 60_000);
   prune.unref();
   core.locations.prune();
+  core.audit.prune();
 
   logger.info('gateway_listening', {
     public: `${config.HOST}:${port}`,

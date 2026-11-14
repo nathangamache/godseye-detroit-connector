@@ -151,7 +151,7 @@ export class ToolPolicy {
       if (!r.ok)
         return { ok: false, bucket: s.bucket, retryAfterS: Math.ceil(r.retryAfterMs / 1000) };
     }
-    for (const s of specs) this.limiter.record(key(s));
+    for (const s of specs) this.limiter.record(key(s), s.windowMs);
     return { ok: true };
   }
 }

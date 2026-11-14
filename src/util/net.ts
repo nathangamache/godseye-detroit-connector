@@ -24,6 +24,38 @@ export function clientIp(
   return peer || 'unknown';
 }
 
+/** Expands an IPv6 address to 8 hextets (no zone), or returns null. */
+export function expandIpv6(ip: string): string[] | null {
+  if (isIP(ip) !== 6) return null;
+  let s = ip.toLowerCase().split('%')[0]!;
+  // Trailing embedded IPv4 (::ffff:1.2.3.4) -> two hextets.
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (v4) {
+    const o = v4[1]!.split('.').map(Number);
+    s =
+      s.slice(0, -v4[1]!.length) +
+      ((o[0]! << 8) | o[1]!).toString(16) +
+      ':' +
+      ((o[2]! << 8) | o[3]!).toString(16);
+  }
+  const [head, tail] = s.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
+  const fill = s.includes('::') ? 8 - h.length - t.length : 0;
+  const parts = [...h, ...Array<string>(Math.max(0, fill)).fill('0'), ...t];
+  return parts.length === 8 ? parts.map((p) => p.padStart(4, '0')) : null;
+}
+
+/**
+ * Rate-limit key for a client address: IPv4 as is, IPv6 by its /64 (one subscriber's
+ * prefix), so rotating addresses inside a prefix does not get fresh limits (review OA-6/bp-2).
+ */
+export function rateKeyIp(ip: string): string {
+  const n = normalizeIp(ip);
+  const x = expandIpv6(n);
+  return x ? `${x.slice(0, 4).join(':')}::/64` : n;
+}
+
 export function normalizeIp(ip: string): string {
   return ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
 }

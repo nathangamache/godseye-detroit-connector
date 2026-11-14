@@ -205,7 +205,11 @@ export class TokenStore {
     };
   }
 
-  refresh(refreshToken: string, clientId: string): RefreshResult {
+  /**
+   * Rotates a refresh token. A requested `scope` wider than the grant is refused BEFORE the
+   * token is used, so a client that asks for too much can simply retry (review OA-4).
+   */
+  refresh(refreshToken: string, clientId: string, requestedScope?: string): RefreshResult {
     if (!refreshToken.startsWith('grt_') || refreshToken.length > 200)
       return { ok: false, reason: 'unknown' };
     const row = this.lookup(refreshToken);
@@ -228,6 +232,16 @@ export class TokenStore {
         .run(t, row.family_id);
     }
     if (row.expires_at <= t) return { ok: false, reason: 'expired' };
+    if (requestedScope !== undefined) {
+      const granted = row.scope.split(' ');
+      if (
+        requestedScope
+          .split(' ')
+          .filter(Boolean)
+          .some((sc) => !granted.includes(sc))
+      )
+        return { ok: false, reason: 'invalid_scope' };
+    }
     this.db
       .prepare('UPDATE tokens SET used_at = COALESCE(used_at, ?) WHERE token_hash = ?')
       .run(t, row.token_hash);
@@ -239,6 +253,12 @@ export class TokenStore {
     };
     const { tokens } = this.issue(grant, row.family_id);
     return { ok: true, tokens, familyId: row.family_id, grant };
+  }
+
+  /** The client a token was issued to, without changing anything (RFC 7009 ownership check). */
+  tokenClient(token: string): string | null {
+    if (token.length > 200) return null;
+    return this.lookup(token)?.client_id ?? null;
   }
 
   /** RFC 7009 revocation. Refresh tokens take their whole family with them. */
