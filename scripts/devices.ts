@@ -6,16 +6,19 @@
  *   npm run devices -- setup-link <name>   new setup link (re-keys the device when claimed)
  *   npm run devices -- list
  *   npm run devices -- revoke <name|id>    revokes the token and deletes its stored fixes
+ *                                          (live database and any backup that still has fixes)
  *
  * In docker mode run it inside the gateway container:
  *   docker exec -it godseye-gateway node dist/scripts/devices.js add my-phone
  */
 import { Audit } from '../src/audit.js';
+import { backupDirFor, purgeLocationBackups } from '../src/backup.js';
 import { loadConfig, loadEnvFile } from '../src/config.js';
 import { openDb } from '../src/db.js';
 import { LocationStore } from '../src/location/store.js';
 import { createLogger } from '../src/log.js';
 
+process.umask(0o077);
 if (process.env.GATEWAY_ENV_FILE !== 'none') loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
 const config = loadConfig();
 const db = openDb(config.dbPath);
@@ -75,8 +78,14 @@ switch (cmd) {
   case 'revoke':
     if (!name) usage();
     if (store.revokeDevice(name)) {
-      audit.record('device_revoked', { subject: 'cli', detail: { device: name } });
-      console.log(`Revoked ${name} and deleted its stored fixes.`);
+      const purged = purgeLocationBackups(backupDirFor(config));
+      audit.record('device_revoked', {
+        subject: 'cli',
+        detail: { device: name, backups_stripped: purged.files },
+      });
+      console.log(
+        `Revoked ${name} and deleted its stored fixes (live database and ${purged.files} backup(s)).`,
+      );
     } else {
       console.error(`No device ${name}.`);
       process.exit(1);

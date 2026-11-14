@@ -5,6 +5,8 @@ import { installAllRoutes } from './routes.js';
 import { startGateway } from './gateway.js';
 
 async function main() {
+  // Everything the gateway creates (database, WAL, backups) is private to its user.
+  process.umask(0o077);
   if (process.env.GATEWAY_ENV_FILE !== 'none')
     loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
   let config;

@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import type { AppContext } from '../app.js';
 import type { Audit } from '../audit.js';
+import { backupDirFor, purgeLocationBackups } from '../backup.js';
 import { safeNext, type Login } from '../auth/login.js';
 import type { StepUp } from '../auth/stepup.js';
 import type { Csrf } from '../auth/csrf.js';
@@ -782,7 +783,10 @@ ${recent ? `<div class="card warn"><p><strong>${recent} grant(s) created in the 
     });
     adminPost('/oauth/admin/revoke-device', (req) => {
       const id = str(req.body?.device_id);
-      if (id && /^\d+$/.test(id)) d.locations.revokeDevice(Number(id));
+      if (id && /^\d+$/.test(id) && d.locations.revokeDevice(Number(id))) {
+        // The device's fixes go from backups too (review DS-6).
+        purgeLocationBackups(backupDirFor(config));
+      }
       return id;
     });
   }

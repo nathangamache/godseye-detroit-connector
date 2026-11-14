@@ -6,10 +6,12 @@
  *   docker exec godseye-gateway node dist/scripts/revoke-all.js [--devices]
  */
 import { Audit } from '../src/audit.js';
+import { backupDirFor, purgeLocationBackups } from '../src/backup.js';
 import { loadConfig, loadEnvFile } from '../src/config.js';
 import { openDb } from '../src/db.js';
 import { createLogger } from '../src/log.js';
 
+process.umask(0o077);
 if (process.env.GATEWAY_ENV_FILE !== 'none') loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
 const config = loadConfig();
 const db = openDb(config.dbPath);
@@ -31,11 +33,16 @@ if (process.argv.includes('--devices')) {
     .run(t).changes;
   db.prepare('DELETE FROM locations').run();
 }
+// Step-up sessions go too (the TOTP enrollment stays; reset it with stepup.js reset).
+db.prepare('DELETE FROM stepup_sessions').run();
+const purged = process.argv.includes('--devices')
+  ? purgeLocationBackups(backupDirFor(config))
+  : { files: 0, fixes: 0 };
 new Audit(db, createLogger({ level: 'warn' })).record('admin_revoke_all', {
   subject: 'cli',
-  detail: { families: fams, devices },
+  detail: { families: fams, devices, backups_stripped: purged.files },
 });
 db.close();
 console.log(
-  `Revoked ${fams} token grant(s), all sessions and pending codes${devices ? `, ${devices} device(s) and all stored fixes` : ''}.`,
+  `Revoked ${fams} token grant(s), all sessions and pending codes${devices ? `, ${devices} device(s) and all stored fixes (live database and ${purged.files} backup(s))` : ''}.`,
 );
