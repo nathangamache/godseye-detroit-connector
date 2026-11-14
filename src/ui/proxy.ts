@@ -52,6 +52,37 @@ const ALWAYS_DROP = new Set([
   'x-original-forwarded-for',
 ]);
 
+/**
+ * Upstream response headers that act beyond the response itself, so a compromised upstream
+ * could use them against the owner pages or the owner:
+ *   set-cookie         cookies ignore ports: a cookie set by the UI origin also reaches the
+ *                      owner pages' origin (cookie tossing)
+ *   clear-site-data    "cookies" applies to the whole site: it would wipe the owner origin's
+ *                      step-up and CSRF cookies
+ *   access-control-*   CORS: would let other sites read the owner-only UI with the owner's
+ *                      ambient Tailscale identity (and spend GEV's keys); also
+ *                      timing-allow-origin
+ *   strict-transport-security  HSTS is per host, all ports: max-age=0 would undo the
+ *                      gateway's own for the owner pages too
+ *   alt-svc, nel, report-to, reporting-endpoints  redirect future connections or report
+ *                      the origin's traffic elsewhere
+ */
+const UPSTREAM_RESPONSE_DROP = new Set([
+  'set-cookie',
+  'clear-site-data',
+  'timing-allow-origin',
+  'strict-transport-security',
+  'alt-svc',
+  'nel',
+  'report-to',
+  'reporting-endpoints',
+]);
+
+export function dropUpstreamResponseHeader(name: string): boolean {
+  const k = name.toLowerCase();
+  return HOP_BY_HOP.has(k) || UPSTREAM_RESPONSE_DROP.has(k) || k.startsWith('access-control-');
+}
+
 export interface ProxyOptions {
   target: string; // http://127.0.0.1:7701
   publicOrigin: string;
@@ -173,9 +204,9 @@ export function createProxy(opts: ProxyOptions) {
       (up) => {
         const outHeaders: Record<string, string | string[]> = {};
         for (const [k, v] of Object.entries(up.headers)) {
-          // No upstream cookies: cookies ignore ports, so a cookie set by the UI origin would
-          // also reach the owner pages' origin (cookie tossing). GEV never gets ours back anyway.
-          if (v === undefined || HOP_BY_HOP.has(k) || k === 'set-cookie') continue;
+          // No upstream cookies, Clear-Site-Data, CORS and the like (UPSTREAM_RESPONSE_DROP).
+          // GEV never gets our cookies back anyway.
+          if (v === undefined || dropUpstreamResponseHeader(k)) continue;
           outHeaders[k] = v;
         }
         // The UI may frame itself, never be framed by anything else (an extra CSP header is

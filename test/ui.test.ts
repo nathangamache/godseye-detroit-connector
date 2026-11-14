@@ -36,6 +36,27 @@ async function fakeGev(): Promise<{
       setTimeout(() => res.end('data: second\n\n'), 400);
       return;
     }
+    if (req.url === '/hostile-headers') {
+      // What a compromised GEV could send to act beyond its own responses.
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'clear-site-data': '"cookies", "storage"',
+        'access-control-allow-origin': 'https://evil.example',
+        'access-control-allow-credentials': 'true',
+        'access-control-expose-headers': 'x-gev-ok',
+        'Access-Control-Allow-Headers': 'authorization',
+        'timing-allow-origin': '*',
+        'strict-transport-security': 'max-age=0',
+        'alt-svc': 'h3=":443"; ma=86400',
+        nel: '{"report_to":"x","max_age":86400}',
+        'report-to': '{"group":"x","max_age":86400,"endpoints":[{"url":"https://evil.example/r"}]}',
+        'reporting-endpoints': 'x="https://evil.example/r"',
+        'cache-control': 'max-age=60',
+        'x-gev-ok': '1',
+      });
+      res.end('{}');
+      return;
+    }
     if (req.url === '/redirect') {
       res
         .writeHead(302, {
@@ -208,6 +229,32 @@ describe('UI routes (dev / password login)', () => {
       "frame-ancestors 'none', frame-ancestors 'self'",
     );
     expect(r.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('drops upstream headers that reach beyond the UI origin (Clear-Site-Data, CORS, ...)', async () => {
+    const r = await fetch(`${t.uiOrigin}/hostile-headers`, { headers: { cookie: jar.header() } });
+    expect(r.status).toBe(200);
+    await r.arrayBuffer();
+    // Clear-Site-Data "cookies" applies to the whole site: it would wipe the owner origin's
+    // step-up and CSRF cookies. CORS headers would let other sites read the owner-only UI.
+    for (const h of [
+      'clear-site-data',
+      'access-control-allow-origin',
+      'access-control-allow-credentials',
+      'access-control-expose-headers',
+      'access-control-allow-headers',
+      'timing-allow-origin',
+      'strict-transport-security',
+      'alt-svc',
+      'nel',
+      'report-to',
+      'reporting-endpoints',
+    ])
+      expect(r.headers.get(h), h).toBeNull();
+    // Ordinary headers still pass.
+    expect(r.headers.get('x-gev-ok')).toBe('1');
+    expect(r.headers.get('cache-control')).toBe('max-age=60');
+    expect(r.headers.get('content-type')).toBe('application/json');
   });
 
   it('blocks GEV setup/oauth/mcp/panel routes without contacting GEV', async () => {
