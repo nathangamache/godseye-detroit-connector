@@ -7,8 +7,10 @@ test double in `test/fixtures/mock-pulse.ts` implements it.
 ## Transport
 
 * Base URL: `PULSE_URL`. Dev: `http://127.0.0.1:7710`. Docker: `http://pulse-api:7710` on the
-  `godseye` compose network (Pulse joins that network; it must **not** bind `0.0.0.0` on the host
-  or publish a port).
+  internal `godseye-backend` compose network (Pulse joins that network with its own pinned address
+  in `172.30.78.0/24`; it must **not** bind `0.0.0.0` on the host or publish a port). The gateway's
+  containers resolve names through public DNS with no tailnet search domain, so `pulse-api` can
+  only ever be the container on that network.
 * Auth: `Authorization: Bearer <PULSE_API_TOKEN>`. A shared secret in both services' env files
   (mode 600). Pulse must reject requests without it once it is set. Pulse's existing admin and
   audio routes stay off this API.

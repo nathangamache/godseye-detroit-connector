@@ -12,20 +12,22 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
   cameras and weather, in parallel, each with its data age).
 * GEV's own MCP server is local-only and its UI assumes the owner is local. The gateway adds
   OAuth, licensing policy, quotas, result shrinking and link rewriting, and keeps every
-  human-facing page on the tailnet.
+  human-facing page on the tailnet, with an authenticator code (step-up) for approvals and
+  admin.
 * Rail context GEV lacks comes from public FRA/NARN datasets bundled here; Pulse plugs in over a
   documented HTTP contract.
 
 ## Architecture
 
 ```
-claude.ai ──https──▶ Cloudflare (WAF: Anthropic IPs) ──tunnel──▶ gateway PUBLIC :7700
+claude.ai ──https──▶ Cloudflare (WAF: Anthropic IPs) ──tunnel──▶ gateway PUBLIC 172.30.77.20:7700
                                                                  /mcp  OAuth endpoints  /api/location  /healthz
-your devices ──Tailscale──▶ tailscale serve (godseye.<tailnet>.ts.net) ──▶ gateway PRIVATE 127.0.0.1:7702
-                                                                 /  /pulse  /locate  /oauth/authorize  /oauth/admin
-gateway ──stdio MCP──▶ gev/stdio-all-surfaces.mjs ──HTTP──▶ GEV vite preview :7701 ──▶ providers
+your devices ──Tailscale──▶ tailscale serve godseye.<tailnet>.ts.net
+                              :443  ──▶ gateway PRIVATE 127.0.0.2:7702  /oauth/authorize  consent  /oauth/admin  /locate
+                              :8443 ──▶ gateway UI      127.0.0.2:7703  /  (GEV globe)  /pulse
+gateway ──tcp──▶ gev-mcp relay ──stdio──▶ gev/stdio-all-surfaces.mjs ──HTTP──▶ GEV vite preview :7701 ──▶ providers
 gateway ──HTTP──▶ Detroit Pulse API :7710 (contract only, not running yet)
-gateway ──▶ SQLite (OAuth clients, hashed tokens, devices, 24 h of fixes, audit log)
+gateway ──▶ SQLite (OAuth clients, hashed tokens, devices, ≤24 h of fixes, audit log)
 ```
 
 | Path | Listener | Auth |
@@ -34,20 +36,23 @@ gateway ──▶ SQLite (OAuth clients, hashed tokens, devices, 24 h of fixes, 
 | `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server` | public | none (metadata) |
 | `/oauth/token`, `/oauth/register`, `/oauth/revoke` | public | PKCE / allowlisted redirects / token |
 | `POST /api/location` | public + private | per-device token (OwnTracks Basic or Bearer) |
-| `/oauth/authorize`, consent, `/oauth/admin` | private | Tailscale identity = `OWNER_TAILSCALE_LOGIN` |
-| `/` (GEV globe), `/pulse`, `/locate` | private | Tailscale identity |
-| `/healthz` | both | none, returns `{"ok":true}` |
+| `/oauth/authorize`, consent, `/oauth/admin` | private (:443) | Tailscale identity = `OWNER_TAILSCALE_LOGIN`, plus a step-up TOTP code to approve or open admin |
+| `/locate` | private (:443) | Tailscale identity |
+| `/` (GEV globe), `/pulse` | UI (:8443, separate origin) | Tailscale identity |
+| `/healthz` | all | none, returns `{"ok":true}` |
 
 OAuth: the issuer and token/registration/revocation endpoints are on the public host; the
 `authorization_endpoint` is the tailnet URL, so **connecting or reconnecting the connector needs
-Tailscale on that device**. Clients register by CIMD (claude.ai's and Claude Code's metadata URLs,
+Tailscale on that device** (and your authenticator app). Clients register by CIMD (claude.ai's and Claude Code's metadata URLs,
 allowlisted) or DCR (allowlisted redirect URIs only); anyone may register, only the owner can
 approve.
 
 Run modes: **dev** = plain node under systemd --user (`deploy/systemd/`, `deploy/gev/`), with
 host `tailscale serve`; **production** = hardened containers (`deploy/docker-compose.yml`: GEV,
-a Tailscale sidecar whose network namespace the gateway joins, the gateway, cloudflared; read-only
-roots, no capabilities, non-root, no published ports). Nothing is enabled or started by the repo.
+the GEV MCP child behind a relay (`gev-mcp`), a Tailscale sidecar whose network namespace the
+gateway joins, the gateway, cloudflared; read-only roots, no capabilities, non-root, no
+published ports, three pinned networks) plus root-installed host firewall rules
+(`docs/host-firewall.md`). Nothing is enabled or started by the repo.
 
 ## Quick start (dev)
 
@@ -55,15 +60,17 @@ roots, no capabilities, non-root, no published ports). Nothing is enabled or sta
 source ~/.nvm/nvm.sh && nvm use 24
 npm ci && npm run build && npm test
 cp .env.example .env && chmod 600 .env       # set PRIVATE_ORIGIN, OWNER_TAILSCALE_LOGIN (or a dev password)
-# GEV must be built and running on 127.0.0.1:7701 (deploy/gev/README.md)
-node dist/src/index.js                        # public 127.0.0.1:7700, private 127.0.0.1:7702
+# GEV must be built (scripts/build-gev.sh) and running on 127.0.0.1:7701 (deploy/gev/README.md)
+node dist/src/index.js                        # public :7700, private :7702, UI :7703 (all 127.0.0.1)
+npm run stepup -- enroll                      # authenticator code for consent and admin
 npm run smoke:live -- --url http://127.0.0.1:7700
 ```
 
 ## Tool policy
 
 * GEV tools are **deny by default**: only names on `GEV_TOOL_ALLOWLIST` are visible or runnable,
-  so tools added upstream stay hidden until vetted.
+  so tools added upstream stay hidden until vetted. The GEV child itself is started with only
+  the allowed tools, so a composite tool can't call a denied one internally.
 * Never exposed: `panel_request` (an open proxy into GEV) and `ui://` resources.
 * Hard-denied for licensing: `search_places`, `places_nearby` (Google content), Street View
   fallback frames in `get_cctv_snapshot` (stripped), `get_hud_caption` (metered OpenAI).
@@ -75,9 +82,11 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   60/h, imagery 20/h, regional news 30/h, place lookups 30/h.
 * Every call: ajv validation (a failure returns the schema), 110 s timeout, at most 4 at once.
 * Every result: one copy of the data (GEV duplicates it), `data.view` stripped (its link kept as
-  `map_url`), internal GEV links rewritten to the tailnet UI origin, images downscaled with sharp
-  (dropped with a note if they can't fit), total size capped at 100k characters, provenance,
-  retrieval time, attribution and an "untrusted data" label added.
+  `map_url`), internal GEV links rewritten to the tailnet UI origin, third-party links flagged as
+  unvetted, images downscaled with sharp (dropped with a note if they can't fit), total size
+  (summary and images included) capped at 100k characters, provenance, retrieval time,
+  attribution and an "untrusted data" label first.
+* Location reads (`where_am_i`, `whats_happening_here` without a point) are audited per grant.
 
 ## Repository layout
 
@@ -85,23 +94,27 @@ npm run smoke:live -- --url http://127.0.0.1:7700
 src/            gateway (TypeScript, ESM)
   app.ts        public and private Express apps          gateway.ts  wiring, two listeners
   mcp/          the four MCP tools                       tools/      registry, search, policy, post-processing
-  gev/          stdio child supervisor                   rail/       NARN/FRA spatial index + tools
+  gev/          child supervisor, relay, TCP transport   rail/       NARN/FRA spatial index + tools
   pulse/        Pulse HTTP client + tools                oauth/      authorization server, CIMD, DCR, tokens
-  auth/         tailscale + password/TOTP login, CSRF    location/   device tokens, ingest, /locate
+  auth/         tailscale, step-up TOTP, dev login, CSRF location/   device tokens, ingest, /locate
   ui/           GEV reverse proxy, /pulse                http/       headers, Host/Origin checks, rate limits
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
 web/            /locate PWA and shared CSS
-scripts/        devices, hash-password, backup-db, revoke-all, smoke-live, rail data build/fetch, audit
-deploy/         docker (image, compose, Tailscale sidecar), systemd units, GEV notes, secrets README
-docs/           cloudflare-setup, tailscale-setup, phone-setup, operations, security, pulse-api-contract
+scripts/        devices, stepup, hash-password, backup-db, revoke-all, smoke-live, gev-relay,
+                egress-probe, build-gev.sh, tighten-permissions.sh, rail data build/fetch, audit
+deploy/         docker (image, compose, Tailscale sidecar), host-firewall (root), systemd units,
+                GEV notes, secrets README
+docs/           cloudflare-setup, tailscale-setup, host-firewall, phone-setup, operations, security,
+                pulse-api-contract
 test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
 ```
 
 ## Docs
 
 * `docs/security.md`: threat model, controls, residual risks, **go-live checklist**
-* `docs/tailscale-setup.md`: tailnet settings, the sidecar, host `tailscale serve`, fallback mode
+* `docs/tailscale-setup.md`: the mandatory tailnet policy, the sidecar, step-up, host `tailscale serve`, fallback mode
+* `docs/host-firewall.md`: root-installed rules that keep the containers off the LAN, tailnet and host
 * `docs/cloudflare-setup.md`: tunnel to the public listener, WAF, bot protection, TLS
 * `docs/phone-setup.md`: OwnTracks (iPhone/Android), the `/locate` PWA, iOS Shortcuts
 * `docs/operations.md`: run modes, builds, logs, backups, credential rotation, kill switches
@@ -111,5 +124,5 @@ test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
 
 God's Eye View is © 2026 Bilawal Sidhu, MIT; `gev/stdio-all-surfaces.mjs` is adapted from it (see
 `third_party/gods-eye-view/`). GEV's data sources keep their own terms; the gateway appends their
-attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. This repository is private
-and for personal, non-commercial use.
+attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. This repository is
+public, for personal, non-commercial use; it holds no secrets or personal data.

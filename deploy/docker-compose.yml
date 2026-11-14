@@ -184,7 +184,7 @@ services:
     environment:
       GATEWAY_MODE: production
       GATEWAY_ENV_FILE: none
-      # The sidecar's address on the godseye network (cloudflared -> gateway:7700).
+      # The sidecar's address on the godseye-edge network (cloudflared -> gateway:7700).
       HOST: 172.30.77.20
       PORT: "7700"
       PRIVATE_HOST: 127.0.0.2

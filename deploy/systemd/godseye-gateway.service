@@ -1,12 +1,14 @@
 # systemd --user unit: the gateway in DEV / plain-node mode.
 #   PUBLIC listener  127.0.0.1:7700  (point the dev cloudflared at it)
-#   PRIVATE listener 127.0.0.1:7702  (expose to the tailnet with: tailscale serve --bg --https=443 http://127.0.0.1:7702)
+#   PRIVATE listener 127.0.0.1:7702  (tailscale serve --bg --https=443 http://127.0.0.1:7702)
+#   UI listener      127.0.0.1:7703  (tailscale serve --bg --https=8443 http://127.0.0.1:7703)
+# Dev mode trusts every local process (see docs/tailscale-setup.md); not for go-live.
 # Production runs in hardened containers instead: see godseye-stack.service.
 # Not enabled or started by this repo. To use:
 #   cp deploy/systemd/godseye-gateway.service ~/.config/systemd/user/ && systemctl --user daemon-reload
 #   systemctl --user start godseye-gateway
 [Unit]
-Description=godseye-detroit-connector gateway (dev mode, public 127.0.0.1:7700, private 127.0.0.1:7702)
+Description=godseye-detroit-connector gateway (dev mode, public 127.0.0.1:7700, private 127.0.0.1:7702, UI 127.0.0.1:7703)
 After=network-online.target godseye-gev.service
 Wants=godseye-gev.service
 

@@ -34,15 +34,30 @@ Don't create Access applications.
    `TUNNEL_TOKEN=<token>` in it. Dev mode: `install -m 600 /dev/null ~/.config/cloudflared/godseye.token`
    with the bare token, and use `deploy/systemd/cloudflared-godseye.service.template`.
 4. **Public hostname**: `godseye.gamachecloud.com`, path empty, service
-   * docker: `HTTP` `gateway:7700` (the public listener; cloudflared shares the compose network)
+   * docker: `HTTP` `gateway:7700` (the public listener; cloudflared and the gateway share the `godseye-edge` network)
    * dev: `HTTP` `localhost:7700`
 
-   Never point the tunnel at port 7702 (the private listener) or at GEV (7701).
+   Never point the tunnel at 7702/7703 (the tailnet listeners, which bind 127.0.0.2 inside the
+   sidecar and aren't reachable from cloudflared anyway) or at GEV (7701, not on cloudflared's
+   network).
 5. Leave **HTTP Host Header** empty (the gateway checks Host and expects
    `godseye.gamachecloud.com`). Don't enable "No TLS Verify" or add other hostnames.
+6. Under the tunnel's **Private Network** (or "Routes") tab: **no routes**, and WARP routing
+   **off**. A private route would let WARP clients into whatever cloudflared can reach.
+7. If you create Cloudflare API tokens for automation, scope them to this zone and this tunnel
+   only; the tunnel is remotely managed, so anyone who can edit it can change where it points.
+   The compose network still confines cloudflared to the gateway's public listener and the
+   internet (with the host firewall in `docs/host-firewall.md`).
 
-The gateway trusts `CF-Connecting-IP` only from cloudflared's address (`172.30.77.10` in docker,
-loopback in dev), so rate limits and the audit log see real client IPs.
+The gateway trusts `CF-Connecting-IP` only from cloudflared's fixed address (`172.30.77.10` in
+docker; production refuses loopback there; dev uses loopback), so rate limits and the audit log
+see real client IPs and nothing else can choose them.
+
+A **locally managed** tunnel (`cloudflared tunnel create`, a credentials file and a read-only
+`config.yml` whose ingress is just `godseye.gamachecloud.com -> http://gateway:7700` plus a
+catch-all `http_status:404`) would take the routing out of the dashboard entirely. It isn't
+the default here because it needs `cloudflared tunnel login` with an account certificate on the
+host; consider it if more than one person can edit the Cloudflare account.
 
 ## 3. WAF custom rule: OAuth/MCP paths only from Anthropic
 
@@ -61,6 +76,8 @@ Security, WAF, **Custom rules, Create rule** `godseye-anthropic-only`, action **
   set. Claude Code on your own machine connects from your IP, not Anthropic's.
 * `/api/location` stays outside this rule (your phone's IP changes); it is token-protected and
   rate-limited. `/healthz` is harmless.
+* The gateway also has its own global ceilings (failed token requests, registrations) and
+  per-IP limits keyed by /64 for IPv6, but the WAF rule is the main gate for these paths.
 * If you ever enable `PUBLIC_AUTHORIZE_FALLBACK`, your browser must reach `/oauth/authorize`,
   `/oauth/authorize/decision`, `/auth/login` and `/gw/static/*` on this host: exempt those paths
   (or your IPs) from the rule.
@@ -106,7 +123,8 @@ Customize, Connectors, **Add custom connector**: URL `https://godseye.gamacheclo
 client fields empty. Claude discovers the AS metadata on the public host and opens
 `https://godseye.<tailnet>.ts.net/oauth/authorize`; your browser must be on the tailnet. Check the
 consent page shows **Claude**, "client metadata document … (allowlisted)", redirect host
-`claude.ai`, then approve. After that the connector works from any device, including the iPhone
+`claude.ai`, then enter your authenticator code and approve. Never approve a consent link someone
+sent you: anyone can start a connection in their own Claude account. After that the connector works from any device, including the iPhone
 app without Tailscale; only connecting or reconnecting needs it. Auth settings can't be edited
 later (remove and re-add), and Claude caches discovery for about 5 minutes.
 
