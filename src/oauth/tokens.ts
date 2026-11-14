@@ -297,6 +297,15 @@ export class TokenStore {
     return fams.length;
   }
 
+  /** Counts a location read against a grant (shown on /oauth/admin). */
+  noteLocationRead(familyId: string): void {
+    this.db
+      .prepare(
+        'UPDATE token_families SET location_reads = location_reads + 1, last_location_read_at = ? WHERE family_id = ?',
+      )
+      .run(this.now(), familyId);
+  }
+
   /** Live (not revoked, refresh not expired) grants of one client. */
   activeFamilies(clientId: string): { count: number; lastUsedAt: number | null } {
     const r = this.db
@@ -320,10 +329,13 @@ export class TokenStore {
     revoked_at: number | null;
     revoked_reason: string | null;
     refresh_expires_at: number | null;
+    location_reads: number;
+    last_location_read_at: number | null;
   }> {
     return this.db
       .prepare(
         `SELECT f.family_id, f.client_id, f.subject, f.scope, f.created_at, f.last_used_at, f.revoked_at, f.revoked_reason,
+                f.location_reads, f.last_location_read_at,
                 (SELECT MAX(expires_at) FROM tokens t WHERE t.family_id = f.family_id AND t.kind = 'refresh') AS refresh_expires_at
            FROM token_families f ORDER BY f.created_at DESC LIMIT 200`,
       )

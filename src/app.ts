@@ -46,6 +46,7 @@ import type { Logger } from './log.js';
 import { createMcpHttpHandler } from './mcp/server.js';
 import type { TokenStore } from './oauth/tokens.js';
 import type { ToolRunner } from './tools/runner.js';
+import { rateKeyIp } from './util/net.js';
 import { RateLimiter } from './util/ratelimit.js';
 
 export interface AppDeps {
@@ -99,6 +100,22 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
   };
 }
 
+/** Per-IP and per-grant /mcp limits (requests, and messages inside a legacy batch). */
+export const MCP_IP_PER_MIN = 300;
+export const MCP_GRANT_PER_MIN = 120;
+/** Largest JSON-RPC batch accepted, and only for protocol versions that had batching. */
+export const MCP_MAX_BATCH = 10;
+/** "" = no MCP-Protocol-Version header, which the spec says means 2025-03-26. */
+const BATCH_PROTOCOL_VERSIONS = new Set(['', '2025-03-26', '2024-11-05']);
+
+const jsonRpcError = (code: number, message: string) => ({
+  jsonrpc: '2.0',
+  error: { code, message },
+  id: null,
+});
+
+const mcpGrantKey = (req: Request) => req.auth?.extra.familyId ?? 'none';
+
 export function protectedResourceMetadata(config: Config) {
   return {
     resource: config.mcpResource,
@@ -151,7 +168,13 @@ export function createPublicApp(deps: AppDeps, mounts: Mount[] = []): Express {
   app.get('/.well-known/oauth-protected-resource/mcp', sendPrm);
 
   const mcpHandler = toNodeHandler(
-    createMcpHttpHandler({ config, runner: deps.runner, locations: deps.locations }),
+    createMcpHttpHandler({
+      config,
+      runner: deps.runner,
+      locations: deps.locations,
+      audit: deps.audit,
+      tokens: deps.tokens,
+    }),
     {
       maxRequestBodySize: 256 * 1024,
     },
@@ -162,19 +185,67 @@ export function createPublicApp(deps: AppDeps, mounts: Mount[] = []): Express {
     resourceMetadataUrl: `${config.issuer}/.well-known/oauth-protected-resource`,
     requiredScope: 'mcp',
   });
+  const mcpJson = express.json({ limit: 256 * 1024, type: ['application/json'] });
   app.all(
     '/mcp',
     mcpOriginCheck(sec),
-    rateLimit(limiter, 'mcp-ip', 300, 60_000, (req) => ipOf(req, sec)),
+    rateLimit(limiter, 'mcp-ip', MCP_IP_PER_MIN, 60_000, (req) => ipOf(req, sec)),
     contentLengthCap(256 * 1024),
     bearer,
-    rateLimit(limiter, 'mcp-token', 120, 60_000, (req) => req.auth?.extra.familyId ?? 'none'),
-    (req, res) => {
+    rateLimit(limiter, 'mcp-token', MCP_GRANT_PER_MIN, 60_000, (req) => mcpGrantKey(req)),
+    (req, res, next) => {
       if (req.method !== 'POST') {
         res.status(405).set('Allow', 'POST').json({ error: 'method_not_allowed' });
         return;
       }
-      mcpHandler(req, res).catch((err: unknown) => {
+      mcpJson(req, res, (err?: unknown) => {
+        if (err) {
+          const status = (err as { status?: number }).status === 413 ? 413 : 400;
+          res
+            .status(status)
+            .json(jsonRpcError(-32700, status === 413 ? 'Payload too large' : 'Parse error'));
+          return;
+        }
+        next();
+      });
+    },
+    (req, res, next) => {
+      // JSON-RPC batches (review: rate-limit amplification). Protocol versions from
+      // 2025-06-18 removed batching, so a batch there is refused. Older (or unstated)
+      // versions get small batches, and every message counts against the same limits.
+      const body: unknown = req.body;
+      if (!Array.isArray(body)) return next();
+      const v = String(req.headers['mcp-protocol-version'] ?? '');
+      if (!BATCH_PROTOCOL_VERSIONS.has(v)) {
+        res
+          .status(400)
+          .json(
+            jsonRpcError(-32600, 'JSON-RPC batches are not supported in this protocol version'),
+          );
+        return;
+      }
+      if (body.length > MCP_MAX_BATCH) {
+        res
+          .status(400)
+          .json(jsonRpcError(-32600, `A batch may hold at most ${MCP_MAX_BATCH} messages`));
+        return;
+      }
+      for (let i = 1; i < body.length; i++) {
+        const a = limiter.hit(`http:mcp-ip:${rateKeyIp(ipOf(req, sec))}`, MCP_IP_PER_MIN, 60_000);
+        const b = limiter.hit(`http:mcp-token:${mcpGrantKey(req)}`, MCP_GRANT_PER_MIN, 60_000);
+        if (!a.ok || !b.ok) {
+          res.setHeader(
+            'Retry-After',
+            String(Math.ceil(Math.max(a.retryAfterMs, b.retryAfterMs) / 1000)),
+          );
+          res.status(429).json({ error: 'rate_limited', error_description: 'Too many requests' });
+          return;
+        }
+      }
+      next();
+    },
+    (req, res) => {
+      mcpHandler(req, res, req.body as unknown).catch((err: unknown) => {
         deps.logger.error('mcp_handler_error', {
           error: err instanceof Error ? err.message : String(err),
         });

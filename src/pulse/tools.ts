@@ -165,10 +165,13 @@ export function pulseTools(client: PulseClient): ToolDef[] {
           const cov = (j.coverage ?? {}) as { covered?: boolean };
           if (cov.covered === false)
             return 'No rail radio coverage for this line yet (no monitored channel).';
-          const labels = Array.isArray(j.reason_labels)
-            ? (j.reason_labels as Array<{ label: string }>).map((l) => l.label)
+          // Labels are machine-derived from radio: cap how many and how long (review MCP-3).
+          const all = Array.isArray(j.reason_labels)
+            ? (j.reason_labels as Array<{ label?: unknown }>).map((l) => String(l?.label ?? ''))
             : [];
-          return `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s), ${count(j.eot_hot)} EOT/HOT packet(s)${labels.length ? `; likely reason: ${labels.join(', ')}` : ''}.`;
+          const labels = all.slice(0, 10).map((l) => (l.length > 80 ? l.slice(0, 79) + '…' : l));
+          const more = all.length > labels.length ? ` (+${all.length - labels.length} more)` : '';
+          return `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s), ${count(j.eot_hot)} EOT/HOT packet(s)${labels.length ? `; likely reason: ${labels.join(', ')}${more}` : ''}.`;
         }),
     },
     {

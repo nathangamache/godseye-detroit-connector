@@ -164,9 +164,14 @@ export class ToolRunner {
   }
 
   private log(def: ToolDef, t0: number, outcome: string, ctx: ToolContext): void {
+    this.logCall(def.name, def.source, t0, outcome, ctx);
+  }
+
+  /** The tool_call log line (name, outcome, duration; never arguments). */
+  logCall(tool: string, source: string, t0: number, outcome: string, ctx: ToolContext): void {
     this.opts.logger.info('tool_call', {
-      tool: def.name,
-      source: def.source,
+      tool,
+      source,
       outcome,
       ms: Date.now() - t0,
       client: ctx.clientId,

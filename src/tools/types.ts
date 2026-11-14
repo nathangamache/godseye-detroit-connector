@@ -23,6 +23,8 @@ export interface ToolContext {
   signal: AbortSignal;
   subject?: string;
   clientId?: string;
+  /** The OAuth grant (token family) making the call. */
+  familyId?: string;
 }
 
 export interface ToolDef {

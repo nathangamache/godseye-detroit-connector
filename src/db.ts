@@ -134,6 +134,11 @@ const MIGRATIONS: string[] = [
   CREATE INDEX audit_class_id ON audit_log(class, id);
   CREATE INDEX audit_class_ts ON audit_log(class, ts);
   `,
+  // 4: location reads per grant.
+  `
+  ALTER TABLE token_families ADD COLUMN location_reads INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE token_families ADD COLUMN last_location_read_at INTEGER;
+  `,
 ];
 
 export function openDb(file: string): DB {

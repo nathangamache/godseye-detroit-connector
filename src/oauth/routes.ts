@@ -669,7 +669,7 @@ ${canApprove ? '<button type="submit" name="decision" value="approve">Approve</b
       const famRows = families
         .map(
           (f) =>
-            `<tr><td class="mono">${esc(f.family_id.slice(0, 8))}</td><td class="mono">${esc(f.client_id.slice(0, 60))}</td><td>${fmt(f.created_at)}</td><td>${fmt(f.last_used_at)}</td><td>${fmt(f.refresh_expires_at)}</td><td>${
+            `<tr><td class="mono">${esc(f.family_id.slice(0, 8))}</td><td class="mono">${esc(f.client_id.slice(0, 60))}</td><td>${fmt(f.created_at)}</td><td>${fmt(f.last_used_at)}</td><td>${f.location_reads}${f.last_location_read_at ? ` (last ${fmt(f.last_location_read_at)})` : ''}</td><td>${fmt(f.refresh_expires_at)}</td><td>${
               f.revoked_at
                 ? `revoked (${esc(f.revoked_reason)})`
                 : `<form method="post" action="/oauth/admin/revoke-family"><input type="hidden" name="csrf" value="${esc(t)}"><input type="hidden" name="family_id" value="${esc(f.family_id)}"><button class="danger" type="submit">Revoke</button></form>`
@@ -706,7 +706,7 @@ ${canApprove ? '<button type="submit" name="decision" value="approve">Approve</b
 ${lock}
 ${recent ? `<div class="card warn"><p><strong>${recent} grant(s) created in the last 24 hours.</strong> Revoke any you don't recognise.</p></div>` : ''}
 <h2>OAuth clients</h2><div class="card"><table><tr><th>Client</th><th>Kind</th><th>Registered</th><th>Last used</th><th></th></tr>${clientRows || '<tr><td colspan="5">None</td></tr>'}</table></div>
-<h2>Token grants</h2><div class="card"><table><tr><th>Grant</th><th>Client</th><th>Issued</th><th>Last used</th><th>Refresh expires</th><th></th></tr>${famRows || '<tr><td colspan="6">None</td></tr>'}</table></div>
+<h2>Token grants</h2><div class="card"><table><tr><th>Grant</th><th>Client</th><th>Issued</th><th>Last used</th><th>Location reads</th><th>Refresh expires</th><th></th></tr>${famRows || '<tr><td colspan="7">None</td></tr>'}</table></div>
 <h2>Location devices</h2><div class="card"><table><tr><th>Name</th><th>Created</th><th>Last fix</th><th></th></tr>${devRows || '<tr><td colspan="4">None</td></tr>'}</table><p class="muted">Add devices with <code>npm run devices -- add NAME</code> on the server.</p></div>
 <h2>Recent audit events</h2><div class="card"><table><tr><th>Time</th><th>Event</th><th>Client</th><th>IP</th></tr>${auditRows}</table>
 <p class="muted">Grants, approvals, revocations, admin and step-up only. ${unauth24h} unauthenticated rejection/registration event(s) in the last 24 h are kept separately (capped, rate-limited).</p></div>`,
