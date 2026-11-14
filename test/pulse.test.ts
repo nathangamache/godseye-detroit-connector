@@ -10,7 +10,7 @@ import { nullLogger } from '../src/log.js';
 import { PulseClient } from '../src/pulse/client.js';
 import { pulseTools } from '../src/pulse/tools.js';
 import { startMockPulse, type MockPulse } from './fixtures/mock-pulse.js';
-import { MOCK_GEV, DETROIT, waitFor } from './helpers.js';
+import { MOCK_GEV, DETROIT, UPSTREAMS_DOWN, waitFor } from './helpers.js';
 
 const sig = () => ({ signal: new AbortController().signal });
 
@@ -64,6 +64,7 @@ async function gatewayWith(pulseUrl: string, pulseToken?: string) {
     PULSE_TIMEOUT_MS: '1500',
   });
   const gw = await startGateway(config, {
+    fetch: UPSTREAMS_DOWN,
     logger: nullLogger,
     gevChild: childSpawnSpec({
       gevRoot: REPO_ROOT,

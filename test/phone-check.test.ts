@@ -14,7 +14,7 @@ import { startGateway, type Gateway } from '../src/gateway.js';
 import { childSpawnSpec } from '../src/gev/child.js';
 import { nullLogger } from '../src/log.js';
 import { bearingDeg, compassPoint, haversineM } from '../src/util/geo.js';
-import { DETROIT, MOCK_GEV, waitFor } from './helpers.js';
+import { DETROIT, MOCK_GEV, UPSTREAMS_DOWN, waitFor } from './helpers.js';
 
 let gw: Gateway;
 let dir: string;
@@ -42,6 +42,7 @@ beforeAll(async () => {
     PULSE_TIMEOUT_MS: '500',
   });
   gw = await startGateway(config, {
+    fetch: UPSTREAMS_DOWN,
     logger: nullLogger,
     gevChild: childSpawnSpec({
       gevRoot: REPO_ROOT,

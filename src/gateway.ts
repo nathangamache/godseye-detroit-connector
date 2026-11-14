@@ -37,6 +37,8 @@ export interface GatewayOverrides {
   gevChild?: { command: string; args: string[]; cwd: string; env: Record<string, string> } | false;
   /** Extra tools to register (tests). */
   extraTools?: ToolDef[];
+  /** Replaces every outbound request of the gateway-native tool families (tests). */
+  fetch?: typeof fetch;
   /** Route installers for the two listeners (src/routes.ts installAllRoutes()). */
   routes?: RouteSet;
 }
@@ -147,6 +149,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   });
   // The rail index lets the Pulse rail tool match coverage on every name a track has.
   for (const t of pulseTools(pulse, { rail, now })) registry.register(t);
+  // The gateway-native tool families (src/extra): their own upstreams, quotas and switches.
+  const fetchOverride = overrides.fetch;
   const aviation = registerAviation(registry, {
     config,
     locations,
@@ -154,10 +158,20 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     tokens,
     logger: logger.child({ component: 'aviation' }),
     now,
+    fetch: fetchOverride,
   });
-  registerWeatherTools({ config, registry, locations, audit, tokens, logger, now });
-  registerRoads(registry, { config, locations, audit, tokens, logger, now });
-  registerCivicTools(registry, { config, locations, audit, tokens, now });
+  registerWeatherTools({
+    config,
+    registry,
+    locations,
+    audit,
+    tokens,
+    logger,
+    now,
+    fetchImpl: fetchOverride,
+  });
+  registerRoads(registry, { config, locations, audit, tokens, logger, now, fetch: fetchOverride });
+  registerCivicTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(

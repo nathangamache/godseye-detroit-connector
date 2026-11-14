@@ -18,7 +18,7 @@ import { serverInstructions } from '../src/mcp/server.js';
 import { PulseClient } from '../src/pulse/client.js';
 import { pulseTools } from '../src/pulse/tools.js';
 import { enforceResultCap, postprocess, thirdPartyHosts } from '../src/tools/postprocess.js';
-import { DETROIT, MOCK_GEV, waitFor } from './helpers.js';
+import { DETROIT, MOCK_GEV, UPSTREAMS_DOWN, waitFor } from './helpers.js';
 
 const LINK_ORIGIN = 'https://godseye.example-tailnet.ts.net:8443';
 const postOpts = {
@@ -49,6 +49,7 @@ beforeAll(async () => {
     PULSE_URL: 'http://127.0.0.1:9',
   });
   gw = await startGateway(config, {
+    fetch: UPSTREAMS_DOWN,
     logger: createLogger({ level: 'debug', sink: (l) => logs.push(l) }),
     gevChild: childSpawnSpec({
       gevRoot: REPO_ROOT,

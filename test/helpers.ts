@@ -31,6 +31,16 @@ export const PROD_ENV: Record<string, string> = {
   STEPUP_KEY: randomBytes(32).toString('base64url'),
 };
 
+/**
+ * startGateway's `fetch` override for tests that don't exercise the gateway-native families:
+ * every third-party upstream (NWS, road sources, CBP, adsb.fi, ...) answers 404 at once.
+ */
+export const UPSTREAMS_DOWN: typeof fetch = async () =>
+  new Response('{"error":"test double: upstream down"}', {
+    status: 404,
+    headers: { 'content-type': 'application/json' },
+  });
+
 export async function waitFor(fn: () => boolean, timeoutMs = 10_000, stepMs = 25): Promise<void> {
   const t0 = Date.now();
   while (!fn()) {

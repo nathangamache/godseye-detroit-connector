@@ -17,7 +17,7 @@ import { childSpawnSpec } from '../src/gev/child.js';
 import { nullLogger } from '../src/log.js';
 import { RailIndex } from '../src/rail/index.js';
 import { startMockPulse, type MockPulseOptions } from './fixtures/mock-pulse.js';
-import { BELLE_ISLE, DETROIT, MOCK_GEV, waitFor } from './helpers.js';
+import { BELLE_ISLE, DETROIT, MOCK_GEV, UPSTREAMS_DOWN, waitFor } from './helpers.js';
 
 const text = (r: { content: unknown }) =>
   (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join('\n');
@@ -97,6 +97,7 @@ async function harness(pulse: MockPulseOptions) {
     PULSE_TIMEOUT_MS: '2000',
   });
   const gw = await startGateway(config, {
+    fetch: UPSTREAMS_DOWN,
     logger: nullLogger,
     gevChild: childSpawnSpec({
       gevRoot: REPO_ROOT,
