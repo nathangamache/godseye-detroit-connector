@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { Express } from 'express';
 import { createPrivateApp, createPublicApp, createUiApp, hardenServer } from './app.js';
+import { registerWeatherTools } from './extra/weather/index.js';
 import { Audit } from './audit.js';
 import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import { parseRelayUrl, type Config } from './config.js';
@@ -142,6 +143,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   });
   // The rail index lets the Pulse rail tool match coverage on every name a track has.
   for (const t of pulseTools(pulse, { rail, now })) registry.register(t);
+  registerWeatherTools({ config, registry, locations, audit, tokens, logger, now });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(

@@ -268,8 +268,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   wrapper when the clone is present.
 * Arguments are validated against each tool's JSON schema; place names are refused unless a
   geocoder is configured.
-* Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket), per-grant and per-IP request
-  limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
+* Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket, the weather, water and air
+  tools), per-grant and per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls
+  at once.
 * No tool reads gateway config, env or files beyond the bundled rail data; error text is stripped
   of paths and truncated.
 * **Untrusted output**: every result starts with a provenance header labelling it untrusted data
@@ -278,6 +279,35 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   flagged as third-party and unvetted**, in the result and in the server instructions. Every
   result, summary and images included, is capped at `MAX_RESULT_CHARS` (100k); Pulse labels are
   limited.
+
+### Outbound data sources of the gateway-native tools
+
+The weather, water and air tools (`src/extra/weather`) call public APIs from the gateway's
+namespace (the sidecar's `edge` network). Each request is https only, to a fixed host list per
+service (a URL from an upstream answer is used only if it is on that list), with the User-Agent
+`(godseye-personal-connector)` and no other identifying header, a per-attempt timeout
+(`WEATHER_HTTP_TIMEOUT_MS`, 12 s), no redirects, a response size cap, two polite retries on
+5xx and one on 429 (Retry-After honoured up to 5 s). Error text never contains a URL, so the
+AirNow key (a query parameter) can't reach a result or a log line. Third-party text (alert and
+forecast text, station names, the AirNow discussion) has control and bidi characters stripped,
+is length-capped and is labelled untrusted. What leaves the gateway: the point, rounded to
+4 decimals (~11 m); for `here: true` that is the phone's latest fix, so each such call is audited
+as a location read.
+
+| Tool | Host(s) | Key | Terms / licence | Caching, limits |
+|---|---|---|---|---|
+| `weather_alerts`, `weather_forecast` | `api.weather.gov` | none (User-Agent required) | NWS: open data, free to use for any purpose, public domain; credit "National Weather Service" | office/grid per ~1 km cell 12 h, alerts 30 s, forecasts ≤ 10 min; 120/h and 60/h |
+| `water_levels_near` | `api.tidesandcurrents.noaa.gov` | none | NOAA CO-OPS, public domain | station list 24 h, flood levels 24 h |
+| | `api.waterdata.usgs.gov` | `USGS_API_KEY` (header `X-Api-Key`), else the shared `DEMO_KEY` | USGS, public domain; values provisional | 10 min (DEMO_KEY limits are low); 20/h for the tool |
+| | `api.water.noaa.gov` (NWPS) | none | NOAA NWS, public domain | gauge list 10 min, flood stages 24 h |
+| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **off** without it | AirNow Data Exchange Guidelines: preliminary data, credit the agency (Michigan EGLE) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
+
+* AirNow retired its old lat/long services on 2026-09-30 (its June 2026 notice); the tool asks
+  the replacement services first with the old parameters, whose documentation is behind the
+  AirNow login (unverified), and falls back to the old paths on a path or parameter error.
+  Records in an unexpected format are passed through as received, never reinterpreted.
+* A missing key switches a tool off in the policy (hidden from `find_tools`; `run_tool` answers
+  "not configured: set … in deploy/secrets/gateway.env") and the tool makes no request.
 
 ### Data retention
 
@@ -386,11 +416,16 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   called for an explicit point also gets a "phone check" (distance, bearing and age of a fix at
   most `LOCATION_PROXIMITY_MINUTES` old, never its coordinates); distance and bearing from a known
   place still locate the phone roughly, so each check is audited as a location read
-  (`purpose: proximity_check`).
+  (`purpose: proximity_check`). A weather, water or air tool called with `here: true` sends the
+  latest fix (4 decimals) to that public API, which sees it with the server's public IP; results
+  give only its age and accuracy, never the coordinates.
 * **claude.ai and a cross-host `authorization_endpoint`**: untested end to end. If it fails, the
   documented fallback weakens "humans only via Tailscale" (password+TOTP on the public host).
 * **Licensing**: Broadcastify's terms block Pulse's current audio source; OpenSky needs a licence;
-  Google content is excluded by policy, not by GEV.
+  Google content is excluded by policy, not by GEV. AirNow's guidelines ask that a product using
+  its data be made known to the agencies and AirNow: send a one-line notice of personal,
+  non-commercial use to dmc@airnowtech.org when you add `AIRNOW_API_KEY`. AirNow's terms don't
+  mention AI assistants.
 * `docker-compose` 1.29 is end-of-life and crashes when recreating containers against Docker 29
   (`KeyError: 'ContainerConfig'`): use `down` then `up -d`, or install Compose v2.
 

@@ -4,7 +4,8 @@
  * Order of evaluation (first match wins):
  *  1. NEVER: tools that must not exist on the connector at all (panel_request).
  *  2. Licensing hard denies (Google-derived content; metered OpenAI). Not configurable.
- *  3. Licensing switches: OpenSky-backed aviation tools, ALPR locations.
+ *  3. Licensing switches: OpenSky-backed aviation tools, ALPR locations; then tools a backend
+ *     switched off at startup (switchOff, e.g. a missing API key).
  *  4. TOOL_DENYLIST from config.
  *  5. GEV tools must be on GEV_TOOL_ALLOWLIST (deny by default, so a tool that
  *     appears after an upstream pull stays hidden until it is vetted).
@@ -42,6 +43,8 @@ export type PolicyVerdict = { allowed: true } | { allowed: false; reason: string
 export class ToolPolicy {
   readonly limiter: RateLimiter;
   private readonly limits: RateLimitSpec[];
+  /** Tools a backend switched off at startup (e.g. its API key is missing), with the reason. */
+  private readonly switchedOff = new Map<string, string>();
 
   constructor(
     private readonly config: Pick<
@@ -56,7 +59,21 @@ export class ToolPolicy {
     limiter?: RateLimiter,
   ) {
     this.limiter = limiter ?? new RateLimiter();
-    this.limits = config.toolRateLimits;
+    this.limits = [...config.toolRateLimits];
+  }
+
+  /** Switch a tool off: hidden from find_tools, and run_tool answers with `reason`. */
+  switchOff(name: string, reason: string): void {
+    this.switchedOff.set(name, reason);
+  }
+
+  /**
+   * Default quotas a tool family brings (src/extra). A TOOL_RATE_LIMITS entry for the same
+   * bucket replaces them, so the operator's own limits always win.
+   */
+  addDefaultLimits(specs: RateLimitSpec[]): void {
+    const configured = new Set(this.limits.map((l) => l.bucket));
+    this.limits.push(...specs.filter((s) => !configured.has(s.bucket)));
   }
 
   evaluate(tool: Pick<ToolDef, 'name' | 'source'>): PolicyVerdict {
@@ -77,6 +94,8 @@ export class ToolPolicy {
       };
     if (ALPR_TOOLS.has(n) && !this.config.ALLOW_ALPR_TOOLS)
       return { allowed: false, reason: `${n} is disabled by policy (ALLOW_ALPR_TOOLS=false)` };
+    const off = this.switchedOff.get(n);
+    if (off) return { allowed: false, reason: `${n} is off: ${off}` };
     if (this.config.TOOL_DENYLIST.includes(n))
       return { allowed: false, reason: `${n} is on TOOL_DENYLIST` };
     if (tool.source === 'gev' && !this.config.GEV_TOOL_ALLOWLIST.includes(n))
@@ -95,6 +114,7 @@ export class ToolPolicy {
       METERED_TOOLS.has(name) ||
       OPENSKY_TOOLS.has(name) ||
       ALPR_TOOLS.has(name) ||
+      this.switchedOff.has(name) ||
       this.config.TOOL_DENYLIST.includes(name);
     if (!explicit) return null;
     const v = this.evaluate({ name, source: 'gev' });

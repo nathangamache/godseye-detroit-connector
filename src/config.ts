@@ -250,6 +250,35 @@ const schema = z.object({
    * latest fix, never its coordinates) when that fix is at most this old.
    */
   LOCATION_PROXIMITY_MINUTES: int(30, 1, 24 * 60),
+
+  // ---- weather ----
+  // Gateway-native weather, water and air tools (src/extra/weather). NWS, NOAA CO-OPS and NWPS
+  // are keyless.
+  /** USGS Water Data API key (api.waterdata.usgs.gov/signup). Unset: the shared DEMO_KEY (low limits). */
+  USGS_API_KEY: optionalString,
+  /** EPA AirNow API key. Unset: air_quality is off. */
+  AIRNOW_API_KEY: optionalString,
+  /** Timeout of each upstream request these tools make (retries included separately). */
+  WEATHER_HTTP_TIMEOUT_MS: int(12_000, 1_000, 60_000),
+  /**
+   * Default quotas for these tools (TOOL_RATE_LIMITS syntax). A TOOL_RATE_LIMITS entry for the
+   * same bucket replaces the default.
+   */
+  WEATHER_TOOL_RATE_LIMITS: z
+    .string()
+    .default('weather_alerts=120/h,weather_forecast=60/h,water_levels_near=20/h,air_quality=30/h')
+    .refine(
+      (s) => {
+        try {
+          parseRateLimits(s);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'expected bucket=N/(s|m|h|d) entries separated by commas' },
+    ),
+  // ---- end weather ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
