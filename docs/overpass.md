@@ -128,8 +128,8 @@ Add to `deploy/secrets/gev.env` (mode 600):
 OVERPASS_UPSTREAMS=http://overpass/api/interpreter
 ```
 
-and to `deploy/secrets/gateway.env`, for gateway tools that query it directly (the gateway
-ignores the setting until such a tool exists):
+and to `deploy/secrets/gateway.env`, for the gateway tools that query it directly
+(`geocode_place` finds intersections with it; unset, it answers that intersections need it):
 
 ```sh
 OVERPASS_URL=http://overpass/api/interpreter
@@ -146,8 +146,8 @@ docker-compose -p godseye rm -sf gev && docker-compose -p godseye up -d --no-dep
 ```
 
 (With Compose v2: `docker compose -p godseye up -d --no-deps --force-recreate gev`.) Do the same
-for the gateway once it has a tool that uses `OVERPASS_URL`: `rm -sf gateway` and
-`up -d --no-deps gateway`, the gateway only, since the sidecar keeps its namespace.
+for the gateway after adding `OVERPASS_URL`: `rm -sf gateway` and `up -d --no-deps gateway`, the
+gateway only, since the sidecar keeps its namespace.
 
 ## Weekly refresh
 

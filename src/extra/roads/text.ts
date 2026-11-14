@@ -1,0 +1,171 @@
+/**
+ * Third-party text handling (descriptions, street names: data, never instructions) and road
+ * name matching across sources that spell the same road differently ("I-696", "I 696",
+ * "Reuther Fwy"; "HWY 401", "401").
+ */
+
+const ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+  '#39': "'",
+};
+
+/**
+ * Plain, bounded text from an upstream string: tags stripped, a few entities decoded, control
+ * characters and runs of whitespace collapsed, cut at max characters. Not a string: null.
+ */
+export function cleanText(v: unknown, max = 300): string | null {
+  if (typeof v !== 'string' && typeof v !== 'number') return null;
+  let s = String(v)
+    .slice(0, 20_000)
+    .replace(/<[^>]{0,500}>/g, ' ')
+    .replace(/&(amp|lt|gt|quot|apos|nbsp|#39);/g, (_m, e: string) => ENTITIES[e] ?? ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/ ([.,;:!?])(?=\s|$)/g, '$1')
+    .trim();
+  if (!s) return null;
+  if (s.length > max) s = s.slice(0, Math.max(1, max - 1)).trimEnd() + '…';
+  return s;
+}
+
+const NUMBER_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+  eleven: '11',
+  twelve: '12',
+  thirteen: '13',
+  fourteen: '14',
+  fifteen: '15',
+  sixteen: '16',
+  seventeen: '17',
+  eighteen: '18',
+  nineteen: '19',
+  twenty: '20',
+};
+
+const SUFFIXES: Array<[RegExp, string]> = [
+  [/\bavenue\b/g, 'ave'],
+  [/\bav\b/g, 'ave'],
+  [/\bstreet\b/g, 'st'],
+  [/\broad\b/g, 'rd'],
+  [/\bboulevard\b/g, 'blvd'],
+  [/\bdrive\b/g, 'dr'],
+  [/\bfreeway\b/g, 'fwy'],
+  [/\bexpressway\b/g, 'expy'],
+  [/\bparkway\b/g, 'pkwy'],
+  [/\bhighway\b/g, 'hwy'],
+  [/\blane\b/g, 'ln'],
+  [/\bcourt\b/g, 'ct'],
+  [/\bplace\b/g, 'pl'],
+  [/\bnorth\b/g, 'n'],
+  [/\bsouth\b/g, 's'],
+  [/\beast\b/g, 'e'],
+  [/\bwest\b/g, 'w'],
+];
+
+/** Canonical form for matching: "Interstate-696 EB" -> "i 696 eb", "Highway 401" -> "hwy 401". */
+export function normRoad(s: string): string {
+  let t = ` ${s.toLowerCase()} `
+    .replace(/&/g, ' and ')
+    .replace(/[’'.]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ');
+  t = t.replace(
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/g,
+    (w) => NUMBER_WORDS[w] ?? w,
+  );
+  t = t
+    .replace(/\binterstate\s*(\d+)/g, 'i $1')
+    .replace(/\bi\s*(\d+)/g, 'i $1')
+    .replace(/\bu\s*s\s*(\d+)/g, 'us $1')
+    .replace(/\bus\s*(\d+)/g, 'us $1')
+    .replace(/\bm\s*(\d+)\b/g, 'm $1')
+    .replace(/\b(?:kings\s+)?(?:highway|hwy|hiway)\s*(\d+)/g, 'hwy $1');
+  for (const [re, rep] of SUFFIXES) t = t.replace(re, rep);
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+/** Detroit and Windsor freeway names and their route numbers (both directions are matched). */
+const ALIASES: Array<[string, string]> = [
+  ['lodge', 'm 10'],
+  ['chrysler', 'i 75'],
+  ['fisher', 'i 75'],
+  ['edsel ford', 'i 94'],
+  ['jeffries', 'i 96'],
+  ['reuther', 'i 696'],
+  ['southfield fwy', 'm 39'],
+  ['davison', 'm 8'],
+  ['ec row', 'ec row'],
+  ['macdonald cartier', 'hwy 401'],
+];
+
+export interface RoadQuery {
+  /** What the caller typed (cleaned). */
+  text: string;
+  /** Canonical spellings to look for (the input plus aliases). */
+  needles: string[];
+  /** The most distinctive word, for a server-side text filter ("696", "woodward"). */
+  keyword: string;
+}
+
+const GENERIC = new Set([
+  'i',
+  'us',
+  'm',
+  'hwy',
+  'rd',
+  'st',
+  'ave',
+  'blvd',
+  'dr',
+  'fwy',
+  'n',
+  's',
+  'e',
+  'w',
+  'and',
+  'the',
+  'mile',
+  'expy',
+  'pkwy',
+]);
+
+export function roadQuery(input: string): RoadQuery {
+  const text = cleanText(input, 80) ?? '';
+  const n = normRoad(text);
+  const needles = new Set([n]);
+  for (const [name, ref] of ALIASES) {
+    if (` ${n} `.includes(` ${name} `)) needles.add(ref);
+    if (n === ref) needles.add(name);
+  }
+  // "401" alone means Highway 401 in Ontario; "hwy 7" also matches an Ontario RoadwayName "7".
+  if (/^\d+$/.test(n)) needles.add(`hwy ${n}`);
+  const words = n.split(' ').filter((w) => !GENERIC.has(w));
+  const keyword = words.sort((a, b) => b.length - a.length)[0] ?? n;
+  return { text, needles: [...needles].filter(Boolean), keyword };
+}
+
+/** True if any of the texts mentions the road (whole-word match on the canonical forms). */
+export function mentionsRoad(q: RoadQuery, texts: Array<string | null | undefined>): boolean {
+  for (const t of texts) {
+    if (!t) continue;
+    let hay = ` ${normRoad(t)} `;
+    // A bare Ontario route number ("7") is Highway 7.
+    if (/^ \d+ $/.test(hay)) hay = ` hwy${hay}`;
+    if (q.needles.some((nd) => hay.includes(` ${nd} `))) return true;
+  }
+  return false;
+}

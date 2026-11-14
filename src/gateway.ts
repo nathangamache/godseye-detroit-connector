@@ -21,6 +21,7 @@ import { RailIndex } from './rail/index.js';
 import { railTools } from './rail/tools.js';
 import { PulseClient } from './pulse/client.js';
 import { pulseTools } from './pulse/tools.js';
+import { registerRoads } from './extra/roads/index.js';
 import { ToolPolicy } from './tools/policy.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/runner.js';
@@ -154,6 +155,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     now,
   });
   registerWeatherTools({ config, registry, locations, audit, tokens, logger, now });
+  registerRoads(registry, { config, locations, audit, tokens, logger, now });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(

@@ -312,6 +312,96 @@ const schema = z.object({
     'weather_alerts=120/h,weather_forecast=60/h,water_levels_near=20/h,air_quality=30/h',
   ),
   // ---- end weather ----
+
+  // ---- roads ----
+  // Gateway-native road, place and border tools (src/extra/roads). A source that needs a key
+  // stays off, and says which variable to set, until that key is in deploy/secrets/gateway.env.
+  /** Generic, self-describing User-Agent for every outbound request (no personal data). */
+  ROADS_USER_AGENT: z
+    .string()
+    .trim()
+    .min(3)
+    .max(200)
+    .default('godseye-connector/0.1 (personal non-commercial MCP gateway)'),
+  ROADS_FETCH_TIMEOUT_MS: int(12_000, 1_000, 60_000),
+  /** Default per-tool quotas; a bucket also named in TOOL_RATE_LIMITS keeps that value. */
+  ROADS_TOOL_RATE_LIMITS: rateLimitList(
+    'road_closures=60/h,geocode_place=60/h,route_avoiding_closures=30/h,mdot_camera_link=60/h,border_wait_times=60/h',
+  ),
+  DETROIT_ROW_ENABLED: bool(true),
+  DETROIT_ROW_URL: z
+    .url({ protocol: /^https?$/ })
+    .default(
+      'https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/detroit_right_of_way_permits/FeatureServer',
+    )
+    .transform((s) => s.replace(/\/+$/, '')),
+  /** TomTom Traffic Incident Details: the key GEV uses, plus the owner's licence switch. */
+  TOMTOM_API_KEY: optionalString,
+  ALLOW_TOMTOM_INCIDENTS: bool(false),
+  TOMTOM_INCIDENTS_DAILY_MAX: int(60, 0, 2_500),
+  TOMTOM_API_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://api.tomtom.com')
+    .transform((s) => s.replace(/\/+$/, '')),
+  /** MDOT RIDE (MiLogin for Business subscription); sent in the api_key header. */
+  MDOT_RIDE_API_KEY: optionalString,
+  MDOT_RIDE_URL: z
+    .url({ protocol: /^https?$/ })
+    .default(
+      'https://mdotridedata.state.mi.us/api/v1/organization/michigan_department_of_transportation/dataset',
+    )
+    .transform((s) => s.replace(/\/+$/, '')),
+  MDOT_RIDE_WORK_ZONES_DATASET: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,80}$/)
+    .default('work_zone_information'),
+  MDOT_RIDE_EVENTS_DATASET: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,80}$/)
+    .default('traffic_events'),
+  MDOT_RIDE_LIMIT: int(200, 1, 5_000),
+  /** RIDE updates every 5 minutes: never poll it more often than this. */
+  MDOT_RIDE_CACHE_S: int(300, 300, 3_600),
+  ONTARIO_511_API_KEY: optionalString,
+  ONTARIO_511_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://511on.ca/api/v2/get')
+    .transform((s) => s.replace(/\/+$/, '')),
+  ONTARIO_511_CACHE_S: int(180, 60, 300),
+  GEOCODER_CENSUS_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://geocoding.geo.census.gov/geocoder')
+    .transform((s) => s.replace(/\/+$/, '')),
+  GEOCODER_PHOTON_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://photon.komoot.io')
+    .transform((s) => s.replace(/\/+$/, '')),
+  GEOCODER_NOMINATIM_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://nominatim.openstreetmap.org')
+    .transform((s) => s.replace(/\/+$/, '')),
+  /** Public Nominatim is a last resort: at most this many lookups a day (0 = never). */
+  GEOCODER_NOMINATIM_DAILY_MAX: int(50, 0, 50),
+  /**
+   * A self-hosted Overpass interpreter (…/api/interpreter; docs/overpass.md, the same server GEV
+   * uses) for intersections; unset = none. Never a public instance.
+   */
+  OVERPASS_URL: z
+    .union([z.literal(''), z.url({ protocol: /^https?$/ })])
+    .optional()
+    .transform((v) => (v ? v.trim() : undefined)),
+  VALHALLA_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://valhalla1.openstreetmap.de')
+    .transform((s) => s.replace(/\/+$/, '')),
+  MIDRIVE_MAP_URL: z
+    .url({ protocol: /^https$/ })
+    .default('https://mdotjboss.state.mi.us/MiDrive/map'),
+  CBP_BWT_URL: z.url({ protocol: /^https?$/ }).default('https://bwt.cbp.gov/api/bwtnew'),
+  CBSA_BWT_URL: z
+    .url({ protocol: /^https?$/ })
+    .default('https://www.cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv'),
+  // ---- end roads ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
@@ -385,6 +475,7 @@ export function addDefaultRateLimits(
 export const FAMILY_RATE_LIMIT_SETTINGS = [
   'AVIATION_RATE_LIMITS',
   'WEATHER_TOOL_RATE_LIMITS',
+  'ROADS_TOOL_RATE_LIMITS',
 ] as const satisfies readonly (keyof RawConfig)[];
 
 /**
