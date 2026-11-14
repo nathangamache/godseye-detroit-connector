@@ -19,6 +19,8 @@ npm run devices -- revoke iphone-owntracks       # also deletes that device's st
 
 Docker mode: `docker exec -it godseye-gateway node dist/scripts/devices.js add iphone-owntracks`.
 
+The `--pwa` setup link uses `PRIVATE_ORIGIN` (your tailnet URL).
+
 ## Option A: OwnTracks (background, recommended for driving)
 
 OwnTracks is free and open source (iOS and Android). Use **HTTP mode**, not MQTT.
@@ -59,12 +61,15 @@ The gateway replies `[]` to every post, which OwnTracks treats as success. Non-l
    50 m for driving).
 4. Use **Publish location now** from the menu to test.
 
-## Option B: the /locate web app (no install, foreground only)
+## Option B: the /locate web app (no install, foreground only; needs Tailscale)
+
+The page lives on the private listener, so the phone must be on your tailnet (Tailscale app
+connected). It opens at `https://godseye.<tailnet>.ts.net/locate/` and posts fixes to the same
+host. OwnTracks (option A) needs no Tailscale: it posts to the public `/api/location`.
 
 1. Run `npm run devices -- add iphone-pwa --pwa` and open the printed link on the phone within
-   15 minutes. The page sits behind Cloudflare Access, so sign in when asked. The link is single
-   use: the page exchanges it for a device token and keeps that token in the browser's local
-   storage.
+   15 minutes. Tailscale identifies you (no password). The link is single use: the page exchanges
+   it for a device token and keeps that token in the browser's local storage.
 2. Tap **Update My Location**. Allow location access for the site. The page shows the fix it sent
    and its accuracy.
 3. Optional: tick **Keep updating while this page is open** (sends at most every 30 s or after
