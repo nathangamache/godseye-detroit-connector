@@ -1,0 +1,37 @@
+# systemd --user unit: God's Eye View in `vite preview` mode (DEV / plain-node mode).
+# Production runs GEV in a hardened container instead (deploy/docker-compose.yml).
+#
+# Install (Nathan decides; this repo never enables or starts it):
+#   cp deploy/gev/godseye-gev.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user start godseye-gev      # or: enable --now
+#
+# Provider keys live in <GEV checkout>/.env (mode 600, gitignored upstream).
+# See deploy/gev/.env.example for which keys need a rebuild.
+[Unit]
+Description=God's Eye View preview server (127.0.0.1:7701)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nathangamache/projects/godseye/gods-eye-view
+Environment=NODE_ENV=production
+Environment=GEV_ALLOWED_HOSTS=godseye.gamachecloud.com
+Environment=UV_THREADPOOL_SIZE=4
+# vite preview ignores PORT/HOST env, so they are passed as flags.
+ExecStart=/home/nathangamache/.nvm/versions/node/v24.22.3/bin/node node_modules/vite/bin/vite.js preview --host 127.0.0.1 --port 7701 --strictPort
+Restart=on-failure
+RestartSec=5
+# CPU: cgroup cpu controls are not delegated to the user manager on this box,
+# so use niceness + affinity. Memory/pids limits do work.
+Nice=10
+CPUAffinity=16-31
+IOSchedulingClass=idle
+MemoryMax=1G
+TasksMax=256
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
