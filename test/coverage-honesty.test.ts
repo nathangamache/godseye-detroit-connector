@@ -15,7 +15,7 @@ import { childSpawnSpec } from '../src/gev/child.js';
 import { nullLogger } from '../src/log.js';
 import { RailIndex } from '../src/rail/index.js';
 import { startMockPulse, type MockPulseOptions } from './fixtures/mock-pulse.js';
-import { DETROIT, MOCK_GEV, waitFor } from './helpers.js';
+import { BELLE_ISLE, DETROIT, MOCK_GEV, waitFor } from './helpers.js';
 
 const text = (r: { content: unknown }) =>
   (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join('\n');
@@ -135,8 +135,10 @@ async function harness(pulse: MockPulseOptions) {
  * track it sits on (nearestLine within 15 m), using only the index's long-standing API.
  */
 let split: { lat: number; lon: number; fra: string; narn: string };
+let railIndex: RailIndex;
 beforeAll(() => {
   const index = RailIndex.load(path.join(REPO_ROOT, 'data', 'rail'));
+  railIndex = index;
   const norm = (s: string) =>
     s
       .toUpperCase()
@@ -401,6 +403,165 @@ describe('scanner incidents and feeds_status', () => {
       expect(await h.run('feeds_status', {})).toMatch(
         /1 feed\(s\): 1 up\. This Pulse does not report receivers or coverage/,
       );
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('rail_activity_near ties each verdict to the point', () => {
+  const EOT_NAME = 'EOT/HOT telemetry (traintap)';
+  const ZULU = {
+    feed_id: 'cn_zulu_road',
+    name: 'CN Zulu road',
+    category: 'rail',
+    enabled: true,
+    state: 'up',
+    chunks_last_hour: 3,
+    source: 'sdr:rtl_airband',
+    receiver: { state: 'online', last_seen_at: iso(20_000) },
+    coverage: { lines: [{ railroad: 'CN', name: 'Zulu Subdivision', aliases: [] }] },
+  };
+
+  it('EOT: a far point is not "quiet" and packets heard elsewhere are not activity there', async () => {
+    const h = await harness({
+      feeds: () => ({
+        generated_at: iso(0),
+        feeds: [
+          {
+            feed_id: 'eot_hot',
+            name: EOT_NAME,
+            category: 'rail',
+            enabled: true,
+            state: 'up',
+            chunks_last_hour: 9,
+            source: 'sdr:traintap',
+            receiver: { state: 'online', last_seen_at: iso(5_000), device: 'traintap' },
+            coverage: { area: 'Elsewhere County', radius_km: 25 },
+          },
+        ],
+        coverage_summary: {
+          rail_radio: 'not_configured',
+          eot: 'listening',
+          public_safety: 'not_configured',
+        },
+      }),
+      // Pulse lists its EOT channel only for points within range of the located receiver
+      // (BELLE_ISLE here); since_minutes=60 makes the mock return packets anyway.
+      rail: (q) => {
+        const near = Number(q.get('lat')) === BELLE_ISLE.lat;
+        const packets =
+          q.get('since_minutes') === '60'
+            ? [
+                { ts: iso(60_000), device: 'EOT', unit_id: '12345' },
+                { ts: iso(90_000), device: 'HOT', unit_id: '12345' },
+              ]
+            : [];
+        return {
+          generated_at: iso(0),
+          coverage: {
+            covered: near,
+            channels: near ? [{ channel: EOT_NAME, kind: 'eot', receiver_state: 'online' }] : [],
+          },
+          transcripts: [],
+          detector_readouts: [],
+          eot_hot: packets,
+          reason_labels: [],
+        };
+      },
+    });
+    try {
+      const far = await h.run('rail_activity_near', DETROIT);
+      expect(far).toMatch(
+        /EOT\/HOT: No EOT\/HOT receiver near this point: Pulse's EOT\/HOT receiver \(EOT\/HOT telemetry \(traintap\), covering Elsewhere County\) is not listed for this point/,
+      );
+      expect(far).not.toMatch(/EOT\/HOT: Listening and quiet|really is quiet/);
+
+      const farBusy = await h.run('rail_activity_near', { ...DETROIT, since_minutes: 60 });
+      expect(farBusy).toMatch(/0 EOT\/HOT packet\(s\) \(2 ignored: /);
+      expect(farBusy).toMatch(/EOT\/HOT: No EOT\/HOT receiver near this point: /);
+      expect(farBusy).not.toMatch(/Activity found/);
+      expect(farBusy).toMatch(/"eot_hot_not_near_point"/);
+
+      const near = await h.run('rail_activity_near', { ...BELLE_ISLE, since_minutes: 60 });
+      expect(near).toMatch(
+        /EOT\/HOT: Activity found: 2 EOT\/HOT packets near this point \(EOT\/HOT telemetry \(traintap\)\)\./,
+      );
+      const nearQuiet = await h.run('rail_activity_near', BELLE_ISLE);
+      expect(nearQuiet).toMatch(/EOT\/HOT: Listening and quiet: EOT\/HOT receiver online/);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('rail voice: no identified line + a receiver online elsewhere is not "quiet"', async () => {
+    // Open water in Lake Huron: no named track anywhere near it in the rail datasets.
+    const lake = { lat: DETROIT.lat + 2.5, lon: DETROIT.lon + 0.6 };
+    expect(railIndex.tracksNear(lake.lat, lake.lon)).toEqual([]);
+    const h = await harness({
+      feeds: () => ({
+        generated_at: iso(0),
+        feeds: [ZULU],
+        coverage_summary: {
+          rail_radio: 'listening',
+          eot: 'not_configured',
+          public_safety: 'not_configured',
+        },
+      }),
+      // Pulse's own lookup: covered false, no channel for this point.
+      rail: quietRail(false),
+      incidents: noIncidents,
+    });
+    try {
+      const t = await h.run('rail_activity_near', lake);
+      expect(t).toMatch(
+        /Rail radio: No rail radio receiver for this point: no rail line identified here/,
+      );
+      expect(t).toMatch(/channels cover CN Zulu Subdivision/);
+      expect(t).not.toMatch(/Listening and quiet|really is quiet/);
+      const w = text(await h.client.callTool({ name: 'whats_happening_here', arguments: lake }));
+      expect(w).toMatch(/no rail line identified here/);
+      expect(w).not.toMatch(/rail radio receiver online/);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("rail voice: Pulse's covered:false for the point is respected on v1.1", async () => {
+    const h = await harness({
+      feeds: () => ({
+        generated_at: iso(0),
+        feeds: [
+          {
+            ...ZULU,
+            feed_id: 'line_road',
+            name: 'Line road',
+            coverage: { lines: [{ name: split.narn, aliases: [split.fra] }] },
+          },
+        ],
+        coverage_summary: {
+          rail_radio: 'listening',
+          eot: 'not_configured',
+          public_safety: 'not_configured',
+        },
+      }),
+      rail: () => ({
+        generated_at: iso(0),
+        coverage: {
+          covered: false,
+          channels: [{ channel: 'Line road', kind: 'road', receiver_state: 'not_installed' }],
+        },
+        transcripts: [],
+        detector_readouts: [],
+        eot_hot: [],
+        reason_labels: [],
+      }),
+    });
+    try {
+      const t = await h.run('rail_activity_near', { lat: split.lat, lon: split.lon });
+      expect(t).toMatch(/Rail radio: No rail radio receiver confirmed on this line \(/);
+      expect(t).toMatch(/covered: false/);
+      expect(t).not.toMatch(/Listening and quiet|really is quiet/);
     } finally {
       await h.close();
     }

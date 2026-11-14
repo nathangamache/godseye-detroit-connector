@@ -259,27 +259,48 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
         }
         const voice = count(j.transcripts) + count(j.detector_readouts);
         const packets = count(j.eot_hot);
-        const cov = (j.coverage ?? {}) as { covered?: boolean; channels?: unknown };
-        const chans = Array.isArray(cov.channels)
-          ? (cov.channels as Array<{ channel?: unknown; kind?: unknown }>)
-          : [];
-        const pulseVoice = chans
-          .filter((c) => c && c.kind !== 'eot' && typeof c.channel === 'string')
-          .map((c) => String(c.channel));
+        const cov = (j.coverage && typeof j.coverage === 'object' ? j.coverage : {}) as {
+          covered?: unknown;
+          channels?: unknown;
+        };
+        const chans = (Array.isArray(cov.channels) ? (cov.channels as unknown[]) : []).filter(
+          (c): c is { channel: string; kind?: unknown } =>
+            Boolean(c) &&
+            typeof c === 'object' &&
+            typeof (c as { channel?: unknown }).channel === 'string',
+        );
+        const pulseVoice = chans.filter((c) => c.kind !== 'eot').map((c) => c.channel);
+        // The EOT channels Pulse lists for THIS point: it lists one only when its receiver is
+        // within range of the point or has no location set. v1.1 always sends the list, so
+        // there a missing list means none.
+        const pulseEot =
+          Array.isArray(cov.channels) || (status && reportsCoverage(status))
+            ? chans.filter((c) => c.kind === 'eot').map((c) => c.channel)
+            : undefined;
+        const pulseCovered = typeof cov.covered === 'boolean' ? cov.covered : undefined;
         const railVerdict = assess('rail_radio', status, {
           messages: voice,
           window_min: since,
           tracks,
           pulseChannels: pulseVoice,
+          pulseCovered,
         });
-        const eotVerdict = assess('eot', status, { messages: packets, window_min: since });
+        const eotVerdict = assess('eot', status, {
+          messages: packets,
+          window_min: since,
+          pulseChannels: pulseEot,
+          pulseCovered,
+        });
+        // Packets no receiver covering this point heard are not activity here.
+        const ignored = eotVerdict.state === 'no_receiver' ? (eotVerdict.ignored_messages ?? 0) : 0;
         // Labels are machine-derived from radio: cap how many and how long (review MCP-3).
         const all = Array.isArray(j.reason_labels)
           ? (j.reason_labels as Array<{ label?: unknown }>).map((l) => String(l?.label ?? ''))
           : [];
         const labels = all.slice(0, 10).map((l) => (l.length > 80 ? l.slice(0, 79) + '…' : l));
         const more = all.length > labels.length ? ` (+${all.length - labels.length} more)` : '';
-        const counts = `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s), ${count(j.eot_hot)} EOT/HOT packet(s) in the last ${since} min${labels.length ? `; likely reason: ${labels.join(', ')}${more}` : ''}.`;
+        const eotCount = `${packets - ignored} EOT/HOT packet(s)${ignored ? ` (${ignored} ignored: no EOT/HOT receiver that covers this point heard ${ignored === 1 ? 'it' : 'them'})` : ''}`;
+        const counts = `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s), ${eotCount} in the last ${since} min${labels.length ? `; likely reason: ${labels.join(', ')}${more}` : ''}.`;
         const here = tracks.length ? lineLabel(tracks) : 'this point';
         const old =
           !reportsCoverage(status ?? { feeds: [] }) && cov.covered === false
@@ -290,6 +311,7 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
           summary,
           data: {
             ...j,
+            ...(ignored ? { eot_hot: [], eot_hot_not_near_point: j.eot_hot } : {}),
             line_names_checked: tracks.map((t) => ({ track: t.label, names: t.names })),
             pulse_subdivision_hint: hint,
             coverage_check: { rail_radio: railVerdict, eot: eotVerdict },

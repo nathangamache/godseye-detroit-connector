@@ -219,3 +219,132 @@ describe('verdicts', () => {
     expect(assess('public_safety', s, { messages: 0, window_min: 60 }).state).toBe('quiet');
   });
 });
+
+describe('verdicts are tied to the point', () => {
+  const EOT = 'EOT/HOT telemetry (traintap)';
+  const eotFeed = (over: Record<string, unknown> = {}) => ({
+    feed_id: 'eot_hot',
+    name: EOT,
+    category: 'rail',
+    enabled: true,
+    state: 'up',
+    chunks_last_hour: 9,
+    source: 'sdr:traintap',
+    receiver: { state: 'online', last_seen_at: '2026-11-14T11:59:30Z' },
+    coverage: { area: 'Elsewhere County', radius_km: 25 },
+    ...over,
+  });
+  const eot = (s: FeedsStatus | undefined, messages: number, pulseChannels?: string[]) =>
+    assess('eot', s, { messages, window_min: 30, pulseChannels });
+
+  it('EOT: a located receiver Pulse does not list for this point is not near it', () => {
+    const s = status([eotFeed()], { rail_radio: 'not_configured', eot: 'listening' });
+    const v = eot(s, 0, []);
+    expect(v).toMatchObject({ state: 'no_receiver', reason: 'not_near' });
+    const t = verdictSentence(v, NOW);
+    expect(t).toMatch(/^No EOT\/HOT receiver near this point: /);
+    expect(t).toMatch(/Elsewhere County/);
+    expect(t).toMatch(/0 EOT\/HOT packets means no coverage/);
+    expect(t).not.toMatch(/quiet: |really is quiet/);
+    // Packets Pulse heard elsewhere are not activity here.
+    const busy = eot(s, 3, []);
+    expect(busy).toMatchObject({ state: 'no_receiver', reason: 'not_near', ignored_messages: 3 });
+    expect(verdictSentence(busy, NOW)).not.toMatch(/Activity found/);
+    expect(verdictSentence(busy, NOW)).toMatch(/3 EOT\/HOT packets .*not counted/);
+  });
+
+  it('EOT: the receiver Pulse lists for this point decides (by name or feed id)', () => {
+    const s = status([eotFeed()], { eot: 'listening' });
+    expect(eot(s, 0, [EOT]).state).toBe('quiet');
+    expect(eot(s, 0, ['EOT_HOT']).state).toBe('quiet');
+    expect(eot(s, 2, [EOT])).toMatchObject({ state: 'activity', messages: 2 });
+    // Only a listed receiver that is offline: offline, never quiet.
+    const off = status([
+      eotFeed({ receiver: { state: 'offline', last_seen_at: '2026-11-14T09:00:00Z' } }),
+    ]);
+    expect(eot(off, 0, [EOT]).state).toBe('offline');
+  });
+
+  it('EOT: with one receiver near and one far, packets may come from the far one', () => {
+    const s = status([
+      eotFeed(),
+      eotFeed({ feed_id: 'eot_far', name: 'Far EOT', coverage: { area: 'Far County' } }),
+    ]);
+    const v = eot(s, 2, [EOT]);
+    expect(v).toMatchObject({ state: 'activity', messages: 2, feeds: [{ feed_id: 'eot_hot' }] });
+    expect(verdictSentence(v, NOW)).toMatch(
+      /some may come from Far EOT, which doesn't cover this point/,
+    );
+  });
+
+  it('EOT: no listed channel and only a summary saying "listening" is not quiet', () => {
+    const s = status([], { eot: 'listening' });
+    expect(eot(s, 0, [])).toMatchObject({ state: 'no_receiver', reason: 'not_near' });
+    // Feed status unavailable: Pulse's own point lookup still says no EOT channel covers it.
+    expect(eot(undefined, 4, [])).toMatchObject({
+      state: 'no_receiver',
+      reason: 'not_near',
+      ignored_messages: 4,
+    });
+    // Nothing set up at all stays "not configured".
+    const none = status([], { eot: 'not_configured' });
+    expect(eot(none, 0, [])).toMatchObject({ state: 'no_receiver', reason: 'not_configured' });
+  });
+
+  it('rail voice: no line identified and no channel from Pulse is never quiet', () => {
+    const s = status([railFeed()], { rail_radio: 'listening' });
+    for (const pulseChannels of [undefined, []]) {
+      const v = assess('rail_radio', s, { messages: 0, window_min: 30, tracks: [], pulseChannels });
+      expect(v).toMatchObject({
+        state: 'no_receiver',
+        reason: 'no_line',
+        covered_lines: ['CSX Alpha Subdivision'],
+      });
+      const t = verdictSentence(v, NOW);
+      expect(t).toMatch(/^No rail radio receiver for this point: no rail line identified here/);
+      expect(t).toMatch(/channels cover CSX Alpha Subdivision/);
+      expect(t).not.toMatch(/quiet: |really is quiet/);
+    }
+    // Pulse's summary alone (no visible feed) does not make an unidentified point quiet.
+    const summaryOnly = status([], { rail_radio: 'listening' });
+    expect(
+      assess('rail_radio', summaryOnly, { messages: 0, window_min: 30, tracks: [] }),
+    ).toMatchObject({ state: 'no_receiver', reason: 'no_line' });
+    // A channel Pulse's lookup names for the point still counts without a line.
+    expect(
+      assess('rail_radio', s, {
+        messages: 0,
+        window_min: 30,
+        tracks: [],
+        pulseChannels: ['CSX Alpha road'],
+      }).state,
+    ).toBe('quiet');
+  });
+
+  it("covered:false from Pulse's rail/activity is never quiet", () => {
+    const s = status([railFeed(), eotFeed()], { rail_radio: 'listening', eot: 'listening' });
+    const v = assess('rail_radio', s, {
+      messages: 0,
+      window_min: 30,
+      tracks: TRACK,
+      pulseChannels: ['CSX Alpha road'],
+      pulseCovered: false,
+    });
+    expect(v).toMatchObject({ state: 'no_receiver', reason: 'pulse_not_covered' });
+    const t = verdictSentence(v, NOW, 'this line');
+    expect(t).toMatch(/^No rail radio receiver confirmed on this line: /);
+    expect(t).not.toMatch(/quiet: |really is quiet/);
+    expect(
+      assess('eot', s, { messages: 0, window_min: 30, pulseChannels: [EOT], pulseCovered: false }),
+    ).toMatchObject({ state: 'no_receiver', reason: 'pulse_not_covered' });
+    // covered:true (or not given) leaves the verdict alone.
+    expect(
+      assess('rail_radio', s, {
+        messages: 0,
+        window_min: 30,
+        tracks: TRACK,
+        pulseCovered: true,
+      }).state,
+    ).toBe('quiet');
+  });
+});

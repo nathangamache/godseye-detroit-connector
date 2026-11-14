@@ -7,11 +7,17 @@
  * messages a query found, into one verdict per kind of source:
  *
  *   activity found · listening and quiet · receiver offline since T ·
- *   no receiver (none configured / never reported / none for this line) · can't say (old Pulse)
+ *   no receiver (none configured / never reported / none for this line / no line identified /
+ *   none near this point / Pulse's point lookup says not covered) · can't say (old Pulse)
  *
  * Example/placeholder feeds (ids starting "example_" or flagged example: true) never count.
  * Rail lines are matched on every name the datasets give a track and every alias Pulse lists,
  * normalised (src/rail/names.ts), never on one string.
+ *
+ * Every verdict is about the point asked: "quiet" needs a receiver that covers it. Rail voice
+ * is judged per line (the line identified at the point, or the channels Pulse's rail/activity
+ * lists for it); EOT/HOT per the "eot" channels rail/activity lists for the point (Pulse lists
+ * one only when its receiver is within range of the point or has no location set).
  */
 import {
   formatLineNames,
@@ -173,15 +179,35 @@ export interface FeedRef {
   located?: boolean;
 }
 
+export type NoReceiverReason =
+  | 'not_configured'
+  | 'never_reported'
+  | 'not_this_line'
+  /** Rail voice: no line identified at the point and Pulse listed no channel for it. */
+  | 'no_line'
+  /** EOT/HOT: Pulse's rail/activity lists no EOT channel for the point (receivers too far). */
+  | 'not_near'
+  /** rail/activity said covered:false for the point (v1.1): no listed receiver has reported. */
+  | 'pulse_not_covered';
+
 export type Verdict =
-  | { kind: CoverageKind; state: 'activity'; messages: number; feeds: FeedRef[] }
+  | {
+      kind: CoverageKind;
+      state: 'activity';
+      messages: number;
+      feeds: FeedRef[];
+      /** EOT/HOT: receivers that don't cover the point but may have heard some of the packets. */
+      elsewhere?: FeedRef[];
+    }
   | { kind: CoverageKind; state: 'quiet'; window_min: number; feeds: FeedRef[] }
   | { kind: CoverageKind; state: 'offline'; since?: string; feeds: FeedRef[] }
   | {
       kind: CoverageKind;
       state: 'no_receiver';
-      reason: 'not_configured' | 'never_reported' | 'not_this_line';
+      reason: NoReceiverReason;
       covered_lines?: string[];
+      /** Messages Pulse returned that no receiver covering the point heard (not counted). */
+      ignored_messages?: number;
       feeds: FeedRef[];
     }
   | { kind: CoverageKind; state: 'unknown'; reason: 'pulse_too_old' | 'status_unavailable' };
@@ -192,8 +218,14 @@ export interface AssessOptions {
   window_min: number;
   /** Rail radio only: the tracks at the point, with every name (src/rail/index.ts tracksNear). */
   tracks?: TrackNames[];
-  /** Rail radio only: channel names Pulse's own rail/activity lookup said cover the point. */
+  /**
+   * Channel names (labels or feed ids) of this kind that Pulse's own rail/activity lookup listed
+   * for the point: road/dispatcher/detector channels for rail radio, "eot" channels for EOT/HOT.
+   * For EOT/HOT, `[]` means Pulse listed none for this point; undefined means it isn't known.
+   */
   pulseChannels?: string[];
+  /** rail/activity's coverage.covered for the point (v1.1: a listed receiver has reported). */
+  pulseCovered?: boolean;
 }
 
 function ref(f: FeedInfo): FeedRef {
@@ -229,32 +261,96 @@ export function assess(
   status: FeedsStatus | undefined,
   opts: AssessOptions,
 ): Verdict {
+  const v = judge(kind, status, opts);
+  // Pulse's own lookup for this point (v1.1) says no receiver covering it has reported: whatever
+  // feeds/status says (it may be a few seconds older), that is not "quiet".
+  if (v.state === 'quiet' && opts.pulseCovered === false && status && reportsCoverage(status))
+    return { kind, state: 'no_receiver', reason: 'pulse_not_covered', feeds: v.feeds };
+  return v;
+}
+
+/** The lines Pulse's channels of a kind hear, for "no receiver here; Pulse covers X". */
+function coveredLines(feeds: FeedInfo[]): string[] {
+  const covered = new Map<string, string>();
+  for (const f of feeds)
+    for (const l of f.coverage?.lines ?? []) {
+      const label = `${l.railroad ? `${l.railroad} ` : ''}${displayLineName(l.name)}`;
+      covered.set(label.toLowerCase(), label);
+    }
+  return [...covered.values()].slice(0, 10);
+}
+
+function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: AssessOptions): Verdict {
   const usable = status && reportsCoverage(status) ? status : undefined;
-  let feeds = usable ? feedsOfKind(usable, kind) : [];
+  const all = usable ? feedsOfKind(usable, kind) : [];
+  let feeds = all;
   const tracks = opts.tracks ?? [];
   const channels = new Set((opts.pulseChannels ?? []).map((c) => c.toLowerCase()));
-  // Rail radio is judged per line when we know the line (or Pulse named its channels for the
-  // point); otherwise per kind.
-  if (kind === 'rail_radio' && usable && (tracks.length || channels.size)) {
-    feeds = feeds.filter(
+  const listed = (f: FeedInfo) =>
+    channels.has((f.name ?? '').toLowerCase()) || channels.has(f.feed_id.toLowerCase());
+  const summary = usable?.coverage_summary?.[kind];
+  let elsewhere: FeedRef[] = [];
+
+  if (kind === 'eot' && opts.pulseChannels !== undefined) {
+    // EOT packets carry no position: only a receiver Pulse lists for this point can tie them to it.
+    const near = all.filter(listed);
+    if (usable ? !near.length : !channels.size) {
+      const ignored = opts.messages > 0 ? { ignored_messages: opts.messages } : {};
+      const nr = (reason: NoReceiverReason, fs: FeedInfo[]): Verdict => ({
+        kind,
+        state: 'no_receiver',
+        reason,
+        ...ignored,
+        feeds: fs.map(ref),
+      });
+      if (usable && !all.length)
+        return summary === 'no_receiver'
+          ? nr('never_reported', [])
+          : summary === 'listening' || summary === 'receiver_offline'
+            ? nr('not_near', [])
+            : nr('not_configured', []);
+      if (usable && all.every((f) => f.receiver?.state === 'not_installed'))
+        return nr('never_reported', all);
+      return nr('not_near', all);
+    }
+    feeds = near;
+    elsewhere = all.filter((f) => !listed(f) && f.receiver?.state !== 'not_installed').map(ref);
+  }
+
+  if (kind === 'rail_radio' && usable) {
+    // Rail voice is judged per line: the line identified at the point, or the channels Pulse's
+    // own lookup named for it. With neither, no receiver can be tied to this point.
+    feeds = all.filter(
       (f) =>
         (f.coverage?.lines ?? []).some((l) => tracks.some((t) => trackMatchesLine(t, l))) ||
-        channels.has((f.name ?? '').toLowerCase()) ||
-        channels.has(f.feed_id.toLowerCase()),
+        listed(f),
     );
+    if (!tracks.length && !channels.size && opts.messages === 0) {
+      if (!all.length && summary === 'no_receiver')
+        return { kind, state: 'no_receiver', reason: 'never_reported', feeds: [] };
+      if (!all.length && summary !== 'listening' && summary !== 'receiver_offline')
+        return { kind, state: 'no_receiver', reason: 'not_configured', feeds: [] };
+      return {
+        kind,
+        state: 'no_receiver',
+        reason: 'no_line',
+        covered_lines: coveredLines(all),
+        feeds: [],
+      };
+    }
   }
+
   if (opts.messages > 0)
     return {
       kind,
       state: 'activity',
       messages: opts.messages,
       feeds: feeds.filter((f) => f.receiver?.state !== 'not_installed').map(ref),
+      ...(elsewhere.length ? { elsewhere } : {}),
     };
   if (!status) return { kind, state: 'unknown', reason: 'status_unavailable' };
   if (!usable) return { kind, state: 'unknown', reason: 'pulse_too_old' };
 
-  const all = feedsOfKind(usable, kind);
-  const summary = usable.coverage_summary?.[kind];
   if (!all.length) {
     // Nothing we can see of this kind; Pulse's own summary decides (it may classify feeds we can't).
     if (summary === 'listening')
@@ -264,21 +360,14 @@ export function assess(
       return { kind, state: 'no_receiver', reason: 'never_reported', feeds: [] };
     return { kind, state: 'no_receiver', reason: 'not_configured', feeds: [] };
   }
-  if (!feeds.length) {
-    const covered = new Map<string, string>();
-    for (const f of all)
-      for (const l of f.coverage?.lines ?? []) {
-        const label = `${l.railroad ? `${l.railroad} ` : ''}${displayLineName(l.name)}`;
-        covered.set(label.toLowerCase(), label);
-      }
+  if (!feeds.length)
     return {
       kind,
       state: 'no_receiver',
       reason: 'not_this_line',
-      covered_lines: [...covered.values()].slice(0, 10),
+      covered_lines: coveredLines(all),
       feeds: [],
     };
-  }
   const online = feeds.filter((f) => f.receiver?.state === 'online');
   if (online.length)
     return { kind, state: 'quiet', window_min: opts.window_min, feeds: online.map(ref) };
@@ -337,15 +426,19 @@ const unlocated = (v: { kind: CoverageKind; feeds: FeedRef[] }) =>
 
 /**
  * One sentence stating which situation applies: activity found, listening and quiet, receiver
- * offline since T, no receiver (none set up / never reported / none for this line), or Pulse
- * can't say. `place` is a noun phrase: "this line (FRA: X Sub; NARN: Y Sub)", "this area".
+ * offline since T, no receiver (none set up / never reported / none for this line / no line
+ * identified / none near this point / not covered per Pulse's point lookup), or Pulse can't say. `place` is a noun phrase: "this line (FRA: X Sub; NARN: Y Sub)", "this area".
  */
 export function verdictSentence(v: Verdict, now: number, place = 'this point'): string {
   const n = NOUN[v.kind];
   const at = `${n.prep} ${place}`;
   switch (v.state) {
-    case 'activity':
-      return `Activity found: ${v.messages} ${v.messages === 1 ? n.msgs.replace(/s$/, '') : n.msgs} ${at}${v.feeds.length ? ` (${names(v.feeds)})` : ''}.${unlocated(v)}`;
+    case 'activity': {
+      const other = v.elsewhere?.length
+        ? ` Pulse doesn't say which receiver heard each packet, so some may come from ${names(v.elsewhere)}, which ${v.elsewhere.length === 1 ? "doesn't" : "don't"} cover ${place}.`
+        : '';
+      return `Activity found: ${v.messages} ${v.messages === 1 ? n.msgs.replace(/s$/, '') : n.msgs} ${at}${v.feeds.length ? ` (${names(v.feeds)})` : ''}.${unlocated(v)}${other}`;
+    }
     case 'quiet': {
       const who = v.feeds.length
         ? `${n.rx} online (${names(v.feeds)})`
@@ -360,14 +453,8 @@ export function verdictSentence(v: Verdict, now: number, place = 'this point'): 
         : '';
       return `${cap(n.rx)} offline${since}${v.feeds.length ? ` (${names(v.feeds)})` : ''}: 0 ${n.msgs} means no data, not a quiet ${n.scope}.`;
     }
-    case 'no_receiver': {
-      const tail = `0 ${n.msgs} means no coverage, not a quiet ${n.scope}.`;
-      if (v.reason === 'not_configured')
-        return `No ${n.rx} installed: Pulse has no ${n.what} channel set up (example placeholders don't count). ${tail}`;
-      if (v.reason === 'never_reported')
-        return `No ${n.rx} installed: ${v.feeds.length ? `${names(v.feeds)} is configured but` : 'a channel is configured but'} no receiver has ever reported. ${tail}`;
-      return `No ${n.rx} for ${place}: Pulse's ${n.what} channels cover ${v.covered_lines?.length ? v.covered_lines.join(', ') : 'other lines (none says which lines it hears)'}. ${tail}`;
-    }
+    case 'no_receiver':
+      return noReceiverSentence(v, place);
     case 'unknown':
       return v.reason === 'pulse_too_old'
         ? `Pulse is too old to report its receivers, so 0 ${n.msgs} ${at} can't be told apart from no receiver.`
@@ -376,6 +463,42 @@ export function verdictSentence(v: Verdict, now: number, place = 'this point'): 
 }
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** The "no receiver" sentence: which reason, what Pulse does cover, packets not counted. */
+function noReceiverSentence(v: Extract<Verdict, { state: 'no_receiver' }>, place: string): string {
+  const n = NOUN[v.kind];
+  const at = `${n.prep} ${place}`;
+  const one = v.ignored_messages === 1;
+  const ignored = v.ignored_messages
+    ? ` The ${v.ignored_messages} ${one ? n.msgs.replace(/s$/, '') : n.msgs} Pulse returned ${one ? 'is' : 'are'} not counted: no receiver that covers ${place} heard ${one ? 'it' : 'them'}.`
+    : '';
+  const tail = `${ignored} 0 ${n.msgs} means no coverage, not a quiet ${n.scope}.`;
+  const lines = v.covered_lines?.length
+    ? v.covered_lines.join(', ')
+    : 'other lines (none says which lines it hears)';
+  switch (v.reason) {
+    case 'not_configured':
+      return `No ${n.rx} installed: Pulse has no ${n.what} channel set up (example placeholders don't count).${tail}`;
+    case 'never_reported':
+      return `No ${n.rx} installed: ${v.feeds.length ? `${names(v.feeds)} is configured but` : 'a channel is configured but'} no receiver has ever reported.${tail}`;
+    case 'no_line':
+      return `No ${n.rx} for ${place}: no rail line identified here (no named track near this point in the rail datasets) and Pulse lists no ${n.what} channel for this point. Pulse's ${n.what} channels cover ${lines}.${tail}`;
+    case 'not_near': {
+      const rx = v.feeds
+        .slice(0, 3)
+        .map((f) => `${f.name}${f.area ? `, covering ${f.area}` : ''}`)
+        .join('; ');
+      const who = v.feeds.length
+        ? `Pulse's ${n.rx}${v.feeds.length === 1 ? '' : 's'} (${rx}${v.feeds.length > 3 ? ` and ${v.feeds.length - 3} more` : ''}) ${v.feeds.length === 1 ? 'is' : 'are'} not listed for this point, so ${v.feeds.length === 1 ? 'it is' : 'they are'} too far away to hear trains here.`
+        : `Pulse lists no ${n.rx} within range of this point.`;
+      return `No ${n.rx} ${at}: ${who}${tail}`;
+    }
+    case 'pulse_not_covered':
+      return `No ${n.rx} confirmed ${at}: Pulse's own lookup for this point says no receiver for the channels that cover it has reported (covered: false)${v.feeds.length ? `, though its feed status lists ${names(v.feeds)} online` : ''}.${tail}`;
+    case 'not_this_line':
+      return `No ${n.rx} for ${place}: Pulse's ${n.what} channels cover ${lines}.${tail}`;
+  }
+}
 
 function areaNote(feeds: FeedRef[]): string {
   const areas = [...new Set(feeds.map((f) => f.area).filter((a): a is string => Boolean(a)))];
