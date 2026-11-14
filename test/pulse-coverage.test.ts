@@ -197,7 +197,7 @@ describe('verdicts', () => {
     ).toBe('unconfirmed');
   });
 
-  it('EOT receiver without a location: packets cannot be tied to the place', () => {
+  it('EOT/HOT packets are never activity at the point without verdicts: heard, not placed', () => {
     const eot = {
       feed_id: 'eot_hot',
       name: 'EOT/HOT telemetry (traintap)',
@@ -206,16 +206,56 @@ describe('verdicts', () => {
       source: 'sdr:traintap',
       receiver: { state: 'online', last_seen_at: '2026-11-14T11:59:30Z' },
     };
+    const RULE =
+      "This Pulse sends no verdicts \\(contract v1\\.2\\) and lists an EOT/HOT receiver for any point within 25 km of it, or for any point at all when its location isn't set, whatever the receiver's own range";
+    const TAIL =
+      ', and EOT/HOT packets carry no position, so this point may be outside the range of the receiver that heard them\\. They are not counted as activity at this point\\.$';
+    // No location set in Pulse.
     const v = assess('eot', status([eot]), { messages: 2, window_min: 30 });
-    expect(v.state).toBe('activity');
+    expect(v).toMatchObject({ state: 'unplaced', messages: 2, window_min: 30 });
     expect(verdictSentence(v, NOW)).toMatch(
-      /location is not set in Pulse, so these packets can't be tied to this place/,
+      new RegExp(
+        `^Heard but not placed at this point: 2 EOT/HOT packets from EOT/HOT telemetry \\(traintap\\) in the last 30 min\\. ${RULE} \\(EOT/HOT telemetry \\(traintap\\)'s location is not set in Pulse\\)${TAIL}`,
+      ),
     );
+    // A receiver whose own range is shorter than Pulse's fixed 25 km (the live layout).
+    for (const pulseChannels of [undefined, ['EOT/HOT telemetry (traintap)']]) {
+      const short = assess('eot', status([{ ...eot, coverage: { area: 'A', radius_km: 3 } }]), {
+        messages: 1,
+        window_min: 30,
+        pulseChannels,
+      });
+      expect(short.state).toBe('unplaced');
+      const t = verdictSentence(short, NOW);
+      expect(t).toMatch(
+        new RegExp(
+          `^Heard but not placed at this point: 1 EOT/HOT packet from EOT/HOT telemetry \\(traintap\\) in the last 30 min\\. ${RULE} \\(EOT/HOT telemetry \\(traintap\\)'s own range is 3 km\\)${TAIL}`,
+        ),
+      );
+      expect(t).not.toMatch(/Activity found|near this point/);
+    }
+    // Even a 25 km receiver: the gateway can't see where it is, so the packets aren't placed.
+    const wide = assess('eot', status([{ ...eot, coverage: { radius_km: 25 } }]), {
+      messages: 2,
+      window_min: 30,
+    });
+    expect(wide.state).toBe('unplaced');
+    expect(verdictSentence(wide, NOW)).toMatch(new RegExp(`${RULE}${TAIL}`));
+    // Online now, nothing heard: can't confirm, and the range caveat when feeds/status rules
+    // the point out or can't place the receiver.
     const located = assess('eot', status([{ ...eot, coverage: { radius_km: 25 } }]), {
       messages: 0,
       window_min: 30,
     });
-    expect(verdictSentence(located, NOW)).not.toMatch(/location is not set/);
+    expect(verdictSentence(located, NOW)).toMatch(/^Can't confirm quiet: /);
+    expect(verdictSentence(located, NOW)).not.toMatch(/location is not set|own range/);
+    const quietShort = assess('eot', status([{ ...eot, coverage: { radius_km: 3 } }]), {
+      messages: 0,
+      window_min: 30,
+    });
+    expect(verdictSentence(quietShort, NOW)).toMatch(
+      /^Can't confirm quiet: EOT\/HOT receiver online now .* Nor does it show that this point is in the receiver's range: it lists an EOT\/HOT receiver for any point within 25 km of it, .* \(EOT\/HOT telemetry \(traintap\)'s own range is 3 km\)\.$/,
+    );
   });
 
   it('falls back to coverage_summary when no feed of the kind is visible', () => {
@@ -269,7 +309,7 @@ describe('verdicts are tied to the point', () => {
     const s = status([eotFeed()], { eot: 'listening' });
     expect(eot(s, 0, [EOT]).state).toBe('unconfirmed');
     expect(eot(s, 0, ['EOT_HOT']).state).toBe('unconfirmed');
-    expect(eot(s, 2, [EOT])).toMatchObject({ state: 'activity', messages: 2 });
+    expect(eot(s, 2, [EOT])).toMatchObject({ state: 'unplaced', messages: 2 });
     // Only a listed receiver that is offline: offline.
     const off = status([
       eotFeed({ receiver: { state: 'offline', last_seen_at: '2026-11-14T09:00:00Z' } }),
@@ -277,16 +317,23 @@ describe('verdicts are tied to the point', () => {
     expect(eot(off, 0, [EOT]).state).toBe('offline');
   });
 
-  it('EOT: with one receiver near and one far, packets may come from the far one', () => {
+  it('EOT: with one receiver near and one far, packets may come from either', () => {
     const s = status([
       eotFeed(),
       eotFeed({ feed_id: 'eot_far', name: 'Far EOT', coverage: { area: 'Far County' } }),
+      eotFeed({ feed_id: 'eot_new', name: 'New EOT', receiver: { state: 'not_installed' } }),
     ]);
     const v = eot(s, 2, [EOT]);
-    expect(v).toMatchObject({ state: 'activity', messages: 2, feeds: [{ feed_id: 'eot_hot' }] });
-    expect(verdictSentence(v, NOW)).toMatch(
-      /some may come from Far EOT, which doesn't cover this point/,
+    expect(v).toMatchObject({
+      state: 'unplaced',
+      messages: 2,
+      feeds: [{ feed_id: 'eot_hot' }, { feed_id: 'eot_far' }],
+    });
+    const t = verdictSentence(v, NOW);
+    expect(t).toMatch(
+      /^Heard but not placed at this point: 2 EOT\/HOT packets from EOT\/HOT telemetry \(traintap\), Far EOT in the last 30 min\./,
     );
+    expect(t).not.toMatch(/Activity found/);
   });
 
   it('EOT: no listed channel and only a summary saying "listening" is not quiet', () => {

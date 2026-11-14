@@ -12,9 +12,12 @@
  *
  * Without verdicts (a Pulse older than v1.2, and scanner incidents, which have none) the gateway
  * judges from feeds/status and rail/activity's channel list (assess, verdictSentence) but never
- * says quiet: a receiver online now proves nothing about the whole window. The verdicts there:
+ * says quiet: a receiver online now proves nothing about the whole window. Nor does it call
+ * EOT/HOT packets activity at the point: such a Pulse lists an EOT/HOT receiver by a fixed
+ * 25 km, whatever its own range, and packets carry no position. The verdicts there:
  *
- *   activity found · receiver online now, quiet not confirmed · receiver offline since T ·
+ *   activity found (not EOT/HOT) · EOT/HOT packets heard but not placed at the point ·
+ *   receiver online now, quiet not confirmed · receiver offline since T ·
  *   no receiver (none configured / never reported / none for this line / no line identified /
  *   none near this point / Pulse's point lookup says not covered / not searched by Pulse for
  *   this point) · can't say (old Pulse)
@@ -456,10 +459,10 @@ function disagreements(
   if (!covering.length) why.push('Pulse lists no channel that covers this point');
   const start = Date.parse(v.window_start ?? '');
   const end = Date.parse(v.window_end ?? '');
-  if (!(end - start >= opts.window_min * 60_000 - 60_000))
+  if (!(end - start >= opts.window_min * 60_000 - WINDOW_TRAIL_MS))
     why.push(
       v.window_start && v.window_end
-        ? `Pulse's window (${shortIso(v.window_start)} to ${shortIso(v.window_end)}) is shorter than the ${opts.window_min} min asked`
+        ? `Pulse's window (${shortIso(v.window_start)} to ${shortIso(v.window_end)}) is shorter than the ${opts.window_min} min asked by more than ${WINDOW_TRAIL_MS / 60_000} min`
         : "Pulse's verdict gives no window",
     );
   // Listening since before the window start, for Pulse as a whole and for every covering
@@ -499,6 +502,14 @@ function disagreements(
     );
   return why;
 }
+
+/**
+ * How far short of the minutes asked Pulse's window may end. Pulse ends a quiet window where
+ * its proof ends, at the ingest stage's newest beat and the covering receivers' newest
+ * heartbeats, not at its answer: normally under 20 s before it for rail voice, up to about a
+ * minute for EOT/HOT (traintap beats once a minute) and at most a receiver's max gap (105 s).
+ */
+const WINDOW_TRAIL_MS = 120_000;
 
 const shortIso = (t: string) => t.replace(/\.\d+Z$/, 'Z');
 const idList = (ids: string[]) =>
@@ -570,13 +581,19 @@ export type NoReceiverReason =
   | 'not_searched';
 
 export type Verdict =
+  | { kind: CoverageKind; state: 'activity'; messages: number; feeds: FeedRef[] }
+  /**
+   * EOT/HOT packets returned, but nothing places them at the point: this Pulse lists an EOT/HOT
+   * receiver for any point within a fixed 25 km of it (anywhere when its location isn't set),
+   * whatever its own range, and packets carry no position. Never activity there. `feeds`: the
+   * receivers that may have heard them.
+   */
   | {
       kind: CoverageKind;
-      state: 'activity';
+      state: 'unplaced';
       messages: number;
+      window_min: number;
       feeds: FeedRef[];
-      /** EOT/HOT: receivers that don't cover the point but may have heard some of the packets. */
-      elsewhere?: FeedRef[];
     }
   /**
    * A receiver is online now and nothing was heard, but nothing proves it (and the ingest stage)
@@ -678,7 +695,7 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
   const listed = (f: FeedInfo) =>
     channels.has((f.name ?? '').toLowerCase()) || channels.has(f.feed_id.toLowerCase());
   const summary = usable?.coverage_summary?.[kind];
-  let elsewhere: FeedRef[] = [];
+  let elsewhere: FeedInfo[] = [];
 
   if (kind === 'eot' && opts.pulseChannels !== undefined) {
     // EOT packets carry no position: only a receiver Pulse lists for this point can tie them to it.
@@ -703,7 +720,8 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
       return nr('not_near', all);
     }
     feeds = near;
-    elsewhere = all.filter((f) => !listed(f) && f.receiver?.state !== 'not_installed').map(ref);
+    // Pulse doesn't say which receiver heard each packet: an unlisted one may have, too.
+    elsewhere = all.filter((f) => !listed(f));
   }
 
   // Rail voice on a Pulse that sent rail/activity's channel list: it searched only those.
@@ -734,14 +752,19 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
       return { kind, state: 'no_receiver', reason: 'not_searched', feeds: unsearched.map(ref) };
   }
 
-  if (opts.messages > 0)
-    return {
-      kind,
-      state: 'activity',
-      messages: opts.messages,
-      feeds: feeds.filter((f) => f.receiver?.state !== 'not_installed').map(ref),
-      ...(elsewhere.length ? { elsewhere } : {}),
-    };
+  if (opts.messages > 0) {
+    const heard = (fs: FeedInfo[]) =>
+      fs.filter((f) => f.receiver?.state !== 'not_installed').map(ref);
+    return kind === 'eot'
+      ? {
+          kind,
+          state: 'unplaced',
+          messages: opts.messages,
+          window_min: opts.window_min,
+          feeds: heard([...feeds, ...elsewhere]),
+        }
+      : { kind, state: 'activity', messages: opts.messages, feeds: heard(feeds) };
+  }
   if (!status) return { kind, state: 'unknown', reason: 'status_unavailable' };
   if (!usable) return { kind, state: 'unknown', reason: 'pulse_too_old' };
 
@@ -815,41 +838,42 @@ const names = (feeds: FeedRef[]) =>
     .map((f) => f.name)
     .join(', ') + (feeds.length > 3 ? ` and ${feeds.length - 3} more` : '');
 
-/** EOT packets carry no position: without a receiver location they can't be placed. */
-const unlocated = (v: { kind: CoverageKind; feeds: FeedRef[] }) =>
-  v.kind === 'eot' && v.feeds.length > 0 && !v.feeds.some((f) => f.located)
-    ? " The EOT/HOT receiver's location is not set in Pulse, so these packets can't be tied to this place."
-    : '';
-
 /**
- * Pulse without verdicts lists an EOT/HOT receiver for any point within a fixed 25 km of it,
- * whatever range its own config gives it: packets from it may come from trains elsewhere.
+ * A Pulse without verdicts lists an EOT/HOT receiver for any point within a fixed 25 km of it,
+ * or for every point when its location isn't set, whatever range its own config gives it, and
+ * the gateway can't see where the receiver is. EOT packets carry no position, so nothing ties
+ * them, or the receiver's range, to the point.
  */
 const EOT_LEGACY_KM = 25;
-function legacyRange(v: { kind: CoverageKind; feeds: FeedRef[] }): string {
-  if (v.kind !== 'eot') return '';
-  const short = v.feeds.filter((f) => f.radius_km !== undefined && f.radius_km < EOT_LEGACY_KM);
-  if (!short.length) return '';
-  const f = short[0]!;
-  return ` This Pulse sends no verdicts: such versions list an EOT/HOT receiver for any point within ${EOT_LEGACY_KM} km of it, beyond ${f.name}'s own ${f.radius_km} km range, so the packets may come from trains outside this point's area.`;
+const LEGACY_EOT_RULE = `lists an EOT/HOT receiver for any point within ${EOT_LEGACY_KM} km of it, or for any point at all when its location isn't set, whatever the receiver's own range`;
+
+/** What feeds/status says of the receivers' own range, when it rules the point out or can't. */
+function ownRange(feeds: FeedRef[]): string {
+  const short = feeds.find((f) => f.radius_km !== undefined && f.radius_km < EOT_LEGACY_KM);
+  if (short) return `${short.name}'s own range is ${short.radius_km} km`;
+  const unset = feeds.find((f) => !f.located);
+  return unset ? `${unset.name}'s location is not set in Pulse` : '';
 }
 
 /**
- * One sentence stating which situation applies without Pulse's verdicts: activity found, a
- * receiver online now but quiet not confirmed, receiver offline since T, no receiver (none set up
- * / never reported / none for this line / no line identified / none near this point / not
- * covered per Pulse's point lookup / not searched by Pulse for this point), or Pulse can't say.
- * Never "quiet". `place` is a noun phrase: "this line (FRA: X Sub; NARN: Y Sub)", "this area".
+ * One sentence stating which situation applies without Pulse's verdicts: activity found, EOT/HOT
+ * packets heard but not placed at the point, a receiver online now but quiet not confirmed,
+ * receiver offline since T, no receiver (none set up / never reported / none for this line / no
+ * line identified / none near this point / not covered per Pulse's point lookup / not searched by
+ * Pulse for this point), or Pulse can't say. Never "quiet", and never EOT/HOT activity at the
+ * point. `place` is a noun phrase: "this line (FRA: X Sub; NARN: Y Sub)", "this area".
  */
 export function verdictSentence(v: Verdict, now: number, place = 'this point'): string {
   const n = NOUN[v.kind];
   const at = `${n.prep} ${place}`;
+  const msgs = (k: number) => `${k} ${k === 1 ? n.msgs.replace(/s$/, '') : n.msgs}`;
   switch (v.state) {
-    case 'activity': {
-      const other = v.elsewhere?.length
-        ? ` Pulse doesn't say which receiver heard each packet, so some may come from ${names(v.elsewhere)}, which ${v.elsewhere.length === 1 ? "doesn't" : "don't"} cover ${place}.`
-        : '';
-      return `Activity found: ${v.messages} ${v.messages === 1 ? n.msgs.replace(/s$/, '') : n.msgs} ${at}${v.feeds.length ? ` (${names(v.feeds)})` : ''}.${unlocated(v)}${legacyRange(v)}${other}`;
+    case 'activity':
+      return `Activity found: ${msgs(v.messages)} ${at}${v.feeds.length ? ` (${names(v.feeds)})` : ''}.`;
+    case 'unplaced': {
+      const who = v.feeds.length ? names(v.feeds) : `Pulse's ${n.rx}`;
+      const own = ownRange(v.feeds);
+      return `Heard but not placed at ${place}: ${msgs(v.messages)} from ${who} in the last ${v.window_min} min. This Pulse sends no verdicts (contract v1.2) and ${LEGACY_EOT_RULE}${own ? ` (${own})` : ''}, and ${n.msgs} carry no position, so ${place} may be outside the range of the receiver that heard them. They are not counted as activity at ${place}.`;
     }
     case 'unconfirmed': {
       const who = v.feeds.length
@@ -859,8 +883,13 @@ export function verdictSentence(v: Verdict, now: number, place = 'this point'): 
         v.kind === 'public_safety'
           ? "Pulse doesn't prove its scanner receivers listened for the whole window"
           : 'this Pulse sends no verdicts (contract v1.2), so nothing shows the receiver and the ingest stage were up for the whole window';
+      const own = v.kind === 'eot' ? ownRange(v.feeds) : '';
       const extra =
-        v.kind === 'public_safety' ? areaNote(v.feeds) : v.kind === 'eot' ? unlocated(v) : '';
+        v.kind === 'public_safety'
+          ? areaNote(v.feeds)
+          : own
+            ? ` Nor does it show that this point is in the receiver's range: it ${LEGACY_EOT_RULE} (${own}).`
+            : '';
       return `Can't confirm quiet: ${who} and 0 ${n.msgs} ${at} in the last ${v.window_min} min, but ${why}. 0 ${n.msgs} means no proof, not a quiet ${n.scope}.${extra}`;
     }
     case 'offline': {

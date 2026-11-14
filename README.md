@@ -100,7 +100,8 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   for the whole window, not covered, or can't confirm, with Pulse's reasons. The gateway may turn
   a quiet into "can't confirm" when its own checks disagree, never the reverse. Without verdicts
   (an older Pulse, and scanner incidents) it says activity, no receiver, offline since when, or
-  can't confirm, never "quiet", so zero messages is never passed off as a quiet line or area.
+  can't confirm, never "quiet", so zero messages is never passed off as a quiet line or area;
+  EOT/HOT packets there are "heard but not placed", since such a Pulse can't tie them to the point.
 
 ## Repository layout
 

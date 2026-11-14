@@ -487,10 +487,12 @@ describe('rail_activity_near ties each verdict to the point', () => {
       expect(farBusy).not.toMatch(/Activity found/);
       expect(farBusy).toMatch(/"eot_hot_not_near_point"/);
 
+      // Listed for the point, but this Pulse sends no verdicts: heard, never placed there.
       const near = await h.run('rail_activity_near', { ...BELLE_ISLE, since_minutes: 60 });
       expect(near).toMatch(
-        /EOT\/HOT: Activity found: 2 EOT\/HOT packets near this point \(EOT\/HOT telemetry \(traintap\)\)\./,
+        /EOT\/HOT: Heard but not placed at this point: 2 EOT\/HOT packets from EOT\/HOT telemetry \(traintap\) in the last 60 min\./,
       );
+      expect(near).not.toMatch(/Activity found/);
       const nearQuiet = await h.run('rail_activity_near', BELLE_ISLE);
       expect(nearQuiet).toMatch(/EOT\/HOT: Can't confirm quiet: EOT\/HOT receiver online now/);
       expect(nearQuiet).not.toMatch(/Listening and quiet|really is quiet/);
@@ -805,8 +807,24 @@ describe("Pulse v1.2 verdicts: quiet only on Pulse's proof, relayed in plain wor
         /Rail radio: Can't confirm quiet on this line \(.*\), per Pulse's verdict: line_road: receiver listening only since \S+, after the window start\. Hearing nothing here means no proof, not a quiet line\./,
       ],
       [
-        { state: 'unknown', reasons: ['ingest (sdr_files) has no current heartbeat'] },
-        /Rail radio: Can't confirm quiet on this line \(.*\), per Pulse's verdict: ingest \(sdr_files\) has no current heartbeat\./,
+        {
+          state: 'unknown',
+          reasons: [`ingest (sdr_files) has no current heartbeat (its last beat was at ${back})`],
+        },
+        /Rail radio: Can't confirm quiet on this line \(.*\), per Pulse's verdict: ingest \(sdr_files\) has no current heartbeat \(its last beat was at \S+\)\./,
+      ],
+      // A channel renamed with the old id kept disabled, and the receiver config not re-rendered:
+      // the receiver files the frequency under the old id, whose recordings are dropped.
+      [
+        {
+          state: 'unknown',
+          reasons: [
+            'line_road: the receiver files 160.98 MHz under line_road_old, a disabled channel, so those recordings are dropped (re-render rail.local.conf)',
+            `recordings of the disabled channel line_road_old in the window (the newest at ${back}) were not ingested: a receiver still records it (re-render rail.local.conf)`,
+          ],
+          channels: [{ feed_id: 'line_road', receiver_state: 'not_installed', covers_point: true }],
+        },
+        /Rail radio: Can't confirm quiet on this line \(.*\), per Pulse's verdict: line_road: the receiver files 160\.98 MHz under line_road_old, a disabled channel, so those recordings are dropped \(re-render rail\.local\.conf\); recordings of the disabled channel line_road_old in the window \(the newest at \S+\) were not ingested: a receiver still records it \(re-render rail\.local\.conf\)\. Hearing nothing here means no proof, not a quiet line\./,
       ],
       [
         {
@@ -840,6 +858,48 @@ describe("Pulse v1.2 verdicts: quiet only on Pulse's proof, relayed in plain wor
         /Rail radio: Can't confirm quiet on this line .*receiver listening only since/,
       );
       expect(w).not.toMatch(/Rail radio: Listening and quiet/);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("quiet up to Pulse's newest heartbeats, which trail its answer: relayed with that window", async () => {
+    // Pulse ends a quiet where its proof ends: the ingest stage's newest beat and the covering
+    // receivers' newest heartbeats (seconds for rail voice, up to 105 s for traintap's minute).
+    const upTo = (feed_id: string, noun: string, lag: () => number) => (q: URLSearchParams) => {
+      const end = iso(lag() * 1000);
+      return verdict(
+        feed_id,
+        `every ${noun} channel that covers this point was listened to for the whole window, up to ${end} (${lag()} s before this answer: Pulse's newest receiver and ingest heartbeats), and nothing was heard`,
+        { window_end: end },
+      )(q);
+    };
+    let eotLag = 95;
+    const h = await harness({
+      feeds: feedsOf([lineRoad(), eotFeed]),
+      rail: (q) =>
+        v12(
+          upTo('line_road', 'rail voice', () => 12),
+          upTo('eot_hot', 'EOT/HOT', () => eotLag),
+        )(q),
+      incidents: noIncidents,
+    });
+    try {
+      for (const t of [await h.run('rail_activity_near', point()), await whats(h)]) {
+        expect(t).toMatch(
+          /Rail radio: Listening and quiet on this line \(.*\), per Pulse's verdict for \S+ to \S+: every rail voice channel that covers this point was listened to for the whole window, up to \S+ \(12 s before this answer: Pulse's newest receiver and ingest heartbeats\), and nothing was heard; listening since \S+ \(Line road\)\. So it really is quiet\./,
+        );
+        expect(t).toMatch(
+          /EOT\/HOT: Listening and quiet near this point, per Pulse's verdict for \S+ to \S+: every EOT\/HOT channel that covers this point was listened to for the whole window, up to \S+ \(95 s before this answer: Pulse's newest receiver and ingest heartbeats\), and nothing was heard; listening since \S+ \(EOT\/HOT telemetry \(traintap\)\)\. So it really is quiet\./,
+        );
+      }
+      // A proof that ends more than 2 min before the answer is not a quiet for the window asked.
+      eotLag = 150;
+      const t = await h.run('rail_activity_near', point());
+      expect(t).toMatch(
+        /EOT\/HOT: Can't confirm quiet near this point: Pulse's verdict was quiet, but the gateway's own check disagrees: Pulse's window \(\S+ to \S+\) is shorter than the 30 min asked by more than 2 min\./,
+      );
+      expect(t).toMatch(/Rail radio: Listening and quiet on this line/);
     } finally {
       await h.close();
     }
@@ -1105,13 +1165,24 @@ describe('a Pulse without verdicts never says quiet', () => {
     }
   });
 
-  it('EOT/HOT packets from a receiver listed by the old fixed 25 km rule carry a caveat', async () => {
+  it('EOT/HOT packets from a receiver listed by the old fixed 25 km rule are heard, never activity at the point', async () => {
+    // The receiver hears 3 km around itself; such a Pulse lists it for any point within 25 km.
     const h = await harness({ feeds, rail: old({}, 2), incidents: noIncidents });
     try {
       const t = await h.run('rail_activity_near', point());
-      expect(t).toMatch(
-        /EOT\/HOT: Activity found: 2 EOT\/HOT packets near this point \(EOT\/HOT telemetry \(traintap\)\)\. This Pulse sends no verdicts: such versions list an EOT\/HOT receiver for any point within 25 km of it, beyond EOT\/HOT telemetry \(traintap\)'s own 3 km range, so the packets may come from trains outside this point's area\./,
-      );
+      const w = text(await h.client.callTool({ name: 'whats_happening_here', arguments: point() }));
+      for (const x of [t, w]) {
+        expect(x).toMatch(
+          /0 detector readout\(s\), 2 EOT\/HOT packet\(s\) heard but not placed at this point in the last 30 min\./,
+        );
+        expect(x).toMatch(
+          /EOT\/HOT: Heard but not placed at this point: 2 EOT\/HOT packets from EOT\/HOT telemetry \(traintap\) in the last 30 min\. This Pulse sends no verdicts \(contract v1\.2\) and lists an EOT\/HOT receiver for any point within 25 km of it, or for any point at all when its location isn't set, whatever the receiver's own range \(EOT\/HOT telemetry \(traintap\)'s own range is 3 km\), and EOT\/HOT packets carry no position, so this point may be outside the range of the receiver that heard them\. They are not counted as activity at this point\./,
+        );
+        expect(x).not.toMatch(/EOT\/HOT: Activity found|EOT\/HOT packets? near this point/);
+      }
+      // The packets are kept, under a name that doesn't place them at the point.
+      expect(t).toMatch(/"eot_hot":\[\]/);
+      expect(t).toMatch(/"eot_hot_not_placed":\[\{/);
     } finally {
       await h.close();
     }

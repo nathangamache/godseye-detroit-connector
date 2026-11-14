@@ -138,6 +138,32 @@ describe("Pulse's verdict is relayed", () => {
     );
   });
 
+  it("quiet up to Pulse's newest heartbeats: the window may end up to 2 min before the answer", () => {
+    // Pulse ends a quiet where its proof ends (the ingest stage's newest beat and the covering
+    // receivers' newest heartbeats): seconds before its answer for voice, up to 105 s for EOT/HOT.
+    for (const [kind, lagS] of [
+      ['rail_radio', 15],
+      ['rail_radio', 45],
+      ['eot', 60],
+      ['eot', 105],
+    ] as const) {
+      const end = new Date(NOW - lagS * 1000).toISOString();
+      const reason = `every ${kind === 'eot' ? 'EOT/HOT' : 'rail voice'} channel that covers this point was listened to for the whole window, up to ${end} (${lagS} s before this answer: Pulse's newest receiver and ingest heartbeats), and nothing was heard`;
+      const v = checkVerdict(
+        kind,
+        parseVerdicts({
+          [kind === 'eot' ? 'eot' : 'rail_voice']: raw({ window_end: end, reasons: [reason] }),
+        })![kind],
+        { status: STATUS, tracks: TRACK, window_min: 30, listed: 0 },
+      );
+      expect(v.gateway_reasons).toBeUndefined();
+      expect(v.state).toBe('quiet');
+      expect(railVerdictSentence(v)).toBe(
+        `Listening and quiet ${kind === 'eot' ? 'near' : 'on'} this point, per Pulse's verdict for ${at(30).replace('.000Z', 'Z')} to ${end.replace('.000Z', 'Z')}: ${reason}; listening since ${at(45).replace('.000Z', 'Z')} (CSX Alpha road). So it really is quiet.`,
+      );
+    }
+  });
+
   it('unknown and not_covered: Pulse reasons, never quiet', () => {
     const late = voice(
       parsed({
@@ -232,9 +258,11 @@ describe('the gateway downgrades a quiet when its own checks disagree', () => {
     );
     downgraded(
       voice(parsed({ window_start: at(10) })),
-      /window .* is shorter than the 30 min asked/,
+      /window .* is shorter than the 30 min asked by more than 2 min/,
     );
     downgraded(voice(parsed(), { window_min: 60 }), /shorter than the 60 min asked/);
+    // Pulse's proof ending more than 2 min before its answer.
+    downgraded(voice(parsed({ window_end: at(2.5) })), /shorter than the 30 min asked/);
     downgraded(voice(parsed({ window_end: undefined })), /gives no window/);
     downgraded(
       voice(parsed({ listening_since: at(20) })),

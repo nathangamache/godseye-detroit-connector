@@ -142,7 +142,7 @@ type Verdict = {
   state: "activity" | "quiet" | "not_covered" | "unknown";
   reasons: string[];             // short plain sentences, e.g. "line_road: no receiver has ever reported"
   window_start: string;          // ISO 8601 UTC: now - since_minutes
-  window_end: string;            // now
+  window_end: string;            // now; for quiet, where Pulse's proof ends (below)
   listening_since?: string;      // since when every covering channel and the ingest stage are proven
   counts: { transcripts: number; detector_readouts: number;
             recordings_without_text: number; eot_packets: number };   // covering channels only
@@ -158,10 +158,20 @@ type Verdict = {
 * `not_covered`: no channel of the kind covers the point by its own coverage, or none that does
   was listened to at any time in the window.
 * `quiet`, only on positive proof for the **whole** window: every covering channel's receiver was
-  listening since before `window_start` (heartbeat history, not "online now"), on the channel's
-  configured frequency; the ingest stage (`sdr_files` for voice, `traintap` for EOT) beat since
-  before `window_start` and could see its input; nothing was heard on the covering channels and
-  nothing in the window is left unattributed.
+  listening since before `window_start` (heartbeat history, not "online now"; a run breaks at a
+  gap longer than a missed beat or two of that receiver, 45 s for rtl_airband's stats file and
+  105 s for traintap's minute heartbeat, and at an rtl_airband counter that went down, a
+  restart), on the channel's configured frequency and filed under a channel that covers the
+  point (a label on another frequency, or the frequency filed under a disabled channel after a
+  rename that wasn't re-rendered, is not listening to it); the ingest stage (`sdr_files` for
+  voice, `traintap` for EOT) beat since before `window_start`, within the last 35 s, and could
+  see its input; nothing was heard on the covering channels and nothing in the window is left
+  unattributed (recordings of a disabled channel that the ingest stage dropped included).
+* A quiet window ends where Pulse's proof ends, not at its answer: `window_end` is the earliest
+  of the ingest stage's newest beat (stamped with when its poll began) and the covering
+  receivers' newest heartbeats. That is normally under 20 s before `generated_at` for rail
+  voice and up to about a minute for EOT/HOT (at most a receiver's max gap: 45 s, 105 s), and
+  the quiet reason says how far ("up to <window_end> (N s before this answer ...)").
 * `unknown`: nothing was heard, but one of those isn't shown; `reasons` says which.
 
 ## `GET /v1/feeds/status` (tool: `feeds_status`)
@@ -256,17 +266,19 @@ location, a placeholder scanner feed):
   `name` is sent as the `subdivision` hint; `railroad` only when the caller gives one.
 * **With `verdicts` (v1.2), Pulse's verdict decides** rail voice and EOT/HOT. The gateway relays
   `state`, `reasons` (verbatim, up to four in the sentence, all in `coverage_check`) and `counts`
-  in plain words: **activity found**, **listening and quiet** (with the window, the
-  listening-since time and the covering channels), **no coverage**, or **can't confirm quiet**.
+  in plain words: **activity found**, **listening and quiet** (from `window_start` to
+  `window_end`, with the listening-since time and the covering channels), **no coverage**, or
+  **can't confirm quiet**.
   The counts line uses Pulse's counts for the covering channels, recordings without text
   included. The gateway never upgrades anything to quiet or activity. It downgrades a `quiet` to
   "can't confirm" (`coverage_check.<kind>.state: "unknown"`, `pulse_state: "quiet"`,
   `gateway_reasons`) when its own checks disagree:
   * Pulse's answer contradicts itself: counts not all zero or incomplete, `transcripts`,
     `detector_readouts`, `eot_hot` or `coverage.recordings_without_text` not empty, no channel
-    with `covers_point`, a window shorter than the minutes asked (or none), no
-    `listening_since` before `window_start`, or a covering channel not `online` with its own
-    `listening_since` before `window_start`;
+    with `covers_point`, a window shorter than the minutes asked by more than 2 min (room for
+    `window_end` trailing the answer, above) or none, no `listening_since` before
+    `window_start`, or a covering channel not `online` with its own `listening_since` before
+    `window_start`;
   * feeds/status (read a few seconds apart) reports a covering channel's receiver offline or not
     installed, or the channel disabled or an example placeholder;
   * rail voice: the gateway identified a track at the point, every covering channel lists its
@@ -292,25 +304,29 @@ location, a placeholder scanner feed):
 * Without `verdicts`, EOT/HOT is judged by the `kind: "eot"` channels `rail/activity` lists for the
   point. An EOT/HOT receiver Pulse doesn't list gives **no EOT/HOT receiver near this point**, and
   any `eot_hot` packets returned are not counted as activity there (the tool moves them to
-  `eot_hot_not_near_point`). With one receiver listed and another not, activity found adds that
-  some packets may come from the other one. Such a Pulse lists an EOT/HOT receiver for any point
-  within a fixed 25 km of it, so activity found adds, for a receiver whose `coverage.radius_km` is
-  smaller, that the packets may come from trains outside this point's area.
+  `eot_hot_not_near_point`). Such a Pulse lists an EOT/HOT receiver for any point within a fixed
+  25 km of it, or for every point when its location isn't set, whatever the receiver's own
+  `coverage.radius_km`; feeds/status gives no receiver position and packets carry none. So
+  packets from a listed receiver are never activity at the point either: the result is
+  **heard but not placed at this point** (N packets from the receivers that may have heard them,
+  naming a receiver's own range when it is under 25 km or its location isn't set), and the tool
+  moves them to `eot_hot_not_placed`. "Can't confirm quiet" for EOT/HOT adds the same range
+  caveat.
 * Without `verdicts`, on v1.1, `coverage.covered: false` from `rail/activity` gives no receiver
   confirmed, even if feeds/status shows a matching receiver online. Pulse computes `covered` over
   the voice and EOT channels together, so the gateway splits it per kind: with each listed
   channel's `receiver_state`, a kind is covered when one of its listed channels (not an example or
   disabled feed) has reported; without per-channel states, `covered: false` holds for both kinds
   and a kind with no listed channel is not covered.
-* Without `verdicts`, each result states exactly one of: **activity found**; **can't confirm
-  quiet: receiver online now**; **receiver offline since T**; **no receiver** (none of that kind is
+* Without `verdicts`, each result states exactly one of: **activity found** (never for
+  EOT/HOT); **heard but not placed at this point** (EOT/HOT only); **can't confirm quiet:
+  receiver online now**; **receiver offline since T**; **no receiver** (none of that kind is
   set up, a channel is set up but its receiver never reported, no channel covers this line,
   naming the lines Pulse does cover, no line identified at the point, no EOT/HOT receiver near the
   point, Pulse's point lookup says not covered, or Pulse did not search the line's channel for the
-  point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`). EOT/HOT
-  results add that packets can't be tied to the place when the EOT receiver has no
-  `coverage.area`/`radius_km`. `coverage_check.<kind>.basis` is `gateway_without_verdicts` here
-  and `pulse_verdict` with verdicts.
+  point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`).
+  `coverage_check.<kind>.basis` is `gateway_without_verdicts` here and `pulse_verdict` with
+  verdicts.
 * `incidents_near` asks for feeds/status alongside the incidents and states the scanner verdict
   the same way as rail without verdicts (scanner incidents have none), so never quiet: a scanner
   receiver online with 0 incidents is "can't confirm quiet", listing the areas the listening feeds
@@ -326,6 +342,7 @@ location, a placeholder scanner feed):
 * feeds/status failing (non-2xx) while the other route works → the result says the feed status
   was unavailable, so 0 messages can't be told apart from no receiver.
 * An older Pulse without the v1.1 fields → treated as unknown, and the result says so.
-* A Pulse without the v1.2 `verdicts` → never "quiet" for rail voice or EOT/HOT (see above).
+* A Pulse without the v1.2 `verdicts` → never "quiet" for rail voice or EOT/HOT, and never
+  EOT/HOT activity at the point (see above).
 * Non-2xx → an error result quoting Pulse's `error.code` (never its stack).
 * Responses are size-capped, links rewritten, and summarized; `*_untrusted` text is passed as data.

@@ -170,7 +170,9 @@ function fromVerdicts(
 /**
  * A Pulse without verdicts (older than v1.2): the gateway judges from feeds/status and the
  * channels rail/activity lists for the point, and never says quiet (assess). Recordings without
- * text count as traffic.
+ * text count as traffic. EOT/HOT packets are never activity at the point: such a Pulse lists an
+ * EOT/HOT receiver by a fixed 25 km, whatever its own range, so they are reported as heard but
+ * not placed (and moved to `eot_hot_not_placed`).
  */
 function withoutVerdicts(
   j: Json,
@@ -210,9 +212,13 @@ function withoutVerdicts(
     pulseChannels: pulseEot,
     pulseCovered: pulseCoveredFor('eot', cov, status),
   });
-  // Packets no receiver covering this point heard are not activity here.
+  // Packets no receiver covering this point heard are not activity here, and without verdicts
+  // nothing places the packets a listed receiver heard at the point either.
   const ignored = eotVerdict.state === 'no_receiver' ? (eotVerdict.ignored_messages ?? 0) : 0;
-  const eotCount = `${packets - ignored} EOT/HOT packet(s)${ignored ? ` (${ignored} ignored: no EOT/HOT receiver that covers this point heard ${ignored === 1 ? 'it' : 'them'})` : ''}`;
+  const unplaced = eotVerdict.state === 'unplaced' ? packets : 0;
+  const eotCount = unplaced
+    ? `${unplaced} EOT/HOT packet(s) heard but not placed at this point`
+    : `${packets - ignored} EOT/HOT packet(s)${ignored ? ` (${ignored} ignored: no EOT/HOT receiver that covers this point heard ${ignored === 1 ? 'it' : 'them'})` : ''}`;
   const unread = rec
     ? `, ${rec.total} recording(s) without text (${rec.pending} not transcribed yet, ${rec.error} failed, ${rec.no_speech} no speech)`
     : '';
@@ -227,6 +233,7 @@ function withoutVerdicts(
     summary: `${counts} Rail radio: ${verdictSentence(railVerdict, o.now, o.here)}${old} EOT/HOT: ${verdictSentence(eotVerdict, o.now)}`,
     data: {
       ...(ignored ? { eot_hot: [], eot_hot_not_near_point: j.eot_hot } : {}),
+      ...(unplaced ? { eot_hot: [], eot_hot_not_placed: j.eot_hot } : {}),
       ...(withheld ? { coverage: withheld } : {}),
     },
     check: {
