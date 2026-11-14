@@ -199,6 +199,27 @@ describe('supply chain and builds', () => {
     }
   });
 
+  it('the runtime image is readable by uid 10001 whatever the checkout modes (umask 077)', () => {
+    const df = read('deploy/docker/Dockerfile');
+    // Classic builder: no BuildKit-only syntax (no COPY --chmod).
+    expect(df).not.toMatch(/--chmod|--mount=|<<\w/);
+    const [build, runtime] = df.split(/^FROM /m).slice(1) as [string, string];
+    // The classic builder keeps a file's mode from the checkout (600 under umask 077) and
+    // makes it root's, so the runtime stage takes nothing straight from the context...
+    const copies = runtime.match(/^COPY .*/gm)!;
+    expect(copies.length).toBeGreaterThan(5);
+    for (const c of copies) expect(c, c).toMatch(/^COPY --from=build \/app\//);
+    for (const p of ['package.json', 'gev', 'data/rail', 'web', 'third_party', 'dist'])
+      expect(runtime, p).toMatch(new RegExp(`COPY --from=build /app/${p}\\b`));
+    // ...only from the build stage, after it normalised every mode (no set-id bits either).
+    const chmod = build.lastIndexOf('RUN chmod -R u=rwX,go=rX /app');
+    expect(chmod).toBeGreaterThan(build.lastIndexOf('\nCOPY '));
+    // Secrets never reach the build context, and nothing copies the whole context or deploy/.
+    const ignore = read('.dockerignore').split('\n');
+    for (const p of ['deploy/secrets', '.env', '.env.*', '.git']) expect(ignore, p).toContain(p);
+    expect(df).not.toMatch(/^COPY (\.|\.\/|deploy)(\s|\/)/m);
+  });
+
   it('scripts/build-gev.sh builds in a confined container with only the build-time key', () => {
     const s = read('scripts/build-gev.sh');
     execFileSync('bash', ['-n', path.join(REPO_ROOT, 'scripts', 'build-gev.sh')]);

@@ -5,6 +5,13 @@
 #   gev-mcp  node dist/scripts/gev-relay.js    (GEV MCP child; GEV clone mounted read-only)
 # Built with the classic builder (no BuildKit-only syntax), base pinned by digest. The FROM
 # lines name the image directly (no ARG) so Dependabot can see and update them.
+#
+# File modes: the classic builder keeps each file's mode from the checkout and makes it
+# root's. Under the recommended `umask 077` a checkout is mode 600/700, which the runtime
+# user (uid 10001) could not read. So every runtime file is staged in the build stage, its
+# modes are normalised there (directories 755, files 644, executables 755, no set-id bits),
+# and the runtime stage copies only from the build stage, never from the context. Secrets
+# never enter the context (.dockerignore: deploy/secrets, .env, .env.*).
 FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS build
 WORKDIR /app
 ENV npm_config_fund=false npm_config_audit=false npm_config_update_notifier=false
@@ -14,6 +21,11 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY scripts ./scripts
 RUN npx tsc -p tsconfig.build.json && npm prune --omit=dev
+COPY gev ./gev
+COPY data/rail ./data/rail
+COPY web ./web
+COPY third_party ./third_party
+RUN chmod -R u=rwX,go=rX /app/package.json /app/node_modules /app/dist /app/gev /app/data /app/web /app/third_party
 
 FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 ENV NODE_ENV=production
@@ -25,11 +37,11 @@ RUN groupadd --gid 10001 godseye \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn*
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY package.json ./
-COPY gev ./gev
-COPY data/rail ./data/rail
-COPY web ./web
-COPY third_party ./third_party
+COPY --from=build /app/package.json ./
+COPY --from=build /app/gev ./gev
+COPY --from=build /app/data/rail ./data/rail
+COPY --from=build /app/web ./web
+COPY --from=build /app/third_party ./third_party
 USER 10001:10001
 EXPOSE 7700
 # The gateway's public listener binds HOST (the compose-network address in production).
