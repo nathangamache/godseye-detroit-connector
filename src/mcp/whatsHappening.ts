@@ -23,6 +23,7 @@ import {
   type Crossing,
   type WaitRow,
 } from '../extra/roads/border.js';
+import { ONTARIO_DISCLAIMER } from '../extra/roads/sources/ontario511.js';
 import type { Point, ProximityCheck } from '../location/proximity.js';
 import type { LocationStore } from '../location/store.js';
 import { postprocess, type McpToolResult } from '../tools/postprocess.js';
@@ -589,8 +590,13 @@ function closuresReport(
     items?: ClosureItemData[];
     sources?: ClosureSourceData[];
     attribution?: string[];
+    disclaimer?: string;
   };
   const items = (d.items ?? []).slice(0, CLOSURES_SHOWN);
+  // Ontario 511's licence: its "as is" disclaimer goes with every result that uses its data.
+  const ontario = typeof d.disclaimer === 'string' || items.some((i) => i.source === 'ontario511');
+  const disclaimer = ontario ? { disclaimer: ONTARIO_DISCLAIMER } : {};
+  const asIs = ontario ? ` ${ONTARIO_DISCLAIMER}` : '';
   const reports = d.sources ?? [];
   const labelOf = new Map(reports.map((r) => [r.source, r.label ?? r.source ?? '?']));
   // Sources that are off (no key, licence switch) aren't "checked"; the tool itself says so.
@@ -604,8 +610,8 @@ function closuresReport(
   if (!items.length)
     return {
       status: 'ok',
-      summary: `No closures, incidents or work zones found ${within} in the sources checked, which is not proof the roads are open. Sources checked: ${checked}.`,
-      data: { count: 0, items: [], sources: enabled },
+      summary: `No closures, incidents or work zones found ${within} in the sources checked, which is not proof the roads are open. Sources checked: ${checked}.${asIs}`,
+      data: { count: 0, items: [], sources: enabled, ...disclaimer },
     };
   for (const a of d.attribution ?? []) credits.push(a);
   const full = items.filter((i) => i.full_closure).length;
@@ -620,7 +626,7 @@ function closuresReport(
     items.length >= CLOSURES_SHOWN ? ` More may exist: road_closures lists up to 50.` : '';
   return {
     status: 'ok',
-    summary: `${items.length} item(s) ${within} (${full} full closure(s)); nearest ${items.length}: ${text}. Sources checked: ${checked}.${more}`,
+    summary: `${items.length} item(s) ${within} (${full} full closure(s)); nearest ${items.length}: ${text}. Sources checked: ${checked}.${more}${asIs}`,
     data: {
       count: items.length,
       items: items.map((i) =>
@@ -640,6 +646,7 @@ function closuresReport(
         ]),
       ),
       sources: enabled,
+      ...disclaimer,
     },
   };
 }

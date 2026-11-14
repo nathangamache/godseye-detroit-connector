@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
+import { ONTARIO_ATTRIBUTION, ONTARIO_DISCLAIMER } from '../src/extra/roads/sources/ontario511.js';
 import { nullLogger } from '../src/log.js';
 import { railLine, whatsHappeningHere } from '../src/mcp/whatsHappening.js';
 import { ToolPolicy } from '../src/tools/policy.js';
@@ -303,6 +304,49 @@ describe('whats_happening_here sections', () => {
     expect(text).toMatch(/weather_alerts credit/);
     expect(text).toMatch(/City of Detroit Open Data/);
     expect(text).toMatch(/border_wait_times credit/);
+  });
+
+  it('passes on the Ontario 511 "as is" disclaimer with its credit when an Ontario item is shown', async () => {
+    const ontarioItem = {
+      ...closureItem(1),
+      source: 'ontario511',
+      type: 'Lane closure',
+      road: 'Ontario Road',
+      distance_km: 4.2,
+    };
+    const withOntario = (disclaimer: boolean): ToolOutput => ({
+      summary: 'road_closures summary',
+      data: {
+        count: 2,
+        items: [closureItem(0), ontarioItem],
+        sources: [
+          { source: 'detroit_row', label: 'City of Detroit permits', status: 'ok', count: 1 },
+          { source: 'ontario511', label: 'Ontario 511', status: 'ok', count: 1 },
+        ],
+        attribution: ['City of Detroit Open Data', ONTARIO_ATTRIBUTION],
+        ...(disclaimer ? { disclaimer: ONTARIO_DISCLAIMER } : {}),
+      },
+    });
+    // As road_closures answers (disclaimer in its data), and from the item's source alone.
+    for (const disclaimer of [true, false]) {
+      const { text, data } = await harness({
+        road_closures: async () => withOntario(disclaimer),
+      }).run(DETROIT);
+      const roads = line(text, 'Road closures')!;
+      const why = `disclaimer in road_closures data: ${disclaimer}`;
+      expect(roads, why).toMatch(/Lane closure on Ontario Road \(4\.2 km, Ontario 511\)/);
+      expect(roads, why).toContain(ONTARIO_DISCLAIMER);
+      const rc = data.sources.find((s) => s.source === 'road_closures')!;
+      expect(rc.summary).toContain(ONTARIO_DISCLAIMER);
+      expect((rc.data as { disclaimer?: string }).disclaimer).toBe(ONTARIO_DISCLAIMER);
+      expect(text).toContain(ONTARIO_ATTRIBUTION);
+    }
+    // Without an Ontario item: no disclaimer.
+    const { text, data } = await harness().run(DETROIT);
+    expect(text).not.toContain(ONTARIO_DISCLAIMER);
+    expect(data.sources.find((s) => s.source === 'road_closures')!.data).not.toHaveProperty(
+      'disclaimer',
+    );
   });
 
   it('the rail and Pulse sections read exactly as before', async () => {
