@@ -35,6 +35,7 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   incident_detail: 'scanner',
   search_transcripts: 'scanner',
   feeds_status: 'scanner',
+  dpd_calls_near: 'scanner',
   get_weather: 'weather',
   get_weather_map: 'weather',
   get_wind: 'weather',
@@ -46,6 +47,7 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   get_traffic_flow: 'traffic',
   plan_route: 'traffic',
   get_transit_vehicles: 'traffic',
+  transit_vehicles_near: 'traffic',
   get_bike_share: 'traffic',
   find_cctv_cameras: 'cameras',
   get_cctv_snapshot: 'cameras',
@@ -62,6 +64,7 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   satellites_overhead: 'space',
   get_recent_imagery: 'space',
   get_regional_brief: 'news',
+  local_headlines: 'news',
   find_radio_stations: 'news',
   situation_brief: 'news',
   military_awareness: 'news',
@@ -309,6 +312,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
     tags: ['bike share', 'mogo', 'bikes', 'docks', 'gbfs', 'cycling'],
     attribution: 'GBFS feed operators',
   },
+  // No ddot/smart/qline tags: GEV's registry has no Michigan feed (SMART is transit_vehicles_near).
   get_transit_vehicles: {
     tags: [
       'bus',
@@ -318,9 +322,6 @@ export const TOOL_META: Record<string, ToolMeta> = {
       'light rail',
       'gtfs',
       'realtime vehicles',
-      'ddot',
-      'smart',
-      'qline',
       'commuter rail',
     ],
     attribution: 'GTFS-realtime feed operators',

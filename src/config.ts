@@ -250,6 +250,22 @@ const schema = z.object({
    * latest fix, never its coordinates) when that fix is at most this old.
    */
   LOCATION_PROXIMITY_MINUTES: int(30, 1, 24 * 60),
+
+  // ---- civic ----
+  /**
+   * Swiftly real-time API key for SMART's GTFS-Realtime feeds (sent as the Authorization
+   * header). Unset: transit_vehicles_near is off and fetches nothing.
+   */
+  SWIFTLY_API_KEY: optionalString,
+  /** Fetch SMART's public static GTFS (route names, headsigns) for transit_vehicles_near. */
+  SMART_STATIC_GTFS: bool(true),
+  /** Quotas for the civic tools, TOOL_RATE_LIMITS syntax; applied in addition to it. */
+  CIVIC_TOOL_RATE_LIMITS: z
+    .string()
+    .default(
+      'dpd_calls_near=60/h,transit_vehicles_near=120/h,local_headlines=30/h,local_headlines=200/d',
+    ),
+  // ---- end civic ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
@@ -541,7 +557,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     loginProvider,
     ownerTailscaleLogin: raw.OWNER_TAILSCALE_LOGIN?.toLowerCase(),
     publicAuthorize,
-    toolRateLimits: parseRateLimits(raw.TOOL_RATE_LIMITS),
+    toolRateLimits: [
+      ...parseRateLimits(raw.TOOL_RATE_LIMITS),
+      ...parseRateLimits(raw.CIVIC_TOOL_RATE_LIMITS),
+    ],
     gevApiOrigins: Array.from(gevApiOrigins),
   };
 }

@@ -10,6 +10,7 @@ import { Audit } from './audit.js';
 import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
+import { registerCivicTools } from './extra/civic/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
 import { makeGevCaller } from './gev/tools.js';
 import { LocationStore } from './location/store.js';
@@ -142,6 +143,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   });
   // The rail index lets the Pulse rail tool match coverage on every name a track has.
   for (const t of pulseTools(pulse, { rail, now })) registry.register(t);
+  registerCivicTools(registry, { config, locations, audit, tokens, now });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(
