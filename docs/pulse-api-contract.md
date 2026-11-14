@@ -1,10 +1,12 @@
 # Detroit Pulse API contract (v1, for the gateway)
 
-Status: v1, plus the additive v1.1 receiver/coverage fields on `GET /v1/feeds/status` (below).
-The gateway's client (`src/pulse/client.ts`), tools (`src/pulse/tools.ts`) and coverage logic
+Status: v1, plus the additive v1.1 receiver/coverage fields on `GET /v1/feeds/status` and the
+additive v1.2 `verdicts` on `GET /v1/rail/activity` (below). The gateway's client
+(`src/pulse/client.ts`), tools (`src/pulse/tools.ts`) and coverage logic
 (`src/pulse/coverage.ts`) are written against this document, and the test double in
-`test/fixtures/mock-pulse.ts` implements it. Every v1.1 field is optional for the gateway: an
-older Pulse that omits them still works, and the gateway says it can't tell quiet from uncovered.
+`test/fixtures/mock-pulse.ts` implements it. Every v1.1 and v1.2 field is optional for the
+gateway: an older Pulse that omits them still works, and the gateway then never says "quiet"
+(it says it can't confirm).
 
 ## Transport
 
@@ -93,11 +95,11 @@ nearest first. Includes incidents opened or updated within the window.
 |---|---|---|---|
 | `lat`, `lon` | number | required | |
 | `since_minutes` | integer | 30 | 1–720 |
-| `subdivision` | string | — | hint: the `coverage.lines[].name` from feeds/status that matched this track (any of its names or aliases), else a plain dataset name with marks and "Sub" removed, e.g. `Holly` |
-| `railroad` | string | — | hint, e.g. `CN` (only when the caller or the matched coverage line gives one) |
+| `subdivision` | string | — | hint: the `coverage.lines[].name` from feeds/status that matched this track (any of its names or aliases), else a plain dataset name with marks and "Sub" removed, e.g. `Holly`. Pulse matches it exactly (normalised) and uses it only to order the point's subdivisions and for its note; it never adds a channel |
+| `railroad` | string | — | hint, e.g. `CN`: Pulse then checks only that railroad's voice channels. The gateway sends it only when the caller gives one (never from its own line match), and says so |
 
-Pulse maps the point (and hints) to the rail subdivision(s) and the radio channels it monitors for
-them, then returns:
+Pulse picks the channels whose own receiver area covers the point (the channel's radius or area,
+else a subdivision area it is on; never by name, never by a fixed distance), then returns:
 
 ```ts
 {
@@ -107,6 +109,9 @@ them, then returns:
     covered: boolean;              // false = no monitored channel for this line yet
     channels: { channel: string; frequency_mhz?: number; railroad?: string; subdivision?: string; kind: "road" | "dispatcher" | "detector" | "eot"; receiver_state?: "not_installed" | "offline" | "online" }[];
     note?: string;
+    // Pulse 888cb0a and later, only when one is non-zero: recordings on the covering channels in
+    // the window with no text (queued/transcribing, failed, no speech). Traffic, never quiet.
+    recordings_without_text?: { pending: number; error: number; no_speech: number };
   };
   transcripts: (Transcript & { reason_label?: ReasonLabel })[];   // rail voice traffic, newest first
   detector_readouts: {
@@ -121,10 +126,43 @@ them, then returns:
     battery?: "ok" | "weak" | "low"; armed?: boolean;
   }[];
   reason_labels: { label: ReasonLabel; confidence: number; from_chunk_ids: string[] }[];
+  verdicts?: { rail_voice: Verdict; eot: Verdict };   // v1.2, below
 }
 type ReasonLabel = "crew_change" | "meet_pass" | "signal_stop" | "dispatcher_hold" | "mechanical"
   | "defect_detector_stop" | "blocked_crossing" | "track_work" | "switching" | "emergency" | "unknown";
 ```
+
+### v1.2: `verdicts` (additive, backward compatible)
+
+Per kind, may the point be called quiet? Pulse builds this in `api/rail_verdicts.py`
+(its `docs/pulse-api.md` item 8 has the full rules):
+
+```ts
+type Verdict = {
+  state: "activity" | "quiet" | "not_covered" | "unknown";
+  reasons: string[];             // short plain sentences, e.g. "line_road: no receiver has ever reported"
+  window_start: string;          // ISO 8601 UTC: now - since_minutes
+  window_end: string;            // now
+  listening_since?: string;      // since when every covering channel and the ingest stage are proven
+  counts: { transcripts: number; detector_readouts: number;
+            recordings_without_text: number; eot_packets: number };   // covering channels only
+  channels: { feed_id: string;   // the feeds/status feed_id
+              receiver_state: "not_installed" | "offline" | "online";
+              listening_since?: string; covers_point: boolean }[];    // every enabled, non-example
+};                                                                    // channel of the kind
+```
+
+* `activity`: anything in the window on a channel that covers the point: a transcript, a
+  detector readout, a recording with no text (queued, transcribing, failed, no speech, still being
+  written) or an EOT/HOT packet. Messages from channels that don't cover the point never count.
+* `not_covered`: no channel of the kind covers the point by its own coverage, or none that does
+  was listened to at any time in the window.
+* `quiet`, only on positive proof for the **whole** window: every covering channel's receiver was
+  listening since before `window_start` (heartbeat history, not "online now"), on the channel's
+  configured frequency; the ingest stage (`sdr_files` for voice, `traintap` for EOT) beat since
+  before `window_start` and could see its input; nothing was heard on the covering channels and
+  nothing in the window is left unattributed.
+* `unknown`: nothing was heard, but one of those isn't shown; `reasons` says which.
 
 ## `GET /v1/feeds/status` (tool: `feeds_status`)
 
@@ -159,8 +197,9 @@ example?: true;              // shipped placeholder feed (see below)
     containers/profile are not running and never produced a heartbeat).
   * `offline`: a receiver reported before, but its heartbeat is older than `RECEIVER_STALE_S`
     (default 300 s).
-  * `online`: the heartbeat is fresh. A fresh heartbeat with 0 chunks means the channel is
-    **quiet**, not uncovered.
+  * `online`: the heartbeat is fresh: the receiver is listening **now**. That alone doesn't make
+    0 chunks a quiet window (the receiver may have come back during it, or ingest may be down):
+    only a v1.2 `verdicts` quiet from `rail/activity` does.
 * `coverage` comes from Pulse's config. For rail feeds, `lines` are the lines this
   receiver/channel hears; `aliases` lists **every other name the same track has in other
   datasets** (for example the FRA crossing inventory and NARN often give one track different
@@ -214,40 +253,68 @@ location, a placeholder scanner feed):
   compared normalised: case, parenthesised marks such as `(CSXT)`, "Subdivision"/"Sub"/"District",
   a leading railroad mark, "MAIN LINE" vs "MAINLINE"; railroads must agree when both sides name
   one (legacy marks such as GTW/CN or ATK/AMTK count as the same railroad). The matched line's
-  `name` is sent as the `subdivision` hint. Pulse searches transcripts only on the voice channels
-  its `rail/activity` lists in `coverage.channels`, so when that list is sent (every v1.1 Pulse
-  does) only a listed voice channel can be **quiet** or **offline** for the point; a feed the
-  gateway matched to the line by name but Pulse did not list (Pulse picks channels its own way, for
-  example at a junction, or with an exact railroad mark) gives **no receiver confirmed: Pulse did
-  not search it for this point**, never "quiet". Without the list (older Pulse), a feed on the
-  matched line or one Pulse lists counts. When no line is identified at the point (no named track
-  near it in the rail datasets, for example outside their coverage) and Pulse lists no voice
-  channel for it, no rail voice receiver is tied to the point: the result says no rail line was
-  identified here, never "quiet".
-* EOT/HOT is judged by the `kind: "eot"` channels `rail/activity` lists for the point (Pulse lists
-  one only when its receiver is within range of the point or has no location set). An EOT/HOT
-  receiver Pulse doesn't list for the point gives **no EOT/HOT receiver near this point**, and any
-  `eot_hot` packets returned are not counted as activity there (the tool moves them to
+  `name` is sent as the `subdivision` hint; `railroad` only when the caller gives one.
+* **With `verdicts` (v1.2), Pulse's verdict decides** rail voice and EOT/HOT. The gateway relays
+  `state`, `reasons` (verbatim, up to four in the sentence, all in `coverage_check`) and `counts`
+  in plain words: **activity found**, **listening and quiet** (with the window, the
+  listening-since time and the covering channels), **no coverage**, or **can't confirm quiet**.
+  The counts line uses Pulse's counts for the covering channels, recordings without text
+  included. The gateway never upgrades anything to quiet or activity. It downgrades a `quiet` to
+  "can't confirm" (`coverage_check.<kind>.state: "unknown"`, `pulse_state: "quiet"`,
+  `gateway_reasons`) when its own checks disagree:
+  * Pulse's answer contradicts itself: counts not all zero or incomplete, `transcripts`,
+    `detector_readouts`, `eot_hot` or `coverage.recordings_without_text` not empty, no channel
+    with `covers_point`, a window shorter than the minutes asked (or none), no
+    `listening_since` before `window_start`, or a covering channel not `online` with its own
+    `listening_since` before `window_start`;
+  * feeds/status (read a few seconds apart) reports a covering channel's receiver offline or not
+    installed, or the channel disabled or an example placeholder;
+  * rail voice: the gateway identified a track at the point, every covering channel lists its
+    `coverage.lines` in feeds/status, and none of those lines is that track (the answer names the
+    lines they do hear). A channel placed by area alone, no track identified, or feeds/status
+    unavailable leaves Pulse's quiet as it is. On `activity` the same mismatch only adds a note.
+
+  A `verdicts` block without a usable verdict for a kind gives "can't confirm" for that kind.
+  Where the rail voice answer is not quiet, sentences of Pulse's `coverage.note` that call
+  channels quiet (v1.2 does for the proven channels of a partly proven point) are withheld from
+  the data, with a marker.
+* **Without `verdicts`** (a Pulse older than v1.2) the gateway judges from feeds/status and
+  `rail/activity`'s channel list, and **never says quiet**: a receiver online now proves nothing
+  about the whole window, so that case is **can't confirm quiet: receiver online now**. Recordings
+  in `coverage.recordings_without_text` (888cb0a era) count as rail traffic (activity found), and
+  the counts line lists them by kind. Sentences of Pulse's note that call channels quiet are
+  withheld. Pulse searches transcripts only on the voice channels its `rail/activity` lists in
+  `coverage.channels`, so only a listed voice channel can be online now or offline for the point;
+  a feed the gateway matched to the line by name but Pulse did not list gives **no receiver
+  confirmed: Pulse did not search it for this point**. Without the list (older Pulse), a feed on
+  the matched line or one Pulse lists counts. When no line is identified at the point and Pulse
+  lists no voice channel for it, the result says no rail line was identified here.
+* Without `verdicts`, EOT/HOT is judged by the `kind: "eot"` channels `rail/activity` lists for the
+  point. An EOT/HOT receiver Pulse doesn't list gives **no EOT/HOT receiver near this point**, and
+  any `eot_hot` packets returned are not counted as activity there (the tool moves them to
   `eot_hot_not_near_point`). With one receiver listed and another not, activity found adds that
-  some packets may come from the other one.
-* On v1.1, `coverage.covered: false` from `rail/activity` is never reported as quiet, even if
-  feeds/status shows a matching receiver online: the result says no receiver is confirmed.
-  Pulse computes `covered` over the voice and EOT channels together, so the gateway splits it per
-  kind: with each listed channel's `receiver_state`, a kind is covered when one of its listed
-  channels (not an example or disabled feed) has reported; without per-channel states,
-  `covered: false` holds for both kinds and a kind with no listed channel is not covered (an EOT
-  listing never makes rail voice covered, nor the reverse).
-* Each result then states exactly one of: **activity found**; **listening and quiet** (a
-  receiver covering the point is online and 0 messages arrived in the window); **receiver
-  offline since T**; **no receiver** (none of that kind is set up, a channel is set up but its
-  receiver never reported, no channel covers this line, naming the lines Pulse does cover, no
-  line identified at the point, no EOT/HOT receiver near the point, Pulse's point lookup says
-  not covered, or Pulse did not search the line's channel for the point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`;
-  unknown, not "quiet"). EOT/HOT
+  some packets may come from the other one. Such a Pulse lists an EOT/HOT receiver for any point
+  within a fixed 25 km of it, so activity found adds, for a receiver whose `coverage.radius_km` is
+  smaller, that the packets may come from trains outside this point's area.
+* Without `verdicts`, on v1.1, `coverage.covered: false` from `rail/activity` gives no receiver
+  confirmed, even if feeds/status shows a matching receiver online. Pulse computes `covered` over
+  the voice and EOT channels together, so the gateway splits it per kind: with each listed
+  channel's `receiver_state`, a kind is covered when one of its listed channels (not an example or
+  disabled feed) has reported; without per-channel states, `covered: false` holds for both kinds
+  and a kind with no listed channel is not covered.
+* Without `verdicts`, each result states exactly one of: **activity found**; **can't confirm
+  quiet: receiver online now**; **receiver offline since T**; **no receiver** (none of that kind is
+  set up, a channel is set up but its receiver never reported, no channel covers this line,
+  naming the lines Pulse does cover, no line identified at the point, no EOT/HOT receiver near the
+  point, Pulse's point lookup says not covered, or Pulse did not search the line's channel for the
+  point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`). EOT/HOT
   results add that packets can't be tied to the place when the EOT receiver has no
-  `coverage.area`/`radius_km`. Scanner results list the areas the listening feeds cover (the
-  gateway can't tell whether the point is inside them).
-* `incidents_near` asks for feeds/status alongside the incidents and states the scanner verdict.
+  `coverage.area`/`radius_km`. `coverage_check.<kind>.basis` is `gateway_without_verdicts` here
+  and `pulse_verdict` with verdicts.
+* `incidents_near` asks for feeds/status alongside the incidents and states the scanner verdict
+  the same way as rail without verdicts (scanner incidents have none), so never quiet: a scanner
+  receiver online with 0 incidents is "can't confirm quiet", listing the areas the listening feeds
+  cover (the gateway can't tell whether the point is inside them).
 * One feeds/status answer is shared for 10 s, so `whats_happening_here` asks once.
 
 ## Gateway behaviour
@@ -259,5 +326,6 @@ location, a placeholder scanner feed):
 * feeds/status failing (non-2xx) while the other route works → the result says the feed status
   was unavailable, so 0 messages can't be told apart from no receiver.
 * An older Pulse without the v1.1 fields → treated as unknown, and the result says so.
+* A Pulse without the v1.2 `verdicts` → never "quiet" for rail voice or EOT/HOT (see above).
 * Non-2xx → an error result quoting Pulse's `error.code` (never its stack).
 * Responses are size-capped, links rewritten, and summarized; `*_untrusted` text is passed as data.

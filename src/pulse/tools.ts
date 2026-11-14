@@ -6,16 +6,20 @@ import type { ToolDef, ToolOutput } from '../tools/types.js';
 import { PulseClient, PulseHttpError, PulseUnavailableError } from './client.js';
 import {
   assess,
+  checkVerdict,
   feedKind,
   feedsOfKind,
   isExampleFeed,
   lineLabel,
   matchCoverageLine,
   parseFeedsStatus,
+  parseVerdicts,
   pulseCoveredFor,
+  railVerdictSentence,
   reportsCoverage,
   verdictSentence,
   type FeedsStatus,
+  type PulseVerdicts,
 } from './coverage.js';
 
 const LATLON = {
@@ -75,6 +79,162 @@ async function call(
 }
 
 const count = (v: unknown) => (Array.isArray(v) ? v.length : 0);
+
+/** What rail_activity_near says per kind, and what it adds to Pulse's data. */
+interface Judged {
+  summary: string;
+  data: Json;
+  check: Record<string, unknown>;
+}
+
+/**
+ * rail/activity's coverage.recordings_without_text (Pulse 888cb0a and later): recordings on the
+ * covering channels in the window with no text yet (queued or transcribing), whose
+ * transcription failed, or with no speech. Traffic, never quiet. Undefined when not sent.
+ */
+function recordingsWithoutText(
+  cov: Json,
+): { total: number; pending: number; error: number; no_speech: number } | undefined {
+  const r = cov.recordings_without_text;
+  if (!r || typeof r !== 'object') return undefined;
+  const n = (k: string) => {
+    const v = (r as Json)[k];
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
+  };
+  const out = { pending: n('pending'), error: n('error'), no_speech: n('no_speech') };
+  return { ...out, total: out.pending + out.error + out.no_speech };
+}
+
+const coverageOf = (j: Json): Json =>
+  (j.coverage && typeof j.coverage === 'object' ? j.coverage : {}) as Json;
+
+/** A sentence that calls channels quiet ("they were quiet", "that channel was quiet"). */
+const QUIET_CLAIM = /\b(?:was|were|is|are)\s+quiet\b/i;
+
+/**
+ * Pulse's coverage.note may call channels quiet: an older Pulse does on "online now", and v1.2
+ * does for the proven channels of a point it can't call quiet as a whole. Unless the rail voice
+ * answer here is quiet, those sentences are withheld, so the data never says quiet where the
+ * answer doesn't. Returns the coverage to report, or undefined to keep Pulse's.
+ */
+function withholdQuiet(cov: Json, quiet: boolean): Json | undefined {
+  const note = typeof cov.note === 'string' ? cov.note : undefined;
+  if (quiet || !note || !QUIET_CLAIM.test(note)) return undefined;
+  const kept = note.split(/(?<=\.)\s+/).filter((s) => !QUIET_CLAIM.test(s));
+  return {
+    ...cov,
+    note: [
+      ...kept,
+      "(The gateway withheld Pulse's sentence calling channels quiet: that is not confirmed for this point; see coverage_check.)",
+    ].join(' '),
+  };
+}
+
+/**
+ * Contract v1.2: Pulse's own verdicts decide. The gateway relays them and only turns a quiet
+ * into unknown when its checks disagree (checkVerdict); the counts are Pulse's, for the channels
+ * that cover the point.
+ */
+function fromVerdicts(
+  j: Json,
+  verdicts: PulseVerdicts,
+  o: { status?: FeedsStatus; tracks: TrackNames[]; since: number; railroad?: string; here: string },
+): Judged {
+  const rec = recordingsWithoutText(coverageOf(j));
+  const rail = checkVerdict('rail_radio', verdicts.rail_radio, {
+    status: o.status,
+    tracks: o.tracks,
+    window_min: o.since,
+    listed: count(j.transcripts) + count(j.detector_readouts) + (rec?.total ?? 0),
+  });
+  const eot = checkVerdict('eot', verdicts.eot, {
+    status: o.status,
+    window_min: o.since,
+    listed: count(j.eot_hot),
+  });
+  const vc = rail.counts;
+  const counts =
+    `${vc?.transcripts ?? count(j.transcripts)} rail transmission(s), ` +
+    `${vc?.detector_readouts ?? count(j.detector_readouts)} detector readout(s), ` +
+    `${vc?.recordings_without_text ?? rec?.total ?? 0} recording(s) without text (not transcribed yet, failed or no speech), ` +
+    `${eot.counts?.eot_packets ?? count(j.eot_hot)} EOT/HOT packet(s) in the last ${o.since} min on the channels that cover this point.`;
+  const only = o.railroad ? ` (${o.railroad} channels only, as asked)` : '';
+  const coverage = withholdQuiet(coverageOf(j), rail.state === 'quiet');
+  return {
+    summary: `${counts} Rail radio${only}: ${railVerdictSentence(rail, o.here)} EOT/HOT: ${railVerdictSentence(eot)}`,
+    data: coverage ? { coverage } : {},
+    check: { rail_radio: rail, eot },
+  };
+}
+
+/**
+ * A Pulse without verdicts (older than v1.2): the gateway judges from feeds/status and the
+ * channels rail/activity lists for the point, and never says quiet (assess). Recordings without
+ * text count as traffic.
+ */
+function withoutVerdicts(
+  j: Json,
+  o: { status?: FeedsStatus; tracks: TrackNames[]; since: number; here: string; now: number },
+): Judged {
+  const { status, since } = o;
+  const cov = coverageOf(j);
+  const rec = recordingsWithoutText(cov);
+  const voice = count(j.transcripts) + count(j.detector_readouts) + (rec?.total ?? 0);
+  const packets = count(j.eot_hot);
+  const chans = (Array.isArray(cov.channels) ? (cov.channels as unknown[]) : []).filter(
+    (c): c is { channel: string; kind?: unknown } =>
+      Boolean(c) &&
+      typeof c === 'object' &&
+      typeof (c as { channel?: unknown }).channel === 'string',
+  );
+  // The channels Pulse lists for THIS point, per kind. Voice: only these were searched for
+  // transcripts here. EOT: it lists one only when its receiver is within range of the point or
+  // has no location set. v1.1 always sends the list, so there a missing list means none.
+  const known = Array.isArray(cov.channels) || Boolean(status && reportsCoverage(status));
+  const pulseVoice = known
+    ? chans.filter((c) => c.kind !== 'eot').map((c) => c.channel)
+    : undefined;
+  const pulseEot = known ? chans.filter((c) => c.kind === 'eot').map((c) => c.channel) : undefined;
+  // Pulse's `covered` lumps voice and EOT together: split it so that a reported EOT receiver
+  // doesn't make voice covered, nor the reverse.
+  const railVerdict = assess('rail_radio', status, {
+    messages: voice,
+    window_min: since,
+    tracks: o.tracks,
+    pulseChannels: pulseVoice,
+    pulseCovered: pulseCoveredFor('rail_radio', cov, status),
+  });
+  const eotVerdict = assess('eot', status, {
+    messages: packets,
+    window_min: since,
+    pulseChannels: pulseEot,
+    pulseCovered: pulseCoveredFor('eot', cov, status),
+  });
+  // Packets no receiver covering this point heard are not activity here.
+  const ignored = eotVerdict.state === 'no_receiver' ? (eotVerdict.ignored_messages ?? 0) : 0;
+  const eotCount = `${packets - ignored} EOT/HOT packet(s)${ignored ? ` (${ignored} ignored: no EOT/HOT receiver that covers this point heard ${ignored === 1 ? 'it' : 'them'})` : ''}`;
+  const unread = rec
+    ? `, ${rec.total} recording(s) without text (${rec.pending} not transcribed yet, ${rec.error} failed, ${rec.no_speech} no speech)`
+    : '';
+  const counts = `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s)${unread}, ${eotCount} in the last ${since} min.`;
+  // Never quiet without verdicts, so a note calling channels quiet is withheld.
+  const withheld = withholdQuiet(cov, false);
+  const old =
+    !reportsCoverage(status ?? { feeds: [] }) && cov.covered === false
+      ? ' Pulse says no monitored channel covers this line yet.'
+      : '';
+  return {
+    summary: `${counts} Rail radio: ${verdictSentence(railVerdict, o.now, o.here)}${old} EOT/HOT: ${verdictSentence(eotVerdict, o.now)}`,
+    data: {
+      ...(ignored ? { eot_hot: [], eot_hot_not_near_point: j.eot_hot } : {}),
+      ...(withheld ? { coverage: withheld } : {}),
+    },
+    check: {
+      rail_radio: { basis: 'gateway_without_verdicts', ...railVerdict },
+      eot: { basis: 'gateway_without_verdicts', ...eotVerdict },
+    },
+  };
+}
 
 export interface PulseToolOptions {
   /** Rail index: every name the datasets give the track at a point, for coverage matching. */
@@ -207,7 +367,7 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
       name: 'rail_activity_near',
       title: 'Rail radio activity near a point',
       description:
-        'Recent railroad radio for the rail line near a point: road/dispatcher transcripts, defect-detector readouts, EOT/HOT telemetry and labels for why a train is stopped. States whether a receiver covers that line (none installed, offline since when, or listening and quiet), so 0 messages is never mistaken for a quiet line.',
+        "Recent railroad radio for the rail line near a point: road/dispatcher transcripts, defect-detector readouts, recordings not transcribed yet, EOT/HOT telemetry and labels for why a train is stopped. For rail voice and EOT/HOT it relays Pulse's verdict: activity found, quiet (only when Pulse proves every channel covering the point was listened to for the whole window), no coverage, or can't confirm, so 0 messages is never mistaken for a quiet line.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -235,8 +395,9 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
         // Pulse down: same answer as before, without a second timeout.
         if (!st.ok && st.err instanceof PulseUnavailableError) return errorOutput(st.err);
         const status = st.ok ? st.status : undefined;
-        // Pulse's own lookup matches subdivision names by substring: give it the name its own
-        // config uses for this track when one of the aliases matches, else a plain name.
+        // The subdivision hint is the name Pulse's own config uses for this track when one of
+        // its aliases matches, else a plain name; Pulse uses it for its note, never to pick
+        // channels. The railroad hint narrows the channels Pulse checks, so only the caller's.
         const match = status ? matchCoverageLine(status, tracks) : undefined;
         const firstName = tracks.find((t) => t.names.length)?.names[0]?.name;
         const hint =
@@ -246,8 +407,7 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
             : firstName
               ? plainLineName(firstName)
               : undefined);
-        const railroad =
-          (typeof a.railroad === 'string' && a.railroad) || match?.line.railroad || undefined;
+        const railroad = (typeof a.railroad === 'string' && a.railroad.trim()) || undefined;
         let j: Json;
         try {
           j = await client.get<Json>(
@@ -258,68 +418,28 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
         } catch (err) {
           return errorOutput(err);
         }
-        const voice = count(j.transcripts) + count(j.detector_readouts);
-        const packets = count(j.eot_hot);
-        const cov = (j.coverage && typeof j.coverage === 'object' ? j.coverage : {}) as {
-          covered?: unknown;
-          channels?: unknown;
-        };
-        const chans = (Array.isArray(cov.channels) ? (cov.channels as unknown[]) : []).filter(
-          (c): c is { channel: string; kind?: unknown } =>
-            Boolean(c) &&
-            typeof c === 'object' &&
-            typeof (c as { channel?: unknown }).channel === 'string',
-        );
-        // The channels Pulse lists for THIS point, per kind. Voice: only these were searched for
-        // transcripts here. EOT: it lists one only when its receiver is within range of the
-        // point or has no location set. v1.1 always sends the list, so there a missing list
-        // means none.
-        const known = Array.isArray(cov.channels) || Boolean(status && reportsCoverage(status));
-        const pulseVoice = known
-          ? chans.filter((c) => c.kind !== 'eot').map((c) => c.channel)
-          : undefined;
-        const pulseEot = known
-          ? chans.filter((c) => c.kind === 'eot').map((c) => c.channel)
-          : undefined;
-        // Pulse's `covered` lumps voice and EOT together: split it so that a reported EOT
-        // receiver doesn't make voice covered, nor the reverse.
-        const railVerdict = assess('rail_radio', status, {
-          messages: voice,
-          window_min: since,
-          tracks,
-          pulseChannels: pulseVoice,
-          pulseCovered: pulseCoveredFor('rail_radio', cov, status),
-        });
-        const eotVerdict = assess('eot', status, {
-          messages: packets,
-          window_min: since,
-          pulseChannels: pulseEot,
-          pulseCovered: pulseCoveredFor('eot', cov, status),
-        });
-        // Packets no receiver covering this point heard are not activity here.
-        const ignored = eotVerdict.state === 'no_receiver' ? (eotVerdict.ignored_messages ?? 0) : 0;
+        const here = tracks.length ? lineLabel(tracks) : 'this point';
+        const verdicts = parseVerdicts(j.verdicts);
+        const judged = verdicts
+          ? fromVerdicts(j, verdicts, { status, tracks, since, railroad, here })
+          : withoutVerdicts(j, { status, tracks, since, here, now: now() });
         // Labels are machine-derived from radio: cap how many and how long (review MCP-3).
         const all = Array.isArray(j.reason_labels)
           ? (j.reason_labels as Array<{ label?: unknown }>).map((l) => String(l?.label ?? ''))
           : [];
         const labels = all.slice(0, 10).map((l) => (l.length > 80 ? l.slice(0, 79) + '…' : l));
         const more = all.length > labels.length ? ` (+${all.length - labels.length} more)` : '';
-        const eotCount = `${packets - ignored} EOT/HOT packet(s)${ignored ? ` (${ignored} ignored: no EOT/HOT receiver that covers this point heard ${ignored === 1 ? 'it' : 'them'})` : ''}`;
-        const counts = `${count(j.transcripts)} rail transmission(s), ${count(j.detector_readouts)} detector readout(s), ${eotCount} in the last ${since} min${labels.length ? `; likely reason: ${labels.join(', ')}${more}` : ''}.`;
-        const here = tracks.length ? lineLabel(tracks) : 'this point';
-        const old =
-          !reportsCoverage(status ?? { feeds: [] }) && cov.covered === false
-            ? ' Pulse says no monitored channel covers this line yet.'
-            : '';
-        const summary = `${counts} Rail radio: ${verdictSentence(railVerdict, now(), here)}${old} EOT/HOT: ${verdictSentence(eotVerdict, now())}`;
+        const why = labels.length
+          ? ` Machine-labelled likely reason: ${labels.join(', ')}${more}.`
+          : '';
         return {
-          summary,
+          summary: `${judged.summary}${why}`,
           data: {
             ...j,
-            ...(ignored ? { eot_hot: [], eot_hot_not_near_point: j.eot_hot } : {}),
+            ...judged.data,
             line_names_checked: tracks.map((t) => ({ track: t.label, names: t.names })),
             pulse_subdivision_hint: hint,
-            coverage_check: { rail_radio: railVerdict, eot: eotVerdict },
+            coverage_check: judged.check,
           },
           observedAt: typeof j.generated_at === 'string' ? j.generated_at : undefined,
         };

@@ -95,9 +95,12 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   too.
 * Rail lines are reported with every subdivision name the FRA and NARN datasets give the same
   track (they often differ), computed from the data, and Pulse rail coverage is matched on all of
-  them. Pulse radio results say whether a receiver actually covers the line or area (none
-  installed, offline since when, listening and quiet, activity, or Pulse too old to say), so zero
-  messages is never passed off as "quiet".
+  them. Rail radio results relay Pulse's own verdict per kind (rail voice, EOT/HOT; contract
+  v1.2): activity, quiet only when Pulse proves every channel covering the point was listened to
+  for the whole window, not covered, or can't confirm, with Pulse's reasons. The gateway may turn
+  a quiet into "can't confirm" when its own checks disagree, never the reverse. Without verdicts
+  (an older Pulse, and scanner incidents) it says activity, no receiver, offline since when, or
+  can't confirm, never "quiet", so zero messages is never passed off as a quiet line or area.
 
 ## Repository layout
 

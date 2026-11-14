@@ -3,8 +3,9 @@
  *
  * whats_happening_here fans out in parallel with per-source timeouts:
  *   rail (native) -> nearest line + crossing, with every name FRA and NARN give the track
- *   Pulse        -> rail_activity_near, incidents_near (each says whether a receiver covers
- *                   this line/area, so 0 messages is never mistaken for "quiet")
+ *   Pulse        -> rail_activity_near (relays Pulse's rail voice and EOT/HOT verdicts: quiet
+ *                   only with Pulse's proof for the whole window), incidents_near (never
+ *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
  *   GEV          -> get_traffic_flow, find_cctv_cameras, get_weather
  * and returns one compact summary with each source's timestamp/age and error. For an explicit
  * point it also says how far Nathan's phone is from that point (src/location/proximity.ts).
@@ -428,8 +429,8 @@ function usesCaller(a: WhatsHappeningArgs): boolean {
 
 function oneLine(s: string): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  // Room for the counts plus the rail-radio and EOT coverage verdicts.
-  return t.length > 900 ? t.slice(0, 897) + '…' : t;
+  // Room for the counts plus Pulse's rail voice and EOT/HOT verdicts (window, reasons, channels).
+  return t.length > 1600 ? t.slice(0, 1597) + '…' : t;
 }
 
 function compact(v: unknown, keys: string[]): unknown {

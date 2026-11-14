@@ -1,6 +1,7 @@
 /**
- * Coverage honesty (feeds/status receiver + coverage): "0 messages" is reported as one of
- * activity / listening and quiet / receiver offline since T / no receiver / Pulse can't say.
+ * Coverage honesty without Pulse's verdicts (feeds/status receiver + coverage): "0 messages" is
+ * reported as one of activity / online now but can't confirm quiet / receiver offline since T /
+ * no receiver / Pulse can't say. Never quiet (test/pulse-verdicts.test.ts has the v1.2 path).
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -138,13 +139,16 @@ describe('verdicts', () => {
     );
   });
 
-  it('listening and quiet vs activity found', () => {
+  it('receiver online now is never "quiet" without verdicts; activity found is activity', () => {
     const s = status([railFeed()]);
-    const quiet = rail(s);
-    expect(quiet).toMatchObject({ state: 'quiet', window_min: 30 });
-    expect(verdictSentence(quiet, NOW, 'this line')).toMatch(
-      /Listening and quiet: rail radio receiver online \(CSX Alpha road\) and 0 rail messages on this line in the last 30 min/,
+    const online = rail(s);
+    expect(online).toMatchObject({ state: 'unconfirmed', window_min: 30 });
+    const t = verdictSentence(online, NOW, 'this line');
+    expect(t).toMatch(
+      /^Can't confirm quiet: rail radio receiver online now \(CSX Alpha road\) and 0 rail messages on this line in the last 30 min, but this Pulse sends no verdicts \(contract v1\.2\)/,
     );
+    expect(t).toMatch(/0 rail messages means no proof, not a quiet line/);
+    expect(t).not.toMatch(/Listening and quiet|really is quiet/);
     const busy = rail(s, 3);
     expect(busy).toMatchObject({ state: 'activity', messages: 3 });
     expect(verdictSentence(busy, NOW, 'this line')).toMatch(
@@ -159,7 +163,7 @@ describe('verdicts', () => {
         coverage: { lines: [{ railroad: 'CSX', name: 'Charlie Sub', aliases: ['Bravo (CSXT)'] }] },
       }),
     ]);
-    expect(rail(byAlias).state).toBe('quiet');
+    expect(rail(byAlias).state).toBe('unconfirmed');
     // Same names on another railroad: not this track.
     const otherRr = status([
       railFeed({ coverage: { lines: [{ railroad: 'NS', name: 'Alpha District', aliases: [] }] } }),
@@ -182,7 +186,7 @@ describe('verdicts', () => {
     expect(verdictSentence(v, NOW, 'this line (NARN: Bravo Sub; FRA: Alpha Sub)')).toMatch(
       /No rail radio receiver for this line \(NARN: Bravo Sub; FRA: Alpha Sub\): Pulse's rail radio channels cover CN Delta Subdivision.*means no coverage/,
     );
-    // Pulse's own rail/activity lookup naming the channel also counts as coverage.
+    // Pulse's own rail/activity lookup naming the channel ties it to the point (still unproven).
     expect(
       assess('rail_radio', s, {
         messages: 0,
@@ -190,7 +194,7 @@ describe('verdicts', () => {
         tracks: TRACK,
         pulseChannels: ['CSX Alpha road'],
       }).state,
-    ).toBe('quiet');
+    ).toBe('unconfirmed');
   });
 
   it('EOT receiver without a location: packets cannot be tied to the place', () => {
@@ -224,7 +228,7 @@ describe('verdicts', () => {
       state: 'no_receiver',
       reason: 'never_reported',
     });
-    expect(assess('public_safety', s, { messages: 0, window_min: 60 }).state).toBe('quiet');
+    expect(assess('public_safety', s, { messages: 0, window_min: 60 }).state).toBe('unconfirmed');
   });
 });
 
@@ -263,10 +267,10 @@ describe('verdicts are tied to the point', () => {
 
   it('EOT: the receiver Pulse lists for this point decides (by name or feed id)', () => {
     const s = status([eotFeed()], { eot: 'listening' });
-    expect(eot(s, 0, [EOT]).state).toBe('quiet');
-    expect(eot(s, 0, ['EOT_HOT']).state).toBe('quiet');
+    expect(eot(s, 0, [EOT]).state).toBe('unconfirmed');
+    expect(eot(s, 0, ['EOT_HOT']).state).toBe('unconfirmed');
     expect(eot(s, 2, [EOT])).toMatchObject({ state: 'activity', messages: 2 });
-    // Only a listed receiver that is offline: offline, never quiet.
+    // Only a listed receiver that is offline: offline.
     const off = status([
       eotFeed({ receiver: { state: 'offline', last_seen_at: '2026-11-14T09:00:00Z' } }),
     ]);
@@ -318,7 +322,7 @@ describe('verdicts are tied to the point', () => {
     expect(
       assess('rail_radio', summaryOnly, { messages: 0, window_min: 30, tracks: [] }),
     ).toMatchObject({ state: 'no_receiver', reason: 'no_line' });
-    // A channel Pulse's lookup names for the point still counts without a line.
+    // A channel Pulse's lookup names for the point still ties it there without a line.
     expect(
       assess('rail_radio', s, {
         messages: 0,
@@ -326,7 +330,7 @@ describe('verdicts are tied to the point', () => {
         tracks: [],
         pulseChannels: ['CSX Alpha road'],
       }).state,
-    ).toBe('quiet');
+    ).toBe('unconfirmed');
   });
 
   it("covered:false from Pulse's rail/activity is never quiet", () => {
@@ -353,7 +357,7 @@ describe('verdicts are tied to the point', () => {
         tracks: TRACK,
         pulseCovered: true,
       }).state,
-    ).toBe('quiet');
+    ).toBe('unconfirmed');
   });
 
   it('rail voice: a feed Pulse did not list for the point was not searched, so never quiet', () => {
@@ -391,7 +395,7 @@ describe('verdicts are tied to the point', () => {
         tracks: TRACK,
         pulseChannels: ['CN Zulu road'],
       }),
-    ).toMatchObject({ state: 'quiet', feeds: [{ feed_id: 'cn_zulu_road' }] });
+    ).toMatchObject({ state: 'unconfirmed', feeds: [{ feed_id: 'cn_zulu_road' }] });
     const off = status([
       railFeed({ receiver: { state: 'offline', last_seen_at: '2026-11-14T09:00:00Z' } }),
     ]);
@@ -407,7 +411,7 @@ describe('verdicts are tied to the point', () => {
         pulseChannels: [],
       }),
     ).toMatchObject({ state: 'no_receiver', reason: 'not_searched', feeds: [] });
-    // The listed feed decides: online is quiet, and activity names only listed feeds.
+    // The listed feed decides: online now (unproven), and activity names only listed feeds.
     expect(
       assess('rail_radio', s, {
         messages: 0,
@@ -415,7 +419,7 @@ describe('verdicts are tied to the point', () => {
         tracks: TRACK,
         pulseChannels: ['CSX Alpha road'],
       }).state,
-    ).toBe('quiet');
+    ).toBe('unconfirmed');
     expect(
       assess('rail_radio', s, { messages: 2, window_min: 30, tracks: TRACK, pulseChannels: [] }),
     ).toMatchObject({ state: 'activity', messages: 2, feeds: [] });
