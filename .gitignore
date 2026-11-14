@@ -1,0 +1,21 @@
+# dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# secrets: never commit
+.env
+.env.*
+!.env.example
+deploy/secrets/*
+!deploy/secrets/README.md
+*.token
+*.pem
+
+# runtime state
+data/*.sqlite
+data/*.sqlite-*
+data/backups/
+data/raw/
+var/
+*.log
