@@ -338,6 +338,33 @@ describe('OA-4, OA-5 and OA-6 over HTTP', () => {
     expect(first429).toBe(REGISTER_GLOBAL_PER_HOUR);
   });
 
+  it('OA-6: the global budgets survive limiter key churn (review: LRU eviction reset them)', async () => {
+    // Both budgets are spent by the two tests above. The review then sent 50,200 /healthz
+    // requests from distinct /64s, which pushed the budget keys out of the 50k-key LRU. Same
+    // keys (http:all:<client>), sent straight to the gateway's limiter.
+    for (let i = 0; i < 50_200; i++)
+      t.gw.limiter.hit(
+        `http:all:2001:db8:${(i >> 16).toString(16)}:${(i & 0xffff).toString(16)}::/64`,
+        1200,
+        60_000,
+      );
+    const token = await fetch(`${t.origin}/oauth/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'cf-connecting-ip': '198.51.100.251',
+      },
+      body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLAUDE_CIMD_URL }),
+    });
+    expect(token.status).toBe(429);
+    const reg = await fetch(`${t.origin}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.251' },
+      body: JSON.stringify({ redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }),
+    });
+    expect(reg.status).toBe(429);
+  });
+
   it('bp-2/OA-6: IPv6 clients are limited per /64, not per address', async () => {
     let first429 = -1;
     for (let i = 0; i < 25; i++) {
@@ -430,6 +457,24 @@ describe('bp-2: rate-limiter memory is bounded', () => {
     expect(rl.size).toBe(100);
     expect(rl.peek('keep', 10, 60_000).remaining).toBeLessThan(10);
     expect(rl.peek('k0', 10, 60_000).remaining).toBe(10); // evicted
+  });
+
+  it('global budget keys are never evicted by per-client key churn', () => {
+    const rl = new RateLimiter(Date.now, { maxKeys: 100 });
+    for (let i = 0; i < 5; i++) rl.hit('budget:global', 5, 60_000, { global: true });
+    rl.record('other:global', 60_000, { global: true });
+    expect(rl.peek('budget:global', 5, 60_000).ok).toBe(false);
+    for (let i = 0; i < 10_000; i++) rl.hit(`k${i}`, 10, 60_000);
+    expect(rl.peek('budget:global', 5, 60_000).ok).toBe(false); // still spent
+    expect(rl.peek('other:global', 5, 60_000).remaining).toBe(4);
+    expect(rl.size).toBe(102); // 100 per-client keys (capped) + the 2 budgets
+    // Budgets still expire with their window like any other key.
+    const now = { t: 1_800_000_000_000 };
+    const r2 = new RateLimiter(() => now.t, { sweepEveryMs: 1000 });
+    r2.hit('b', 1, 60_000, { global: true });
+    now.t += 61_000;
+    expect(r2.peek('b', 1, 60_000).ok).toBe(true);
+    expect(r2.size).toBe(0);
   });
 
   it('peek does not create keys; limits still hold', () => {

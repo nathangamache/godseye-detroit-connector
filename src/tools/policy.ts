@@ -151,7 +151,8 @@ export class ToolPolicy {
       if (!r.ok)
         return { ok: false, bucket: s.bucket, retryAfterS: Math.ceil(r.retryAfterMs / 1000) };
     }
-    for (const s of specs) this.limiter.record(key(s), s.windowMs);
+    // Tool quotas are global budgets (shared by every grant): never evicted by key churn.
+    for (const s of specs) this.limiter.record(key(s), s.windowMs, { global: true });
     return { ok: true };
   }
 }

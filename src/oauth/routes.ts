@@ -123,8 +123,9 @@ export function createOAuthRoutes(d: OAuthDeps) {
         return oauthError(res, 429, 'slow_down', 'too many failed token requests; retry later');
       }
       res.on('finish', () => {
+        // A global budget: kept out of the per-client LRU, so key churn can't reset it.
         if (res.statusCode >= 400 && res.statusCode !== 429)
-          ctx.limiter.record(TOKEN_FAIL_KEY, TOKEN_FAIL_WINDOW_MS);
+          ctx.limiter.record(TOKEN_FAIL_KEY, TOKEN_FAIL_WINDOW_MS, { global: true });
       });
       next();
     };
@@ -244,7 +245,9 @@ export function createOAuthRoutes(d: OAuthDeps) {
       '/oauth/register',
       rateLimit(ctx.limiter, 'register', 20, 3_600_000, ip),
       // ...and a global ceiling: registrations are unauthenticated writes.
-      rateLimit(ctx.limiter, 'register-global', REGISTER_GLOBAL_PER_HOUR, 3_600_000, () => 'all'),
+      rateLimit(ctx.limiter, 'register-global', REGISTER_GLOBAL_PER_HOUR, 3_600_000, () => 'all', {
+        global: true,
+      }),
       json,
       (req, res) => {
         res.set('Cache-Control', 'no-store');

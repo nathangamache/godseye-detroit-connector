@@ -2,7 +2,7 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { isIP } from 'node:net';
 import { clientIp, rateKeyIp } from '../util/net.js';
-import type { RateLimiter } from '../util/ratelimit.js';
+import type { HitOptions, RateLimiter } from '../util/ratelimit.js';
 
 export interface SecurityConfig {
   allowedHosts: string[];
@@ -113,11 +113,12 @@ export function rateLimit(
   limit: number,
   windowMs: number,
   keyFn: (req: Request) => string,
+  opts: HitOptions = {},
 ): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const k = keyFn(req);
     // Client addresses are keyed per /64 for IPv6 (see rateKeyIp).
-    const r = limiter.hit(`http:${name}:${isIP(k) ? rateKeyIp(k) : k}`, limit, windowMs);
+    const r = limiter.hit(`http:${name}:${isIP(k) ? rateKeyIp(k) : k}`, limit, windowMs, opts);
     if (!r.ok) {
       res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
       res.status(429).json({ error: 'rate_limited', error_description: 'Too many requests' });

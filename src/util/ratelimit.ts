@@ -4,13 +4,23 @@
  *
  * Memory is bounded (review bp-2): every key remembers its own window and is dropped as
  * soon as its newest hit is older than that window (not after a fixed day), and the number
- * of keys is capped (least recently hit evicted first). Callers key IPv6 clients by /64
- * (util/net.ts rateKeyIp) so address rotation inside one prefix does not mint new keys.
+ * of per-client keys is capped (least recently hit evicted first). Callers key IPv6 clients
+ * by /64 (util/net.ts rateKeyIp) so address rotation inside one prefix does not mint new keys.
+ *
+ * Global budgets (one key shared by every client: failed token requests, registrations, tool
+ * quotas) live in a separate map that the cap never touches: otherwise churning through
+ * per-client keys would evict them and reset the budget (review OA-6). They still expire with
+ * their window. Mark them with { global: true }.
  */
 export interface RateResult {
   ok: boolean;
   retryAfterMs: number;
   remaining: number;
+}
+
+export interface HitOptions {
+  /** A global budget (same key for every client): never evicted by the per-client key cap. */
+  global?: boolean;
 }
 
 interface Entry {
@@ -19,14 +29,21 @@ interface Entry {
 }
 
 export interface RateLimiterOptions {
-  /** Maximum number of tracked keys (default 50 000). */
+  /** Maximum number of tracked per-client keys (default 50 000). */
   maxKeys?: number;
   /** How often expired keys are swept (default 30 s). */
   sweepEveryMs?: number;
 }
 
+/**
+ * Global keys are a fixed set named in code; more than this means a per-client key was
+ * marked global by mistake, which would make memory unbounded again.
+ */
+export const MAX_GLOBAL_KEYS = 256;
+
 export class RateLimiter {
   private entries = new Map<string, Entry>();
+  private globals = new Map<string, Entry>();
   private lastSweep: number;
   private readonly maxKeys: number;
   private readonly sweepEveryMs: number;
@@ -40,16 +57,16 @@ export class RateLimiter {
     this.lastSweep = now();
   }
 
-  /** Number of tracked keys (tests, metrics). */
+  /** Number of tracked keys, global budgets included (tests, metrics). */
   get size(): number {
-    return this.entries.size;
+    return this.entries.size + this.globals.size;
   }
 
   /** Records a hit if under the limit. */
-  hit(key: string, limit: number, windowMs: number): RateResult {
+  hit(key: string, limit: number, windowMs: number, opts: HitOptions = {}): RateResult {
     const r = this.peek(key, limit, windowMs);
     if (r.ok) {
-      this.push(key, windowMs);
+      this.push(key, windowMs, opts.global === true);
       r.remaining -= 1;
     }
     return r;
@@ -59,7 +76,7 @@ export class RateLimiter {
   peek(key: string, limit: number, windowMs: number): RateResult {
     const t = this.now();
     this.sweep(t);
-    const e = this.entries.get(key);
+    const e = this.globals.get(key) ?? this.entries.get(key);
     if (!e) return { ok: limit > 0, retryAfterMs: limit > 0 ? 0 : windowMs, remaining: limit };
     e.windowMs = Math.max(e.windowMs, windowMs);
     const arr = e.hits;
@@ -71,17 +88,37 @@ export class RateLimiter {
   }
 
   /** Records a hit unconditionally (used after a multi-bucket check passed). */
-  record(key: string, windowMs: number): void {
+  record(key: string, windowMs: number, opts: HitOptions = {}): void {
     this.sweep(this.now());
-    this.push(key, windowMs);
+    this.push(key, windowMs, opts.global === true);
   }
 
   reset(key?: string): void {
-    if (key) this.entries.delete(key);
-    else this.entries.clear();
+    if (key) {
+      this.entries.delete(key);
+      this.globals.delete(key);
+    } else {
+      this.entries.clear();
+      this.globals.clear();
+    }
   }
 
-  private push(key: string, windowMs: number): void {
+  private push(key: string, windowMs: number, global: boolean): void {
+    let g = this.globals.get(key);
+    if (g || global) {
+      if (!g) {
+        if (this.globals.size >= MAX_GLOBAL_KEYS)
+          throw new Error(
+            `rate limiter: more than ${MAX_GLOBAL_KEYS} global keys (a per-client key marked global?)`,
+          );
+        g = this.entries.get(key) ?? { hits: [], windowMs };
+        this.entries.delete(key);
+        this.globals.set(key, g);
+      }
+      g.windowMs = Math.max(g.windowMs, windowMs);
+      g.hits.push(this.now());
+      return;
+    }
     let e = this.entries.get(key);
     if (e) {
       // Most recently used last: Map iteration order doubles as the LRU list.
@@ -101,10 +138,12 @@ export class RateLimiter {
   private sweep(t: number): void {
     if (t - this.lastSweep < this.sweepEveryMs) return;
     this.lastSweep = t;
-    for (const [k, e] of this.entries) {
-      const arr = e.hits;
-      while (arr.length && arr[0]! <= t - e.windowMs) arr.shift();
-      if (!arr.length) this.entries.delete(k);
+    for (const map of [this.entries, this.globals]) {
+      for (const [k, e] of map) {
+        const arr = e.hits;
+        while (arr.length && arr[0]! <= t - e.windowMs) arr.shift();
+        if (!arr.length) map.delete(k);
+      }
     }
   }
 }
