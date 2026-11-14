@@ -56,18 +56,156 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
   const script = path.join(REPO_ROOT, 'deploy', 'host-firewall', 'godseye-firewall.sh');
   const fake = path.join(REPO_ROOT, 'test', 'fixtures', 'fake-iptables.mjs');
 
-  function run(state: string, arg: string) {
-    return spawnSync('sh', [script, arg], {
+  function run(state: string, args: string | string[], extra: Record<string, string> = {}) {
+    return spawnSync('sh', [script, ...(Array.isArray(args) ? args : [args])], {
       env: {
         PATH: process.env.PATH,
         IPTABLES: `${process.execPath} ${fake}`,
         FAKE_IPT_STATE: state,
+        ...extra,
       },
       encoding: 'utf8',
     });
   }
   const load = (f: string) =>
     JSON.parse(readFileSync(f, 'utf8')) as Record<string, { rules: string[] }>;
+  /** The fake's own counters in the state file (__gaps, __calls). */
+  const counter = (st: object, k: '__gaps' | '__calls') =>
+    (st as Record<string, number | undefined>)[k];
+  const SUBNETS = ['172.30.77.0/24', '172.30.78.0/24', '172.30.79.0/24', '172.30.76.0/24'];
+  const dockerOnly = () =>
+    JSON.stringify({
+      FORWARD: { policy: 'DROP', rules: ['-j DOCKER-USER', '-j DOCKER-FORWARD'] },
+      INPUT: { policy: 'ACCEPT', rules: [] },
+      OUTPUT: { policy: 'ACCEPT', rules: [] },
+      'DOCKER-USER': { rules: ['-j RETURN'] },
+    });
+  /** What tailscaled does when it (re)starts: its jumps go back to the top. */
+  function tailscaledRestart(state: string) {
+    const st = load(state);
+    st['ts-forward'] = { rules: ['-o tailscale0 -j ACCEPT'] };
+    st['ts-input'] = { rules: ['-p udp -m udp --dport 41641 -j ACCEPT'] };
+    for (const [c, j] of [
+      ['FORWARD', '-j ts-forward'],
+      ['INPUT', '-j ts-input'],
+    ] as const) {
+      st[c]!.rules = st[c]!.rules.filter((r) => r !== j);
+      st[c]!.rules.unshift(j);
+    }
+    writeFileSync(state, JSON.stringify(st));
+  }
+  /** Rules that must never be missing while the script reorders. */
+  const noGaps = {
+    FAKE_IPT_REQUIRE: JSON.stringify([
+      ['FORWARD', '-j DOCKER-USER'],
+      ...SUBNETS.map((s) => ['INPUT', `-s ${s} -j GODSEYE-HOST`]),
+      ...SUBNETS.map((s) => ['DOCKER-USER', `-s ${s} -j GODSEYE-EGRESS`]),
+    ]),
+  };
+
+  it('ensure puts the godseye rules back on top after tailscaled re-inserts its jumps', () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    expect(run(state, 'apply').status).toBe(0);
+    const applied = load(state);
+    tailscaledRestart(state);
+    expect(load(state).FORWARD!.rules[0]).toBe('-j ts-forward');
+    const r = run(state, 'ensure', noGaps);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/top of FORWARD/);
+    const e = load(state);
+    // Each rule was inserted before its old copy went: never a moment without it.
+    expect(counter(e, '__gaps')).toBeUndefined();
+    expect(e.FORWARD!.rules).toEqual(['-j DOCKER-USER', '-j ts-forward', '-j DOCKER-FORWARD']);
+    expect(e.INPUT!.rules).toEqual([
+      ...SUBNETS.map((s) => `-s ${s} -j GODSEYE-HOST`),
+      '-j ts-input',
+    ]);
+    expect(e['GODSEYE-EGRESS']).toEqual(applied['GODSEYE-EGRESS']);
+    expect(e['DOCKER-USER']).toEqual(applied['DOCKER-USER']);
+    // In order already: a no-op, and silent (it runs from a timer).
+    const again = run(state, 'ensure', noGaps);
+    expect(again.status).toBe(0);
+    expect(again.stderr).toBe('');
+    expect(load(state)).toEqual(e);
+  });
+
+  it('ensure SECS keeps watching and catches jumps tailscaled re-inserts a moment later', () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    expect(run(state, 'apply').status).toBe(0);
+    const applied = load(state);
+    // How many iptables calls one full check makes (nothing to fix)...
+    expect(run(state, 'ensure', { FAKE_IPT_TS_AT: '1000000' }).status).toBe(0);
+    const perPass = counter(load(state), '__calls')!;
+    const st = load(state);
+    delete st.__calls;
+    writeFileSync(state, JSON.stringify(st));
+    // ...so tailscaled can re-insert its jumps on the first call after it, while the watch runs.
+    const r = run(state, ['ensure', '3'], { ...noGaps, FAKE_IPT_TS_AT: String(perPass + 1) });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/top of FORWARD/);
+    const e = load(state);
+    expect(counter(e, '__calls')).toBeGreaterThan(perPass + 1);
+    expect(counter(e, '__gaps')).toBeUndefined();
+    expect(e.FORWARD!.rules).toEqual(['-j DOCKER-USER', '-j ts-forward', '-j DOCKER-FORWARD']);
+    expect(e.INPUT!.rules).toEqual([
+      ...SUBNETS.map((s) => `-s ${s} -j GODSEYE-HOST`),
+      '-j ts-input',
+    ]);
+    expect(e['GODSEYE-EGRESS']).toEqual(applied['GODSEYE-EGRESS']);
+  });
+
+  it('ensure rebuilds missing or altered chains, and does nothing while Docker is down', () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    expect(run(state, 'apply').status).toBe(0);
+    const applied = load(state);
+    const st = load(state);
+    st['GODSEYE-EGRESS']!.rules = st['GODSEYE-EGRESS']!.rules.filter(
+      (r) => r !== '-d 100.64.0.0/10 -j DROP',
+    );
+    st.INPUT!.rules = st.INPUT!.rules.filter((r) => r !== `-s ${SUBNETS[2]} -j GODSEYE-HOST`);
+    writeFileSync(state, JSON.stringify(st));
+    const r = run(state, 'ensure');
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/applying them again/);
+    expect(load(state)).toEqual(applied);
+    // Removed on purpose (godseye-firewall.service stopped): ensure does not bring them back.
+    expect(run(state, 'remove').status).toBe(0);
+    const removed = load(state);
+    const off = run(state, 'ensure');
+    expect(off.status).toBe(0);
+    expect(off.stderr).toMatch(/not applied/);
+    expect(load(state)).toEqual(removed);
+    // Docker stopped (no DOCKER-USER chain): nothing to protect, not a failure.
+    writeFileSync(state, JSON.stringify({ FORWARD: { rules: [] }, INPUT: { rules: [] } }));
+    const down = run(state, 'ensure');
+    expect(down.status).toBe(0);
+    expect(down.stderr).toMatch(/Docker is not running/);
+  });
+
+  it('apply never leaves FORWARD without its DOCKER-USER jump while reordering', () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(
+      state,
+      JSON.stringify({
+        FORWARD: {
+          policy: 'DROP',
+          rules: ['-j ts-forward', '-j DOCKER-USER', '-j DOCKER-FORWARD'],
+        },
+        INPUT: { policy: 'ACCEPT', rules: ['-j ts-input'] },
+        'DOCKER-USER': { rules: ['-j RETURN'] },
+      }),
+    );
+    const r = run(state, 'apply', {
+      FAKE_IPT_REQUIRE: JSON.stringify([['FORWARD', '-j DOCKER-USER']]),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const a = load(state);
+    expect(a.FORWARD!.rules).toEqual(['-j DOCKER-USER', '-j ts-forward', '-j DOCKER-FORWARD']);
+    expect(counter(a, '__gaps')).toBeUndefined();
+  });
 
   it('drops LAN, tailnet and host traffic from the godseye subnets and is idempotent', () => {
     const state = path.join(tmp(), 'ipt.json');
@@ -130,11 +268,27 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(r.stderr).toMatch(/start docker first/);
   });
 
-  it('the systemd unit re-applies after Docker and Tailscale', () => {
+  it('the systemd units re-apply after Docker, and re-check on every tailscaled (re)start', () => {
     const unit = read('deploy/host-firewall/godseye-firewall.service');
     expect(unit).toMatch(/After=docker\.service tailscaled\.service/);
     expect(unit).toMatch(/PartOf=docker\.service/);
     expect(unit).toMatch(/WantedBy=docker\.service/);
+    // Its ExecStop removes the rules: it must not stop with tailscaled.
+    expect(unit).not.toMatch(/^PartOf=.*tailscaled/m);
+    const check = read('deploy/host-firewall/godseye-firewall-check.service');
+    expect(check).toMatch(/^After=.*tailscaled\.service/m);
+    // Restarted with tailscaled; stopped (first, by After=) when the rules are removed.
+    expect(check).toMatch(/^PartOf=tailscaled\.service godseye-firewall\.service$/m);
+    expect(check).toMatch(/^After=.*godseye-firewall\.service/m);
+    expect(check).toMatch(/^WantedBy=tailscaled\.service$/m);
+    expect(check).toMatch(/^Type=oneshot$/m);
+    expect(check).not.toMatch(/RemainAfterExit=yes/); // must be able to run again
+    expect(check).toMatch(/^ExecStart=\/usr\/local\/sbin\/godseye-firewall\.sh ensure \d+$/m);
+    expect(check).not.toMatch(/^ExecStop/m);
+    const timer = read('deploy/host-firewall/godseye-firewall-check.timer');
+    expect(timer).toMatch(/^Unit=godseye-firewall-check\.service$/m);
+    expect(timer).toMatch(/^OnUnitInactiveSec=\d+s$/m);
+    expect(timer).toMatch(/^WantedBy=timers\.target$/m);
   });
 });
 

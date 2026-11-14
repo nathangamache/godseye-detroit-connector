@@ -39,9 +39,15 @@ For traffic **from** any of those subnets, `deploy/host-firewall/godseye-firewal
 2. `INPUT` (traffic to the host itself, which `DOCKER-USER` never sees) jumps to
    `GODSEYE-HOST`, which returns replies and **drops everything else**: no new connection
    from a container to any host address, on any port.
-3. Puts the `FORWARD -j DOCKER-USER` jump back at the top if `tailscaled` inserted its own
-   `ts-forward` jump above it. `ts-forward` accepts everything routed out of `tailscale0`, so
-   with the wrong order container traffic to the tailnet would never reach `DOCKER-USER`.
+3. Keeps the `FORWARD -j DOCKER-USER` jump first, and its own `INPUT` jumps ahead of
+   `ts-input`. `tailscaled` inserts `-j ts-forward` at the top of `FORWARD` (and `-j ts-input`
+   at the top of `INPUT`) **every time it starts**. `ts-forward` accepts everything routed out
+   of `tailscale0`, so with the wrong order container traffic to the tailnet would never reach
+   `DOCKER-USER`. `godseye-firewall.sh ensure` moves the jumps back; it runs from
+   `godseye-firewall-check.service` on every `tailscaled` start or restart (watching for 60 s,
+   since `tailscaled` adds its jumps a moment after it reports started) and from its timer
+   every 30 s. Each move inserts the rule at the top **before** deleting the old copy, so the
+   chain is never without it.
 
 **DNS needs no exception.** The compose file sets `dns: [1.1.1.1, 9.9.9.9]` and
 `dns_search: ["."]` for every service, so Docker's embedded resolver forwards to public
@@ -80,24 +86,40 @@ iptables -A GODSEYE-HOST -j DROP
 
 iptables -I DOCKER-USER 1 -s "$S" -j GODSEYE-EGRESS
 iptables -I INPUT 1 -s "$S" -j GODSEYE-HOST
+# and FORWARD's "-j DOCKER-USER" moved to rule 1 (insert first, then delete the old copy)
 ```
 
-The script is idempotent (re-running flushes and rebuilds the two chains and never
-duplicates a jump) and `remove` takes everything out again. `test/deploy.test.ts` runs it
-against a fake `iptables` to check exactly this.
+The script is idempotent (re-running rebuilds the two chains and never duplicates a jump),
+`ensure` changes nothing unless a chain is missing or altered (then it applies again) or a jump
+is out of place (then it moves it), and `remove` takes everything out again. All iptables
+calls wait for the xtables lock (`-w 5`), which dockerd and tailscaled also take.
+`test/deploy.test.ts` runs it against a fake `iptables` to check exactly this, including a
+simulated `tailscaled` restart and that no reorder ever leaves a chain without our jump.
 
 ## Install and persist
 
 `iptables-save`/`netfilter-persistent` would also save Docker's and Tailscale's own chains and
-fight them on restore, so use the unit instead: it re-applies the rules after Docker (and
-Tailscale) start, and whenever Docker restarts.
+fight them on restore, so use the units instead:
+
+* `godseye-firewall.service` applies the rules after Docker (and Tailscale) start, and
+  whenever Docker restarts (`PartOf=docker.service`). Stopping it removes them, which is why
+  it is deliberately **not** tied to `tailscaled`.
+* `godseye-firewall-check.service` runs `ensure 60` on every `tailscaled` start or restart
+  (`WantedBy=`/`PartOf=tailscaled.service`), and `godseye-firewall-check.timer` runs it again
+  30 s after each run, for any other reordering. While watching it only lists three chains
+  every 2 s. It never removes anything and never brings back rules that stopping
+  `godseye-firewall.service` removed (stopping that unit stops this one first).
 
 ```sh
 cd ~/projects/godseye/godseye-detroit-connector
 sudo install -o root -g root -m 0755 deploy/host-firewall/godseye-firewall.sh /usr/local/sbin/
-sudo install -o root -g root -m 0644 deploy/host-firewall/godseye-firewall.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 deploy/host-firewall/godseye-firewall.service \
+  deploy/host-firewall/godseye-firewall-check.service \
+  deploy/host-firewall/godseye-firewall-check.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now godseye-firewall.service
+sudo systemctl enable godseye-firewall-check.service
+sudo systemctl enable --now godseye-firewall-check.timer
 sudo /usr/local/sbin/godseye-firewall.sh show
 ```
 
@@ -105,9 +127,21 @@ Install the copies under `/usr/local/sbin` and `/etc/systemd/system` (root-owned
 running the script from the repo, so nobody who can write the repo can change what root runs.
 
 After a host reboot or a Docker restart, `systemctl status godseye-firewall` should be
-`active (exited)`. If you restart `tailscaled` alone, run
-`sudo systemctl reload godseye-firewall` so `DOCKER-USER` is first in `FORWARD` again (step 3
-above), then re-run the probes below.
+`active (exited)` and `systemctl list-timers godseye-firewall-check.timer` should show the next
+run. To check the Tailscale case once:
+
+```sh
+sudo systemctl restart tailscaled
+sleep 15
+sudo iptables -S FORWARD | sed -n 2p                     # -A FORWARD -j DOCKER-USER
+journalctl -u godseye-firewall-check -n 5 --no-pager     # "moved ... back to the top of FORWARD"
+```
+
+Between a `tailscaled` start and the check catching up there is a window of about two seconds
+(the watch interval); a reordering by anything else is caught within about 30 s. A stronger
+option is `tailscale up --netfilter-mode=nodivert` (Tailscale then creates its chains but adds
+no jumps, and you add `-j ts-forward`/`-j ts-input` yourself after the godseye rules); it
+changes how the host's own Tailscale firewalling is wired, so it is not the default here.
 
 ## Verify (go-live checklist items)
 

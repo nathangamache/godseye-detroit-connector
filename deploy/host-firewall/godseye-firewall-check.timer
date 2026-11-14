@@ -1,0 +1,14 @@
+# Re-runs godseye-firewall-check.service 30 s after each run ends (so it never overlaps
+# itself), as a safety net for anything that reorders FORWARD or INPUT besides a tailscaled
+# start. Install and enable it with the service (see godseye-firewall-check.service).
+[Unit]
+Description=Re-check the godseye firewall rule order
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30s
+AccuracySec=5s
+Unit=godseye-firewall-check.service
+
+[Install]
+WantedBy=timers.target

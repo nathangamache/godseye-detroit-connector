@@ -1,5 +1,8 @@
 # Applies deploy/host-firewall/godseye-firewall.sh after Docker (and Tailscale) start, and
-# again whenever Docker restarts. Install as root (see docs/host-firewall.md):
+# again whenever Docker restarts. Not PartOf tailscaled: ExecStop removes the rules, which must
+# not happen just because tailscaled restarts. godseye-firewall-check.service/.timer put the
+# rules back ahead of Tailscale's after a tailscaled restart.
+# Install as root (see docs/host-firewall.md):
 #   install -o root -g root -m 0755 deploy/host-firewall/godseye-firewall.sh /usr/local/sbin/
 #   install -o root -g root -m 0644 deploy/host-firewall/godseye-firewall.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now godseye-firewall.service

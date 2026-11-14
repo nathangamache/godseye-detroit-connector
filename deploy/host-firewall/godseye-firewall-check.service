@@ -1,0 +1,28 @@
+# Keeps the godseye rules ahead of Tailscale's. Whenever tailscaled starts (boot, restart,
+# crash and auto-restart) it re-inserts `-j ts-forward` at the top of FORWARD, which ACCEPTs
+# everything routed out of tailscale0, so container traffic to the tailnet would skip
+# DOCKER-USER until something puts it first again. This unit does that:
+#   * on every tailscaled start (WantedBy=) and restart (PartOf=), watching for 60 s because
+#     tailscaled adds its jumps a moment after it reports started;
+#   * every 30 s from godseye-firewall-check.timer, for any other reordering.
+# `ensure` changes nothing when everything is in place, never removes our rules (unlike
+# godseye-firewall.service's ExecStop, which is why that unit is not PartOf tailscaled) and
+# never brings back rules that unit removed. While watching it only lists three chains every
+# 2 s. Stopping godseye-firewall.service stops this unit first (PartOf=, After=).
+# Install as root next to godseye-firewall.service (see docs/host-firewall.md):
+#   install -o root -g root -m 0644 deploy/host-firewall/godseye-firewall-check.service \
+#     deploy/host-firewall/godseye-firewall-check.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable godseye-firewall-check.service
+#   systemctl enable --now godseye-firewall-check.timer
+[Unit]
+Description=godseye firewall: keep the godseye rules ahead of Tailscale's and Docker's
+After=docker.service tailscaled.service godseye-firewall.service
+PartOf=tailscaled.service godseye-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/godseye-firewall.sh ensure 60
+
+[Install]
+WantedBy=tailscaled.service
