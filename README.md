@@ -21,14 +21,53 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 * Rail context GEV lacks comes from public FRA/NARN datasets bundled here; Pulse plugs in over a
   documented HTTP contract.
 
-## Gateway-native tools (through `run_tool`)
+## Tools
 
-| Tool | Category | What it answers | Data |
+Claude calls the first four directly; every other tool goes through `find_tools` (search or
+list by category) and `run_tool`. A tool whose requirement is missing is hidden or answers with
+the setting to add. Gateway settings live in `deploy/secrets/gateway.env` (`.env.example` lists
+them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
+
+| Tool | Source | What it answers | Key / requirement |
 |---|---|---|---|
-| `nearest_rail` | rail | nearest rail line (owner, every subdivision name) and at-grade crossing | FRA crossing inventory, NARN (bundled) |
-| `crossings_near` | rail | grade crossings in a radius, nearest first | FRA crossing inventory (bundled) |
-| `flights_near` | aviation | aircraft near a point or the phone (`here: true`): callsign, hex, registration, type, altitude, speed, track, distance and bearing from the exact point, data age, position source, military/LADD/PIA flags, FAA registrant type with city and state (government owners by name), a globe link per aircraft | adsb.fi live (adsb.lol fallback); FAA registry copy |
-| `aircraft_lookup` | aviation | one aircraft by ICAO hex or N-number: make/model, year, registrant type and owner under the disclosure rules (never street or ZIP), status and dates, whether it is flying now | local copy of the FAA Releasable Aircraft Database, synced daily |
+| `find_tools` | gateway | search the catalog, or list it by category (no argument needed) | none |
+| `run_tool` | gateway | runs any tool `find_tools` shows, validated against its schema | that tool's own |
+| `where_am_i` | gateway | the phone's latest fix (never history), its age and staleness | a phone posting fixes (OwnTracks or `/locate`, `docs/phone-setup.md`) |
+| `whats_happening_here` | gateway | one summary around a point or the phone: rail, rail radio, incidents, NWS alerts, weather, traffic, road closures within 5 km, border waits near a crossing, air quality, cameras in range | a point or a phone fix; each section needs its tool's requirement and is left out or marked when it can't run |
+| `nearest_rail` | gateway (rail) | nearest line (owner, every FRA/NARN name, track count) plus the nearest crossing of any kind and the nearest at-grade one, labelled | bundled FRA/NARN data (`data/rail`, `npm run rail:build`) |
+| `crossings_near` | gateway (rail) | crossings in a radius: at grade or road over/under the tracks, warning devices, trains/day, FRA vs NARN track counts | bundled FRA/NARN data |
+| `rail_activity_near` | Pulse | rail voice and EOT/HOT traffic near a point, with Pulse's verdict (quiet only on Pulse's proof) | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) with its own SDR receivers |
+| `incidents_near`, `incident_detail`, `search_transcripts`, `feeds_status` | Pulse | scanner incidents, their transcripts, transcript search, feed and receiver status | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) |
+| `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
+| `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (off without) |
+| `local_headlines` | gateway (civic) | recent GDELT headlines for a place or point | none |
+| `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
+| `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
+| `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (off without) |
+| `road_closures` | gateway (roads) | closures, crashes, lane closures and work zones near a point or along a road | none for Detroit permits; `MDOT_RIDE_API_KEY`, `ONTARIO_511_API_KEY`, and `TOMTOM_API_KEY` with `ALLOW_TOMTOM_INCIDENTS=true` add their sources |
+| `geocode_place` | gateway (roads) | coordinates for a place, address or intersection | none; intersections need a self-hosted Overpass (`OVERPASS_URL`, `docs/overpass.md`) |
+| `route_avoiding_closures` | gateway (roads) | a driving route around full closures | none (`VALHALLA_URL`, FOSSGIS by default) |
+| `mdot_camera_link` | gateway (roads) | a Mi Drive map link with the camera layer (nothing fetched) | none |
+| `border_wait_times` | gateway (roads) | waits at the Ambassador Bridge, tunnel, Gordie Howe and Blue Water bridges | none |
+| `flights_near` | gateway (aviation) | aircraft near a point or the phone, with registry and LADD/PIA flags | none (adsb.fi, personal non-commercial use; adsb.lol fallback, `ADSBLOL_DAILY_MAX`) |
+| `aircraft_lookup` | gateway (aviation) | one aircraft by hex or N-number from the FAA registry | the daily FAA registry copy (`AIRCRAFT_REGISTRY_SYNC`, or `scripts/aircraft-registry-sync.ts`) |
+| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind | GEV running (`GEV_URL`); none |
+| `get_earthquakes`, `get_cyclones`, `get_fire_perimeters` | GEV | earthquakes, tropical cyclones, wildfire perimeters | GEV; none |
+| `get_active_fires` | GEV | satellite fire detections (NASA FIRMS) | `FIRMS_MAP_KEY` in GEV |
+| `get_traffic_flow` | GEV | TomTom speed vs free flow in an area | `TOMTOM_API_KEY` in GEV (quota 20/h, 150/d) |
+| `plan_route`, `get_bike_share`, `get_transit_vehicles` | GEV | OSRM route, GBFS docks, GTFS-RT vehicles (no Michigan feed) | GEV; none |
+| `find_cctv_cameras`, `get_cctv_snapshot` | GEV | public traffic cameras and a current frame (no Street View fallback) | GEV; none (`ONTARIO_511_API_KEY` in GEV adds Windsor-side cameras) |
+| `vessels_in_area`, `find_vessel`, `get_vessel_track` | GEV | live AIS ships | `AISSTREAM_API_KEY` in GEV |
+| `next_satellite_pass`, `satellites_overhead`, `get_recent_launches`, `get_recent_imagery` | GEV | satellite passes, launches, recent imagery | GEV; none |
+| `get_regional_brief`, `find_radio_stations` | GEV | GDELT regional news; radio stations and streams | GEV; none |
+| `get_map_features`, `find_military_installations` | GEV | OpenStreetMap features and military sites | a self-hosted Overpass (`OVERPASS_UPSTREAMS` in GEV, `docs/overpass.md`) |
+| `get_terrain_height`, `find_infrastructure`, `find_submarine_cables` | GEV | terrain height, infrastructure, submarine cables | GEV; none |
+| `show_in_gods_eye_view` | GEV | a globe link for a place or view (tailnet only) | GEV; the UI origin on the tailnet |
+| `aircraft_in_area`, `find_aircraft`, `get_aircraft_track`, `get_aircraft_info`, `situation_brief`, `military_awareness` | GEV | OpenSky-based aircraft tools and briefs | off: `ALLOW_OPENSKY_TOOLS=true` and a written OpenSky licence |
+| `find_alpr_cameras` | GEV | OpenStreetMap-mapped licence plate readers | off: `ALLOW_ALPR_TOOLS=true` |
+
+Never exposed: `panel_request`, `search_places`, `places_nearby` (Google content) and
+`get_hud_caption` (metered); see Tool policy.
 
 `flights_near` never sends the exact position: the query centre is snapped to a 0.05° grid and
 the radius enlarged by 3 nm, then everything is measured here. Owner rules, LADD withholding and
@@ -201,11 +240,13 @@ src/            gateway (TypeScript, ESM)
   mcp/          the four MCP tools                       tools/      registry, search, policy, post-processing
   gev/          child supervisor, relay, TCP transport   rail/       NARN/FRA spatial index + tools
   pulse/        Pulse HTTP client + tools                oauth/      authorization server, CIMD, DCR, tokens
-  extra/civic/  Detroit 911 calls, SMART buses, GDELT headlines (gateway-native tools)
   auth/         tailscale, step-up TOTP, dev login, CSRF location/   device tokens, ingest, /locate
   ui/           GEV reverse proxy, /pulse                http/       headers, Host/Origin checks, rate limits
-  extra/aviation/  flights_near, aircraft_lookup, FAA registry sync
-  extra/weather/  NWS alerts and forecast, water levels, air quality (gateway-native tools)
+  extra/        gateway-native tool families, each with its own block in config.ts:
+    aviation/   flights_near, aircraft_lookup, FAA registry sync
+    weather/    NWS alerts and forecast, water levels, air quality
+    roads/      road closures, geocoding, closure-aware routes, Mi Drive links, border waits
+    civic/      Detroit 911 calls, SMART buses, GDELT headlines
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
 web/            /locate PWA and shared CSS
@@ -215,8 +256,9 @@ scripts/        devices, stepup, hash-password, backup-db, revoke-all, smoke-liv
 deploy/         docker (image, compose, Tailscale sidecar), host-firewall (root), systemd units,
                 GEV notes, secrets README, overpass (self-hosted Overpass + weekly refresh)
 docs/           cloudflare-setup, tailscale-setup, host-firewall, phone-setup, operations, security,
-                pulse-api-contract
-test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
+                pulse-api-contract, overpass
+test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse, mocked HTTP only:
+                test/setup-offline.ts refuses anything but loopback)
 ```
 
 ## Docs
