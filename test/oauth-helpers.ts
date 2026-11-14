@@ -15,12 +15,17 @@ import { MOCK_GEV } from './helpers.js';
 
 export const CLAUDE_CIMD_URL = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 export const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
+export const OWNER_TS_LOGIN = 'owner@example.com';
 /** Mirrors the fields of claude.ai's published client metadata document (fetched 2026-11-13). */
 export const CLAUDE_CIMD_DOC = {
   client_id: CLAUDE_CIMD_URL,
   client_name: 'Claude',
   redirect_uris: [CLAUDE_CALLBACK],
-  grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+  grant_types: [
+    'authorization_code',
+    'refresh_token',
+    'urn:ietf:params:oauth:grant-type:jwt-bearer',
+  ],
   token_endpoint_auth_method: 'none',
 };
 export const fakeCimdFetch: CimdFetcher = async (url) => {
@@ -63,16 +68,29 @@ export function pkce() {
 
 export interface TestGateway {
   gw: Gateway;
+  /** Public listener (tunnel side). */
   origin: string;
+  /** Private listener (tailnet side). */
+  privateOrigin: string;
+  provider: 'tailscale' | 'password';
   password: string;
   totpSecret: string;
   dir: string;
+  /** Headers that authenticate the owner on the private listener (plus the jar's cookies). */
+  auth(jar: Jar): Record<string, string>;
   close(): Promise<void>;
 }
 
-export async function startPasswordGateway(env: Record<string, string> = {}, routeOpts: RouteOptions = {}, logger: Logger = nullLogger): Promise<TestGateway> {
+async function start(
+  provider: 'tailscale' | 'password',
+  env: Record<string, string>,
+  routeOpts: RouteOptions,
+  logger: Logger,
+): Promise<TestGateway> {
   const port = await freePort();
+  const privatePort = await freePort();
   const origin = `http://127.0.0.1:${port}`;
+  const privateOrigin = `http://127.0.0.1:${privatePort}`;
   const dir = mkdtempSync(path.join(tmpdir(), 'gw-oauth-'));
   const password = 'correct horse battery staple';
   const totpSecret = generateTotpSecret();
@@ -80,9 +98,12 @@ export async function startPasswordGateway(env: Record<string, string> = {}, rou
     GATEWAY_MODE: 'test',
     HOST: '127.0.0.1',
     PORT: String(port),
+    PRIVATE_PORT: String(privatePort),
     PUBLIC_ORIGIN: origin,
+    PRIVATE_ORIGIN: privateOrigin,
     DATA_DIR: dir,
-    LOGIN_PROVIDER: 'password',
+    LOGIN_PROVIDER: provider,
+    ...(provider === 'tailscale' ? { OWNER_TAILSCALE_LOGIN: OWNER_TS_LOGIN } : {}),
     GATEWAY_PASSWORD_HASH: await hashPassword(password, 10),
     GATEWAY_TOTP_SECRET: totpSecret,
     PULSE_URL: 'http://127.0.0.1:9',
@@ -90,15 +111,28 @@ export async function startPasswordGateway(env: Record<string, string> = {}, rou
   });
   const gw = await startGateway(config, {
     logger,
-    gevChild: childSpawnSpec({ gevRoot: REPO_ROOT, gevUrl: 'http://127.0.0.1:7701', wrapper: MOCK_GEV }),
-    mount: installAllRoutes({ cimdFetch: fakeCimdFetch, ...routeOpts }),
+    gevChild: childSpawnSpec({
+      gevRoot: REPO_ROOT,
+      gevUrl: 'http://127.0.0.1:7701',
+      wrapper: MOCK_GEV,
+    }),
+    routes: installAllRoutes({ cimdFetch: fakeCimdFetch, ...routeOpts }),
   });
   return {
     gw,
     origin,
+    privateOrigin,
+    provider,
     password,
     totpSecret,
     dir,
+    auth: (jar) => ({
+      cookie: jar.header(),
+      // The test process connects from 127.0.0.1, standing in for tailscale serve.
+      ...(provider === 'tailscale'
+        ? { 'tailscale-user-login': OWNER_TS_LOGIN, 'tailscale-user-name': 'Owner' }
+        : {}),
+    }),
     async close() {
       await gw.close();
       rmSync(dir, { recursive: true, force: true });
@@ -106,55 +140,113 @@ export async function startPasswordGateway(env: Record<string, string> = {}, rou
   };
 }
 
-/** Logs in through the password+TOTP form; returns a jar holding the session. */
-export async function passwordLogin(t: TestGateway, jar = new Jar(), timeOffsetMs = 0): Promise<Jar> {
-  const page = await fetch(`${t.origin}/auth/login?next=/oauth/admin`, { headers: { cookie: jar.header() } });
+export const startPasswordGateway = (
+  env: Record<string, string> = {},
+  routeOpts: RouteOptions = {},
+  logger: Logger = nullLogger,
+) => start('password', env, routeOpts, logger);
+export const startTailscaleGateway = (
+  env: Record<string, string> = {},
+  routeOpts: RouteOptions = {},
+  logger: Logger = nullLogger,
+) => start('tailscale', env, routeOpts, logger);
+
+/** Logs in through the password+TOTP form on the given origin (private by default). */
+export async function passwordLogin(
+  t: TestGateway,
+  jar = new Jar(),
+  opts: { timeOffsetMs?: number; origin?: string } = {},
+): Promise<Jar> {
+  const base = opts.origin ?? t.privateOrigin;
+  const page = await fetch(`${base}/auth/login?next=/oauth/admin`, {
+    headers: { cookie: jar.header() },
+  });
   jar.store(page);
   const html = await page.text();
   const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]!;
-  const res = await fetch(`${t.origin}/auth/login`, {
+  const res = await fetch(`${base}/auth/login`, {
     method: 'POST',
     redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.origin, cookie: jar.header() },
-    body: new URLSearchParams({ csrf, next: '/oauth/admin', password: t.password, totp: totp(t.totpSecret, Date.now() + timeOffsetMs) }),
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      origin: base,
+      cookie: jar.header(),
+    },
+    body: new URLSearchParams({
+      csrf,
+      next: '/oauth/admin',
+      password: t.password,
+      totp: totp(t.totpSecret, Date.now() + (opts.timeOffsetMs ?? 0)),
+    }),
   });
   if (res.status !== 303) throw new Error(`login failed: ${res.status}`);
   jar.store(res);
   return jar;
 }
 
-export function authorizeUrl(origin: string, p: { clientId: string; redirectUri: string; challenge: string; state?: string; resource?: string; scope?: string }): string {
-  const u = new URL(`${origin}/oauth/authorize`);
+/** A jar that is "logged in": password mode logs in; tailscale mode needs no session. */
+export async function ownerJar(t: TestGateway): Promise<Jar> {
+  return t.provider === 'password' ? passwordLogin(t) : new Jar();
+}
+
+export function authorizeUrl(
+  t: Pick<TestGateway, 'origin' | 'privateOrigin'>,
+  p: {
+    clientId: string;
+    redirectUri: string;
+    challenge: string;
+    state?: string;
+    resource?: string;
+    scope?: string;
+    base?: string;
+  },
+): string {
+  const u = new URL(`${p.base ?? t.privateOrigin}/oauth/authorize`);
   u.searchParams.set('response_type', 'code');
   u.searchParams.set('client_id', p.clientId);
   u.searchParams.set('redirect_uri', p.redirectUri);
   u.searchParams.set('code_challenge', p.challenge);
   u.searchParams.set('code_challenge_method', 'S256');
   u.searchParams.set('state', p.state ?? 'st-' + randomBytes(4).toString('hex'));
-  u.searchParams.set('resource', p.resource ?? `${origin}/mcp`);
+  u.searchParams.set('resource', p.resource ?? `${t.origin}/mcp`);
   u.searchParams.set('scope', p.scope ?? 'mcp offline_access');
   return u.toString();
 }
 
 /** Opens the consent page and approves; returns the redirect Location. */
-export async function approve(t: TestGateway, jar: Jar, url: string, decision: 'approve' | 'deny' = 'approve'): Promise<URL> {
-  const page = await fetch(url, { headers: { cookie: jar.header() }, redirect: 'manual' });
+export async function approve(
+  t: TestGateway,
+  jar: Jar,
+  url: string,
+  decision: 'approve' | 'deny' = 'approve',
+  headers?: Record<string, string>,
+): Promise<URL> {
+  const auth = headers ?? t.auth(jar);
+  const page = await fetch(url, { headers: auth, redirect: 'manual' });
   if (page.status !== 200) throw new Error(`consent page ${page.status}: ${await page.text()}`);
   jar.store(page);
   const html = await page.text();
   const requestId = /name="request_id" value="([^"]+)"/.exec(html)![1]!;
   const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]!;
-  const res = await fetch(`${t.origin}/oauth/authorize/decision`, {
+  const base = new URL(url).origin;
+  const res = await fetch(`${base}/oauth/authorize/decision`, {
     method: 'POST',
     redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.origin, cookie: jar.header() },
+    headers: {
+      ...(headers ?? t.auth(jar)),
+      'content-type': 'application/x-www-form-urlencoded',
+      origin: base,
+    },
     body: new URLSearchParams({ request_id: requestId, csrf, decision }),
   });
   if (res.status !== 302) throw new Error(`decision ${res.status}: ${await res.text()}`);
   return new URL(res.headers.get('location')!);
 }
 
-export async function tokenRequest(origin: string, params: Record<string, string>): Promise<{ status: number; body: Record<string, unknown> }> {
+export async function tokenRequest(
+  origin: string,
+  params: Record<string, string>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${origin}/oauth/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -166,7 +258,11 @@ export async function tokenRequest(origin: string, params: Record<string, string
 export async function mcpList(origin: string, accessToken: string): Promise<number> {
   const res = await fetch(`${origin}/mcp`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
   });
   await res.text();

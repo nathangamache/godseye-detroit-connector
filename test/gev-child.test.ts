@@ -12,7 +12,11 @@ afterEach(async () => {
 });
 
 function mockChild() {
-  const spec = childSpawnSpec({ gevRoot: REPO_ROOT, gevUrl: 'http://127.0.0.1:7701', wrapper: MOCK_GEV });
+  const spec = childSpawnSpec({
+    gevRoot: REPO_ROOT,
+    gevUrl: 'http://127.0.0.1:7701',
+    wrapper: MOCK_GEV,
+  });
   return new GevChild({ ...spec, logger: nullLogger, minBackoffMs: 50, maxBackoffMs: 200 });
 }
 
@@ -31,8 +35,18 @@ describe('GEV child supervisor', () => {
   });
 
   it('passes a minimal explicit environment', () => {
-    const spec = childSpawnSpec({ gevRoot: '/x', gevUrl: 'http://127.0.0.1:7701', wrapper: '/w.mjs' });
-    expect(Object.keys(spec.env).sort()).toEqual(['GEV_ROOT', 'NODE_ENV', 'NODE_OPTIONS', 'PATH', 'UV_THREADPOOL_SIZE']);
+    const spec = childSpawnSpec({
+      gevRoot: '/x',
+      gevUrl: 'http://127.0.0.1:7701',
+      wrapper: '/w.mjs',
+    });
+    expect(Object.keys(spec.env).sort()).toEqual([
+      'GEV_ROOT',
+      'NODE_ENV',
+      'NODE_OPTIONS',
+      'PATH',
+      'UV_THREADPOOL_SIZE',
+    ]);
     expect(spec.command).toBe(process.execPath);
     expect(spec.args).toEqual(['/w.mjs', '--api-base', 'http://127.0.0.1:7701']);
   });
@@ -43,7 +57,11 @@ describe('GEV child supervisor', () => {
     await child.callTool('crash_child', {}, { timeoutMs: 5000 }).catch(() => undefined);
     await waitFor(() => child!.restarts >= 1, 5000);
     await waitFor(() => child!.isReady(), 10_000);
-    const r = await child.callTool('plan_route', { from: { lat: 1, lon: 1 }, to: { lat: 2, lon: 2 } }, { timeoutMs: 5000 });
+    const r = await child.callTool(
+      'plan_route',
+      { from: { lat: 1, lon: 1 }, to: { lat: 2, lon: 2 } },
+      { timeoutMs: 5000 },
+    );
     expect((r.content[0] as { text: string }).text).toMatch(/Route/);
   });
 
@@ -62,6 +80,8 @@ describe('GEV child supervisor', () => {
     child = new GevChild({ ...spec, logger: nullLogger });
     await child.start();
     expect(child.tools).toHaveLength(40);
-    expect(child.tools.map((t) => t.name)).toEqual(expect.arrayContaining(['get_weather', 'plan_route', 'panel_request']));
+    expect(child.tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(['get_weather', 'plan_route', 'panel_request']),
+    );
   });
 });

@@ -10,17 +10,26 @@ const LATLON = {
 };
 
 function lineSentence(l: NearestLine): string {
-  const name = [l.railroad ?? 'unknown railroad', l.subdivision ? `${titleCase(l.subdivision)} Subdivision` : undefined]
+  const name = [
+    l.railroad ?? 'unknown railroad',
+    l.subdivision ? `${titleCase(l.subdivision)} Subdivision` : undefined,
+  ]
     .filter(Boolean)
     .join(', ');
-  const rights = l.trackage_rights.length ? `; trackage rights: ${l.trackage_rights.join(', ')}` : '';
+  const rights = l.trackage_rights.length
+    ? `; trackage rights: ${l.trackage_rights.join(', ')}`
+    : '';
   const pax = l.passenger ? `; passenger: ${l.passenger}` : '';
   return `Nearest active rail line: ${name} (${l.kind}${l.tracks ? `, ${l.tracks} track${l.tracks > 1 ? 's' : ''}` : ''}${rights}${pax}), ${humanDistance(l.distance_m)} ${l.direction}.`;
 }
 
 function crossingSentence(c: CrossingHit): string {
   const where = [c.street, c.city].filter(Boolean).join(', ');
-  const rr = [c.railroad, c.subdivision ? `${titleCase(c.subdivision)} Sub` : undefined, c.milepost ? `MP ${c.milepost}` : undefined]
+  const rr = [
+    c.railroad,
+    c.subdivision ? `${titleCase(c.subdivision)} Sub` : undefined,
+    c.milepost ? `MP ${c.milepost}` : undefined,
+  ]
     .filter(Boolean)
     .join(', ');
   const trains =
@@ -30,8 +39,14 @@ function crossingSentence(c: CrossingHit): string {
   return `Nearest at-grade crossing: FRA ${c.fra_crossing_id}${where ? ` at ${where}` : ''}${rr ? ` (${rr})` : ''}, ${humanDistance(c.distance_m)} ${c.direction}; ${c.warning_devices ?? 'warning devices unknown'}.${trains}`;
 }
 
-function titleCase(s: string): string {
-  return s.toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase());
+/** "MICHIGAN LINE (NS)" -> "Michigan Line (NS)": parenthesized railroad marks stay upper case. */
+export function titleCase(s: string): string {
+  return s
+    .split(/(\([^)]*\))/)
+    .map((part) =>
+      part.startsWith('(') ? part : part.toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase()),
+    )
+    .join('');
 }
 
 export function railTools(index: RailIndex): ToolDef[] {
@@ -49,7 +64,12 @@ export function railTools(index: RailIndex): ToolDef[] {
         type: 'object',
         properties: {
           ...LATLON,
-          max_km: { type: 'number', minimum: 0.1, maximum: 100, description: 'Search radius in km (default 50)' },
+          max_km: {
+            type: 'number',
+            minimum: 0.1,
+            maximum: 100,
+            description: 'Search radius in km (default 50)',
+          },
         },
         required: ['lat', 'lon'],
         additionalProperties: false,
@@ -61,7 +81,8 @@ export function railTools(index: RailIndex): ToolDef[] {
         const lon = args.lon as number;
         const maxM = ((args.max_km as number | undefined) ?? 50) * 1000;
         const line = index.nearestLine(lat, lon, maxM);
-        const main = line && line.kind !== 'main line' ? index.nearestMainLine(lat, lon, maxM) : undefined;
+        const main =
+          line && line.kind !== 'main line' ? index.nearestMainLine(lat, lon, maxM) : undefined;
         const crossing = index.nearestCrossing(lat, lon, maxM);
         if (!line && !crossing) {
           return {
@@ -70,11 +91,17 @@ export function railTools(index: RailIndex): ToolDef[] {
           };
         }
         const parts = [line ? lineSentence(line) : 'No active rail line found in range.'];
-        if (main) parts.push(lineSentence(main).replace('Nearest active rail line', 'Nearest main line'));
+        if (main)
+          parts.push(lineSentence(main).replace('Nearest active rail line', 'Nearest main line'));
         parts.push(crossing ? crossingSentence(crossing) : 'No at-grade crossing found in range.');
         return {
           summary: `${parts.join(' ')} ${dataNote}`,
-          data: { line: line ?? null, main_line: main ?? null, crossing: crossing ?? null, dataset_as_of: asOf },
+          data: {
+            line: line ?? null,
+            main_line: main ?? null,
+            crossing: crossing ?? null,
+            dataset_as_of: asOf,
+          },
         };
       },
     },
@@ -89,9 +116,22 @@ export function railTools(index: RailIndex): ToolDef[] {
         type: 'object',
         properties: {
           ...LATLON,
-          radius_km: { type: 'number', minimum: 0.1, maximum: 25, description: 'Radius in km (default 2)' },
-          limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Most results (default 20)' },
-          at_grade_only: { type: 'boolean', description: 'Only at-grade crossings (default false)' },
+          radius_km: {
+            type: 'number',
+            minimum: 0.1,
+            maximum: 25,
+            description: 'Radius in km (default 2)',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 100,
+            description: 'Most results (default 20)',
+          },
+          at_grade_only: {
+            type: 'boolean',
+            description: 'Only at-grade crossings (default false)',
+          },
         },
         required: ['lat', 'lon'],
         additionalProperties: false,
@@ -107,7 +147,10 @@ export function railTools(index: RailIndex): ToolDef[] {
         const summary = hits.length
           ? `${hits.length} crossing(s) within ${radiusKm} km; nearest is FRA ${hits[0]!.fra_crossing_id}${hits[0]!.street ? ` at ${hits[0]!.street}` : ''}, ${humanDistance(hits[0]!.distance_m)} ${hits[0]!.direction}. ${dataNote}`
           : `No crossings within ${radiusKm} km (Michigan coverage only). ${dataNote}`;
-        return { summary, data: { radius_km: radiusKm, count: hits.length, crossings: hits, dataset_as_of: asOf } };
+        return {
+          summary,
+          data: { radius_km: radiusKm, count: hits.length, crossings: hits, dataset_as_of: asOf },
+        };
       },
     },
   ];

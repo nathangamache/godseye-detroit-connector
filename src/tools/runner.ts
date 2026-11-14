@@ -58,7 +58,9 @@ export class ToolRunner {
     }
     const argObj = args === undefined || args === null ? {} : args;
     if (typeof argObj !== 'object' || Array.isArray(argObj)) {
-      return ToolRunner.error('arguments must be a JSON object.', { input_schema: def.inputSchema });
+      return ToolRunner.error('arguments must be a JSON object.', {
+        input_schema: def.inputSchema,
+      });
     }
     const a = argObj as Record<string, unknown>;
     const v = this.validator.validate(def.name, def.inputSchema, a);
@@ -114,7 +116,12 @@ export class ToolRunner {
   }
 
   /** Runs a tool without policy/validation (internal composites such as whats_happening_here). */
-  async callRaw(def: ToolDef, args: Record<string, unknown>, ctx: ToolContext, timeoutMs: number): Promise<ToolOutput> {
+  async callRaw(
+    def: ToolDef,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+    timeoutMs: number,
+  ): Promise<ToolOutput> {
     return this.callWithTimeout(def, args, ctx, timeoutMs);
   }
 

@@ -29,12 +29,27 @@ export class Audit {
   record(event: string, f: AuditFields = {}): void {
     const detail = f.detail ? JSON.stringify(sanitize(f.detail)) : null;
     this.insert.run(this.now(), event, f.subject ?? null, f.clientId ?? null, f.ip ?? null, detail);
-    this.logger.info('audit', { audit_event: event, subject: f.subject, client: f.clientId, ip: f.ip, detail: f.detail });
+    this.logger.info('audit', {
+      audit_event: event,
+      subject: f.subject,
+      client: f.clientId,
+      ip: f.ip,
+      detail: f.detail,
+    });
   }
 
-  recent(limit = 100): Array<{ ts: number; event: string; subject: string | null; client_id: string | null; ip: string | null; detail: string | null }> {
+  recent(limit = 100): Array<{
+    ts: number;
+    event: string;
+    subject: string | null;
+    client_id: string | null;
+    ip: string | null;
+    detail: string | null;
+  }> {
     return this.db
-      .prepare('SELECT ts, event, subject, client_id, ip, detail FROM audit_log ORDER BY id DESC LIMIT ?')
+      .prepare(
+        'SELECT ts, event, subject, client_id, ip, detail FROM audit_log ORDER BY id DESC LIMIT ?',
+      )
       .all(limit) as never;
   }
 

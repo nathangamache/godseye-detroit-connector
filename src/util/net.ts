@@ -2,16 +2,21 @@ import { isIP } from 'node:net';
 import type { IncomingMessage } from 'node:http';
 
 /**
- * The client IP for rate limiting and audit. CF-Connecting-IP is trusted only
- * when the TCP peer is a configured proxy (cloudflared on loopback or its
- * fixed container IP). Otherwise the socket address is used.
+ * The client IP for rate limiting and audit. The forwarding header
+ * (CF-Connecting-IP from cloudflared on the public listener, X-Forwarded-For from
+ * tailscale serve on the private one) is trusted only when the TCP peer is a
+ * configured proxy. Otherwise the socket address is used.
  */
-export function clientIp(req: IncomingMessage, trustedProxies: string[]): string {
+export function clientIp(
+  req: IncomingMessage,
+  trustedProxies: string[],
+  header = 'cf-connecting-ip',
+): string {
   const peer = normalizeIp(req.socket.remoteAddress ?? '');
   if (trustedProxies.includes(peer) || trustedProxies.includes(req.socket.remoteAddress ?? '')) {
-    const cf = req.headers['cf-connecting-ip'];
-    const v = Array.isArray(cf) ? cf[0] : cf;
-    if (v && isIP(v.trim())) return normalizeIp(v.trim());
+    const raw = req.headers[header];
+    const v = (Array.isArray(raw) ? raw[0] : raw)?.split(',')[0]?.trim();
+    if (v && isIP(v)) return normalizeIp(v);
   }
   return peer || 'unknown';
 }

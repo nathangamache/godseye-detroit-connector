@@ -16,11 +16,38 @@ export function stem(term: string): string {
   let t = term.toLowerCase().replace(/'s$/, '').replace(/[’']/g, '');
   if (t.length > 4 && t.endsWith('ies')) t = t.slice(0, -3) + 'y';
   else if (t.length > 4 && /(ches|shes|sses|xes)$/.test(t)) t = t.slice(0, -2);
-  else if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss') && !t.endsWith('us')) t = t.slice(0, -1);
+  else if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss') && !t.endsWith('us'))
+    t = t.slice(0, -1);
   return t;
 }
 
-const STOP = new Set(['a', 'an', 'the', 'of', 'in', 'on', 'at', 'to', 'for', 'is', 'are', 'me', 'my', 'and', 'or', 'by', 'near', 'around', 'what', 'whats', 'there', 'any', 'show', 'get', 'find']);
+const STOP = new Set([
+  'a',
+  'an',
+  'the',
+  'of',
+  'in',
+  'on',
+  'at',
+  'to',
+  'for',
+  'is',
+  'are',
+  'me',
+  'my',
+  'and',
+  'or',
+  'by',
+  'near',
+  'around',
+  'what',
+  'whats',
+  'there',
+  'any',
+  'show',
+  'get',
+  'find',
+]);
 
 function processTerm(term: string): string | null {
   const t = stem(term);
@@ -80,7 +107,10 @@ export class ToolSearch {
   search(query: string, limit: number, filter: (t: ToolDef) => boolean = () => true): SearchHit[] {
     const q = query.trim();
     if (!q) {
-      return [...this.tools.values()].filter(filter).slice(0, limit).map((tool) => ({ tool, score: 0 }));
+      return [...this.tools.values()]
+        .filter(filter)
+        .slice(0, limit)
+        .map((tool) => ({ tool, score: 0 }));
     }
     return this.index
       .search(q)

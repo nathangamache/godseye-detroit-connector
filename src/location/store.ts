@@ -49,7 +49,17 @@ export class LocationStore {
       .prepare(
         'INSERT INTO locations(device_id, lat, lon, accuracy_m, fix_ts, received_at, battery, speed_kmh, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(fix.deviceId, fix.lat, fix.lon, fix.accuracyM ?? null, fix.fixTs, t, fix.battery ?? null, fix.speedKmh ?? null, fix.source);
+      .run(
+        fix.deviceId,
+        fix.lat,
+        fix.lon,
+        fix.accuracyM ?? null,
+        fix.fixTs,
+        t,
+        fix.battery ?? null,
+        fix.speedKmh ?? null,
+        fix.source,
+      );
     this.db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(t, fix.deviceId);
   }
 
@@ -68,7 +78,9 @@ export class LocationStore {
 
   prune(): number {
     const cutoff = this.now() - this.opts.retentionHours * 3_600_000;
-    const r = this.db.prepare('DELETE FROM locations WHERE fix_ts < ? OR received_at < ?').run(cutoff, cutoff);
+    const r = this.db
+      .prepare('DELETE FROM locations WHERE fix_ts < ? OR received_at < ?')
+      .run(cutoff, cutoff);
     return r.changes;
   }
 
@@ -86,15 +98,20 @@ export class LocationStore {
   createSetupCode(name: string, ttlMs = 15 * 60_000): { id: number; code: string } {
     const code = randomToken('gsc', 24);
     const t = this.now();
-    const existing = this.db.prepare('SELECT id FROM devices WHERE name = ?').get(name) as { id: number } | undefined;
+    const existing = this.db.prepare('SELECT id FROM devices WHERE name = ?').get(name) as
+      { id: number } | undefined;
     if (existing) {
       this.db
-        .prepare('UPDATE devices SET setup_code_hash = ?, setup_expires_at = ?, revoked_at = NULL WHERE id = ?')
+        .prepare(
+          'UPDATE devices SET setup_code_hash = ?, setup_expires_at = ?, revoked_at = NULL WHERE id = ?',
+        )
         .run(sha256hex(code), t + ttlMs, existing.id);
       return { id: existing.id, code };
     }
     const r = this.db
-      .prepare('INSERT INTO devices(name, setup_code_hash, setup_expires_at, created_at) VALUES (?, ?, ?, ?)')
+      .prepare(
+        'INSERT INTO devices(name, setup_code_hash, setup_expires_at, created_at) VALUES (?, ?, ?, ?)',
+      )
       .run(name, sha256hex(code), t + ttlMs, t);
     return { id: Number(r.lastInsertRowid), code };
   }
@@ -106,10 +123,14 @@ export class LocationStore {
       .prepare('SELECT id, name, setup_expires_at FROM devices WHERE setup_code_hash = ?')
       .get(sha256hex(code)) as { id: number; name: string; setup_expires_at: number } | undefined;
     if (!row) return null;
-    this.db.prepare('UPDATE devices SET setup_code_hash = NULL, setup_expires_at = NULL WHERE id = ?').run(row.id);
+    this.db
+      .prepare('UPDATE devices SET setup_code_hash = NULL, setup_expires_at = NULL WHERE id = ?')
+      .run(row.id);
     if (row.setup_expires_at < this.now()) return null;
     const token = randomToken('gdt');
-    this.db.prepare('UPDATE devices SET token_hash = ?, revoked_at = NULL WHERE id = ?').run(sha256hex(token), row.id);
+    this.db
+      .prepare('UPDATE devices SET token_hash = ?, revoked_at = NULL WHERE id = ?')
+      .run(sha256hex(token), row.id);
     return { id: row.id, name: row.name, token };
   }
 
@@ -125,18 +146,38 @@ export class LocationStore {
     const t = this.now();
     const r =
       typeof idOrName === 'number' || /^\d+$/.test(String(idOrName))
-        ? this.db.prepare('UPDATE devices SET revoked_at = ?, token_hash = NULL, setup_code_hash = NULL WHERE id = ?').run(t, Number(idOrName))
-        : this.db.prepare('UPDATE devices SET revoked_at = ?, token_hash = NULL, setup_code_hash = NULL WHERE name = ?').run(t, idOrName);
+        ? this.db
+            .prepare(
+              'UPDATE devices SET revoked_at = ?, token_hash = NULL, setup_code_hash = NULL WHERE id = ?',
+            )
+            .run(t, Number(idOrName))
+        : this.db
+            .prepare(
+              'UPDATE devices SET revoked_at = ?, token_hash = NULL, setup_code_hash = NULL WHERE name = ?',
+            )
+            .run(t, idOrName);
     if (r.changes) {
-      this.db.prepare('DELETE FROM locations WHERE device_id IN (SELECT id FROM devices WHERE revoked_at IS NOT NULL)').run();
+      this.db
+        .prepare(
+          'DELETE FROM locations WHERE device_id IN (SELECT id FROM devices WHERE revoked_at IS NOT NULL)',
+        )
+        .run();
     }
     return r.changes > 0;
   }
 
   listDevices(): Device[] {
     const rows = this.db
-      .prepare('SELECT id, name, created_at, last_seen_at, revoked_at, token_hash IS NOT NULL AS has_token, setup_code_hash IS NOT NULL AS setup_pending FROM devices ORDER BY id')
-      .all() as Array<Omit<Device, 'has_token' | 'setup_pending'> & { has_token: number; setup_pending: number }>;
-    return rows.map((r) => ({ ...r, has_token: Boolean(r.has_token), setup_pending: Boolean(r.setup_pending) }));
+      .prepare(
+        'SELECT id, name, created_at, last_seen_at, revoked_at, token_hash IS NOT NULL AS has_token, setup_code_hash IS NOT NULL AS setup_pending FROM devices ORDER BY id',
+      )
+      .all() as Array<
+      Omit<Device, 'has_token' | 'setup_pending'> & { has_token: number; setup_pending: number }
+    >;
+    return rows.map((r) => ({
+      ...r,
+      has_token: Boolean(r.has_token),
+      setup_pending: Boolean(r.setup_pending),
+    }));
   }
 }

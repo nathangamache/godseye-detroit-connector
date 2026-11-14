@@ -20,7 +20,24 @@ export function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: numbe
   return (Math.atan2(y, x) / RAD + 360) % 360;
 }
 
-const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+const POINTS = [
+  'N',
+  'NNE',
+  'NE',
+  'ENE',
+  'E',
+  'ESE',
+  'SE',
+  'SSE',
+  'S',
+  'SSW',
+  'SW',
+  'WSW',
+  'W',
+  'WNW',
+  'NW',
+  'NNW',
+];
 export function compassPoint(deg: number): string {
   return POINTS[Math.round(deg / 22.5) % 16]!;
 }

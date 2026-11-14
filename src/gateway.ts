@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { Express } from 'express';
-import { createApp, hardenServer, type AppContext } from './app.js';
+import { createPrivateApp, createPublicApp, hardenServer } from './app.js';
 import { Audit } from './audit.js';
 import type { Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
@@ -23,6 +23,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/runner.js';
 import type { ToolDef } from './tools/types.js';
 import { RateLimiter } from './util/ratelimit.js';
+import { bind, type RouteSet } from './routes.js';
 
 export interface GatewayOverrides {
   logger?: Logger;
@@ -31,8 +32,8 @@ export interface GatewayOverrides {
   gevChild?: { command: string; args: string[]; cwd: string; env: Record<string, string> } | false;
   /** Extra tools to register (tests). */
   extraTools?: ToolDef[];
-  /** Additional route installers. */
-  mount?: Array<(app: Express, ctx: AppContext, gw: GatewayCore) => void>;
+  /** Route installers for the two listeners (src/routes.ts installAllRoutes()). */
+  routes?: RouteSet;
 }
 
 export interface GatewayCore {
@@ -53,9 +54,14 @@ export interface GatewayCore {
 
 export interface Gateway extends GatewayCore {
   app: Express;
+  privateApp: Express;
   server: Server;
+  privateServer: Server;
+  /** Public listener port and URL (127.0.0.1 or the bind host). */
   port: number;
   url: string;
+  privatePort: number;
+  privateUrl: string;
   close(): Promise<void>;
 }
 
@@ -93,7 +99,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     maxConcurrent: config.MAX_CONCURRENT_TOOL_CALLS,
     logger,
     post: {
-      publicOrigin: config.PUBLIC_ORIGIN,
+      publicOrigin: config.linkOrigin,
       gevOrigins: config.gevApiOrigins,
       maxResultChars: config.MAX_RESULT_CHARS,
       imageMaxDim: config.IMAGE_MAX_DIM,
@@ -105,11 +111,19 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   if (existsSync(path.join(config.RAIL_DATA_DIR, 'meta.json'))) {
     rail = RailIndex.load(config.RAIL_DATA_DIR);
     for (const t of railTools(rail)) registry.register(t);
-    logger.info('rail_data_loaded', { lines: rail.lines.length, crossings: rail.crossings.length, as_of: rail.datasetAsOf() });
+    logger.info('rail_data_loaded', {
+      lines: rail.lines.length,
+      crossings: rail.crossings.length,
+      as_of: rail.datasetAsOf(),
+    });
   } else {
     logger.warn('rail_data_missing', { dir: config.RAIL_DATA_DIR });
   }
-  const pulse = new PulseClient({ baseUrl: config.PULSE_URL, token: config.PULSE_API_TOKEN, timeoutMs: config.PULSE_TIMEOUT_MS });
+  const pulse = new PulseClient({
+    baseUrl: config.PULSE_URL,
+    token: config.PULSE_API_TOKEN,
+    timeoutMs: config.PULSE_TIMEOUT_MS,
+  });
   for (const t of pulseTools(pulse)) registry.register(t);
   for (const t of overrides.extraTools ?? []) registry.register(t);
   return {
@@ -128,7 +142,10 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   };
 }
 
-export async function startGateway(config: Config, overrides: GatewayOverrides = {}): Promise<Gateway> {
+export async function startGateway(
+  config: Config,
+  overrides: GatewayOverrides = {},
+): Promise<Gateway> {
   const core = buildCore(config, overrides);
   const { logger } = core;
 
@@ -143,21 +160,35 @@ export async function startGateway(config: Config, overrides: GatewayOverrides =
         extraArgs: config.GEV_CHILD_ARGS,
       });
     const child = new GevChild({ ...spec, logger: logger.child({ component: 'gev' }) });
-    child.on('catalog', (tools) => core.registry.setGevTools(tools, makeGevCaller(child), config.TOOL_TIMEOUT_MS));
+    child.on('catalog', (tools) =>
+      core.registry.setGevTools(tools, makeGevCaller(child), config.TOOL_TIMEOUT_MS),
+    );
     core.gev = child;
     void child.start();
   }
 
-  const app = createApp({
-    ...core,
-    mount: (overrides.mount ?? []).map((m) => (a: Express, ctx: AppContext) => m(a, ctx, core)),
-  });
-  const server = await new Promise<Server>((resolve, reject) => {
-    const s = app.listen(config.PORT, config.HOST, () => resolve(s));
-    s.once('error', reject);
-  });
+  const deps = { ...core };
+  const app = createPublicApp(deps, bind(overrides.routes?.public ?? [], core));
+  const privateApp = createPrivateApp(deps, bind(overrides.routes?.private ?? [], core));
+  const listen = (a: Express, port: number, host: string) =>
+    new Promise<Server>((resolve, reject) => {
+      const s = a.listen(port, host, () => resolve(s));
+      s.once('error', reject);
+    });
+  const server = await listen(app, config.PORT, config.HOST);
   hardenServer(server);
+  let privateServer: Server;
+  try {
+    privateServer = await listen(privateApp, config.PRIVATE_PORT, config.PRIVATE_HOST);
+  } catch (err) {
+    server.close();
+    throw err;
+  }
+  hardenServer(privateServer);
   const port = (server.address() as AddressInfo).port;
+  const privatePort = (privateServer.address() as AddressInfo).port;
+  const fmt = (h: string, p: number) =>
+    `http://${h.includes(':') ? `[${h}]` : h === '0.0.0.0' ? '127.0.0.1' : h}:${p}`;
 
   const prune = setInterval(() => {
     try {
@@ -172,20 +203,32 @@ export async function startGateway(config: Config, overrides: GatewayOverrides =
   prune.unref();
   core.locations.prune();
 
-  logger.info('gateway_listening', { host: config.HOST, port, mode: config.mode, login: config.loginProvider });
+  logger.info('gateway_listening', {
+    public: `${config.HOST}:${port}`,
+    private: `${config.PRIVATE_HOST}:${privatePort}`,
+    mode: config.mode,
+    login: config.loginProvider,
+    public_authorize_fallback: config.publicAuthorize,
+  });
+  const closeServer = (s: Server) =>
+    new Promise<void>((r) => {
+      s.close(() => r());
+      s.closeAllConnections();
+    });
   return {
     ...core,
     app,
+    privateApp,
     server,
+    privateServer,
     port,
-    url: `http://${config.HOST.includes(':') ? `[${config.HOST}]` : config.HOST}:${port}`,
+    url: fmt(config.HOST, port),
+    privatePort,
+    privateUrl: fmt(config.PRIVATE_HOST, privatePort),
     async close() {
       clearInterval(prune);
       await core.gev?.stop();
-      await new Promise<void>((r) => {
-        server.close(() => r());
-        server.closeAllConnections();
-      });
+      await Promise.all([closeServer(server), closeServer(privateServer)]);
       core.db.close();
     },
   };

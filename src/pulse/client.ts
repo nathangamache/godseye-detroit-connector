@@ -19,9 +19,14 @@ export interface PulseClientOptions {
 export class PulseClient {
   constructor(private readonly opts: PulseClientOptions) {}
 
-  async get<T = unknown>(pathname: string, query: Record<string, string | number | boolean | undefined> = {}, signal?: AbortSignal): Promise<T> {
+  async get<T = unknown>(
+    pathname: string,
+    query: Record<string, string | number | boolean | undefined> = {},
+    signal?: AbortSignal,
+  ): Promise<T> {
     const url = new URL(pathname, this.opts.baseUrl + '/');
-    for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
+    for (const [k, v] of Object.entries(query))
+      if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
     const timeout = AbortSignal.timeout(this.opts.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let res: Response;
@@ -35,14 +40,20 @@ export class PulseClient {
         signal: combined,
       });
     } catch (err) {
-      const reason = timeout.aborted ? 'timed out' : (err as Error).name === 'AbortError' ? 'cancelled' : 'unreachable';
+      const reason = timeout.aborted
+        ? 'timed out'
+        : (err as Error).name === 'AbortError'
+          ? 'cancelled'
+          : 'unreachable';
       throw new PulseUnavailableError(`Pulse is not running or not reachable (${reason})`);
     }
     const text = await readCapped(res, this.opts.maxBytes ?? 2 * 1024 * 1024);
     if (!res.ok) {
       let code = 'error';
       try {
-        code = String((JSON.parse(text) as { error?: { code?: string } }).error?.code ?? 'error').slice(0, 40);
+        code = String(
+          (JSON.parse(text) as { error?: { code?: string } }).error?.code ?? 'error',
+        ).slice(0, 40);
       } catch {
         /* not JSON */
       }

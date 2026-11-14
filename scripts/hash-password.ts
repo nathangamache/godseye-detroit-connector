@@ -9,8 +9,15 @@ import { hashPassword } from '../src/auth/password.js';
 import { generateTotpSecret, otpauthUri } from '../src/auth/totp.js';
 
 async function readPassword(prompt: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
-  const out = rl as unknown as { _writeToOutput?: (s: string) => void; output: NodeJS.WritableStream };
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY,
+  });
+  const out = rl as unknown as {
+    _writeToOutput?: (s: string) => void;
+    output: NodeJS.WritableStream;
+  };
   if (process.stdin.isTTY) {
     out._writeToOutput = (s: string) => {
       if (s.includes(prompt)) out.output.write(prompt);
@@ -36,5 +43,7 @@ console.log(`GATEWAY_PASSWORD_HASH=${hash}`);
 if (process.argv.includes('--totp')) {
   const secret = generateTotpSecret();
   console.log(`GATEWAY_TOTP_SECRET=${secret}`);
-  console.log(`\nAdd it to an authenticator app (manual entry) or via this URI:\n${otpauthUri(secret)}`);
+  console.log(
+    `\nAdd it to an authenticator app (manual entry) or via this URI:\n${otpauthUri(secret)}`,
+  );
 }

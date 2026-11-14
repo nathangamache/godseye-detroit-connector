@@ -12,6 +12,7 @@ import type { LocationStore } from '../location/store.js';
 import { postprocess, type McpToolResult } from '../tools/postprocess.js';
 import type { ToolRunner } from '../tools/runner.js';
 import type { ToolContext, ToolOutput } from '../tools/types.js';
+import { titleCase } from '../rail/tools.js';
 
 export interface PositionInfo {
   lat: number;
@@ -24,7 +25,11 @@ export interface PositionInfo {
   source: string;
 }
 
-export function currentPosition(store: LocationStore, staleMinutes: number, now = Date.now()): PositionInfo | undefined {
+export function currentPosition(
+  store: LocationStore,
+  staleMinutes: number,
+  now = Date.now(),
+): PositionInfo | undefined {
   const fix = store.latest();
   if (!fix) return undefined;
   const age = Math.max(0, Math.round((now - fix.fix_ts) / 1000));
@@ -43,7 +48,7 @@ export function currentPosition(store: LocationStore, staleMinutes: number, now 
 export function noFixMessage(publicOrigin: string, retentionHours: number): string {
   return (
     `No phone location fix is available (none received in the last ${retentionHours} h). ` +
-    `Ask Nathan to open ${publicOrigin}/locate on his phone and tap "Update My Location", ` +
+    `Ask Nathan to open ${publicOrigin}/locate/ on his phone (over Tailscale) and tap "Update My Location", ` +
     'or to check that OwnTracks is running and allowed to report location. ' +
     'Alternatively, ask him where he is and pass lat/lon explicitly.'
   );
@@ -52,7 +57,12 @@ export function noFixMessage(publicOrigin: string, retentionHours: number): stri
 export function whereAmI(store: LocationStore, config: Config, now = Date.now()): McpToolResult {
   const pos = currentPosition(store, config.LOCATION_STALE_MINUTES, now);
   if (!pos) {
-    return { content: [{ type: 'text', text: noFixMessage(config.PUBLIC_ORIGIN, config.LOCATION_RETENTION_HOURS) }, { type: 'text', text: JSON.stringify({ found: false }) }] };
+    return {
+      content: [
+        { type: 'text', text: noFixMessage(config.linkOrigin, config.LOCATION_RETENTION_HOURS) },
+        { type: 'text', text: JSON.stringify({ found: false }) },
+      ],
+    };
   }
   const acc = pos.accuracy_m === null ? '' : ` ±${pos.accuracy_m} m`;
   const lines = [
@@ -61,10 +71,15 @@ export function whereAmI(store: LocationStore, config: Config, now = Date.now())
   if (pos.stale) {
     lines.push(
       `STALE: this fix is older than ${config.LOCATION_STALE_MINUTES} minutes, so Nathan may have moved. ` +
-        `Say how old it is, and suggest he opens ${config.PUBLIC_ORIGIN}/locate to refresh it.`,
+        `Say how old it is, and suggest he opens ${config.linkOrigin}/locate/ (needs Tailscale) or checks OwnTracks.`,
     );
   }
-  return { content: [{ type: 'text', text: lines.join('\n') }, { type: 'text', text: JSON.stringify({ found: true, ...pos }) }] };
+  return {
+    content: [
+      { type: 'text', text: lines.join('\n') },
+      { type: 'text', text: JSON.stringify({ found: true, ...pos }) },
+    ],
+  };
 }
 
 export function humanAge(s: number): string {
@@ -84,16 +99,88 @@ interface SourceReport {
   data?: unknown;
 }
 
-const OBSERVED_KEYS = ['observed_at', 'observedAt', 'as_of', 'generated_at', 'updated_at', 'time', 'timestamp'];
+const OBSERVED_KEYS = [
+  'observed_at',
+  'observedAt',
+  'as_of',
+  'generated_at',
+  'updated_at',
+  'time',
+  'timestamp',
+];
 
-function observedAt(data: unknown): string | undefined {
-  if (!data || typeof data !== 'object') return undefined;
+function observedAt(data: unknown, depth = 0): string | undefined {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined;
   for (const k of OBSERVED_KEYS) {
     const v = (data as Record<string, unknown>)[k];
     if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) return new Date(v).toISOString();
     if (typeof v === 'number' && v > 1e9) return new Date(v > 1e12 ? v : v * 1000).toISOString();
   }
+  // One level down (e.g. GEV get_weather returns {weather: {observed_at}}).
+  if (depth === 0) {
+    for (const v of Object.values(data as Record<string, unknown>)) {
+      const hit = observedAt(v, 1);
+      if (hit) return hit;
+    }
+  }
   return undefined;
+}
+
+interface RailData {
+  line?: {
+    railroad?: string;
+    subdivision?: string;
+    kind?: string;
+    distance_m?: number;
+    direction?: string;
+  } | null;
+  main_line?: {
+    railroad?: string;
+    subdivision?: string;
+    distance_m?: number;
+    direction?: string;
+  } | null;
+  crossing?: {
+    fra_crossing_id?: string;
+    street?: string;
+    railroad?: string;
+    subdivision?: string;
+    distance_m?: number;
+    direction?: string;
+    warning_devices?: string;
+    trains_per_day?: number;
+  } | null;
+  dataset_as_of?: string;
+}
+
+/** Compact one-line rail summary for the combined report. */
+export function railLine(d: RailData): string {
+  const m = (n?: number) =>
+    n === undefined ? '?' : n < 1000 ? `${n} m` : `${(n / 1000).toFixed(1)} km`;
+  const sub = (s?: string) => (s ? ` ${titleCase(s)} Sub` : '');
+  const parts: string[] = [];
+  if (d.line)
+    parts.push(
+      `nearest track ${d.line.railroad ?? 'unknown railroad'}${sub(d.line.subdivision)} (${d.line.kind ?? 'track'}) ${m(d.line.distance_m)} ${d.line.direction ?? ''}`.trim(),
+    );
+  if (d.main_line)
+    parts.push(
+      `main line ${d.main_line.railroad ?? ''}${sub(d.main_line.subdivision)} ${m(d.main_line.distance_m)} ${d.main_line.direction ?? ''}`.trim(),
+    );
+  const c = d.crossing;
+  if (c) {
+    const extras = [
+      c.warning_devices,
+      c.trains_per_day !== undefined ? `~${c.trains_per_day} trains/day` : undefined,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    parts.push(
+      `crossing FRA ${c.fra_crossing_id}${c.street ? ` at ${titleCase(c.street)}` : ''} (${c.railroad ?? ''}${sub(c.subdivision)}) ${m(c.distance_m)} ${c.direction ?? ''}${extras ? `; ${extras}` : ''}`,
+    );
+  }
+  if (!parts.length) return 'no rail line or crossing in range (Michigan data only)';
+  return `${parts.join('; ')} [FRA/NARN inventory, revised through ${d.dataset_as_of ?? 'unknown'}; not live train positions]`;
 }
 
 export interface WhatsHappeningDeps {
@@ -121,11 +208,23 @@ export async function whatsHappeningHere(
   let positionNote: string;
   if (lat === undefined || lon === undefined) {
     if (lat !== undefined || lon !== undefined) {
-      return { content: [{ type: 'text', text: 'Give both lat and lon, or neither (to use the phone location).' }], isError: true };
+      return {
+        content: [
+          { type: 'text', text: 'Give both lat and lon, or neither (to use the phone location).' },
+        ],
+        isError: true,
+      };
     }
     const pos = currentPosition(deps.locations, deps.config.LOCATION_STALE_MINUTES, now());
     if (!pos) {
-      return { content: [{ type: 'text', text: noFixMessage(deps.config.PUBLIC_ORIGIN, deps.config.LOCATION_RETENTION_HOURS) }] };
+      return {
+        content: [
+          {
+            type: 'text',
+            text: noFixMessage(deps.config.linkOrigin, deps.config.LOCATION_RETENTION_HOURS),
+          },
+        ],
+      };
     }
     lat = pos.lat;
     lon = pos.lon;
@@ -157,10 +256,16 @@ export async function whatsHappeningHere(
       return { source, status: 'unavailable', summary: missing, retrieved_at: retrievedAt() };
     }
     const verdict = registry.policy.evaluate(def);
-    if (!verdict.allowed) return { source, status: 'skipped', summary: verdict.reason, retrieved_at: retrievedAt() };
+    if (!verdict.allowed)
+      return { source, status: 'skipped', summary: verdict.reason, retrieved_at: retrievedAt() };
     const rate = registry.policy.consumeRate(registry.policy.bucketsFor(def, toolArgs));
     if (!rate.ok) {
-      return { source, status: 'skipped', summary: `skipped: rate limit for ${rate.bucket} (retry in ~${rate.retryAfterS} s)`, retrieved_at: retrievedAt() };
+      return {
+        source,
+        status: 'skipped',
+        summary: `skipped: rate limit for ${rate.bucket} (retry in ~${rate.retryAfterS} s)`,
+        retrieved_at: retrievedAt(),
+      };
     }
     const out = await runner.callRaw(def, toolArgs, ctx, timeoutMs);
     const rep = interpret(out);
@@ -176,7 +281,7 @@ export async function whatsHappeningHere(
   // Rail is local and fast; its subdivision feeds the Pulse rail query.
   const rail = await runSource('rail', 'nearest_rail', { lat, lon }, 3000, (out) => {
     if (out.isError) return { status: 'error', summary: out.summary };
-    return { status: 'ok', summary: out.summary, data: out.data, observed_at: (out.data as { dataset_as_of?: string })?.dataset_as_of };
+    return { status: 'ok', summary: railLine((out.data ?? {}) as RailData), data: out.data };
   });
   const railData = rail.data as { line?: { subdivision?: string; railroad?: string } } | undefined;
 
@@ -185,7 +290,12 @@ export async function whatsHappeningHere(
     runSource(
       'rail_radio',
       'rail_activity_near',
-      { lat, lon, since_minutes: 30, ...(railData?.line?.subdivision ? { subdivision: railData.line.subdivision } : {}) },
+      {
+        lat,
+        lon,
+        since_minutes: 30,
+        ...(railData?.line?.subdivision ? { subdivision: railData.line.subdivision } : {}),
+      },
       deps.config.PULSE_TIMEOUT_MS + 500,
       (out) =>
         pulseDown(out)
@@ -206,17 +316,44 @@ export async function whatsHappeningHere(
             ? { status: 'error', summary: out.summary }
             : { status: 'ok', summary: out.summary, data: out.data },
     ),
-    runSource('traffic', 'get_traffic_flow', { area: { lat, lon, radius_km: Math.min(radius, 10) } }, 30_000, (out) => {
-      if (out.isError && /tomtom/i.test(out.summary)) return { status: 'unavailable', summary: 'traffic needs a TomTom key' };
-      if (out.isError) return { status: 'error', summary: out.summary };
-      return { status: 'ok', summary: out.summary, data: compact(out.data, ['congested_km', 'closed_km', 'by_category', 'observed_at', 'map_url']) };
-    }),
-    runSource('cameras', 'find_cctv_cameras', { area: { lat, lon, radius_km: radius }, limit: 5 }, 45_000, (out) => {
-      if (out.isError) return { status: 'error', summary: out.summary };
-      const d = (out.data ?? {}) as { cameras?: unknown[]; total?: number };
-      const cams = Array.isArray(d.cameras) ? d.cameras.slice(0, 5).map((c) => compact(c, ['id', 'name', 'city', 'distance_km', 'provider', 'credit'])) : undefined;
-      return { status: 'ok', summary: out.summary, data: { total: d.total, cameras: cams } };
-    }),
+    runSource(
+      'traffic',
+      'get_traffic_flow',
+      { area: { lat, lon, radius_km: Math.min(radius, 10) } },
+      30_000,
+      (out) => {
+        if (out.isError && /tomtom/i.test(out.summary))
+          return { status: 'unavailable', summary: 'traffic needs a TomTom key' };
+        if (out.isError) return { status: 'error', summary: out.summary };
+        return {
+          status: 'ok',
+          summary: out.summary,
+          data: compact(out.data, [
+            'congested_km',
+            'closed_km',
+            'by_category',
+            'observed_at',
+            'map_url',
+          ]),
+        };
+      },
+    ),
+    runSource(
+      'cameras',
+      'find_cctv_cameras',
+      { area: { lat, lon, radius_km: radius }, limit: 5 },
+      45_000,
+      (out) => {
+        if (out.isError) return { status: 'error', summary: out.summary };
+        const d = (out.data ?? {}) as { cameras?: unknown[]; total?: number };
+        const cams = Array.isArray(d.cameras)
+          ? d.cameras
+              .slice(0, 5)
+              .map((c) => compact(c, ['id', 'name', 'city', 'distance_km', 'provider', 'credit']))
+          : undefined;
+        return { status: 'ok', summary: out.summary, data: { total: d.total, cameras: cams } };
+      },
+    ),
     runSource('weather', 'get_weather', { location: { lat, lon } }, 20_000, (out) => {
       if (out.isError) return { status: 'error', summary: out.summary };
       const d = { ...((out.data ?? {}) as Record<string, unknown>) };
@@ -234,7 +371,9 @@ export async function whatsHappeningHere(
     cameras: 'Cameras',
     weather: 'Weather',
   };
-  const lines = [`What's happening within ${radius} km of ${lat.toFixed(4)}, ${lon.toFixed(4)} (${positionNote}):`];
+  const lines = [
+    `What's happening within ${radius} km of ${lat.toFixed(4)}, ${lon.toFixed(4)} (${positionNote}):`,
+  ];
   for (const s of sources) {
     const age = s.age_s !== undefined ? ` [data ${humanAge(s.age_s)} old]` : '';
     const flag = s.status === 'ok' ? '' : ` (${s.status})`;
@@ -267,6 +406,7 @@ function oneLine(s: string): string {
 function compact(v: unknown, keys: string[]): unknown {
   if (!v || typeof v !== 'object') return v;
   const out: Record<string, unknown> = {};
-  for (const k of keys) if ((v as Record<string, unknown>)[k] !== undefined) out[k] = (v as Record<string, unknown>)[k];
+  for (const k of keys)
+    if ((v as Record<string, unknown>)[k] !== undefined) out[k] = (v as Record<string, unknown>)[k];
   return out;
 }

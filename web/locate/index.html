@@ -1,32 +1,44 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#1f6feb">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Locate">
-<title>Locate</title>
-<link rel="manifest" href="/locate/manifest.webmanifest">
-<link rel="icon" href="/locate/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/locate/icon-192.png">
-<link rel="stylesheet" href="/gw/static/app.css">
-<script src="/locate/app.js" defer></script>
-</head>
-<body>
-<nav class="gw-nav"><a href="/">Globe</a><a href="/pulse/">Pulse</a><a href="/locate/">Locate</a></nav>
-<main class="gw-main">
-  <h1>Share my location with Claude</h1>
-  <p class="muted">Sends one fix to your connector. Claude only ever sees the latest fix, and fixes are deleted after 24 hours.</p>
-  <button id="update" class="big" type="button">Update My Location</button>
-  <label class="row"><input id="watch" type="checkbox"> Keep updating while this page is open</label>
-  <div id="status" class="status card" aria-live="polite">Ready.</div>
-  <div id="setup" class="card warn" hidden>
-    <strong>This phone is not set up yet.</strong>
-    <p class="muted">On the server run <code>npm run devices -- add my-phone --pwa</code> and open the setup link it prints on this phone.</p>
-  </div>
-  <p class="muted"><button id="forget" type="button" class="secondary">Forget this device</button></p>
-</main>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#1f6feb" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Locate" />
+    <title>Locate</title>
+    <link rel="manifest" href="/locate/manifest.webmanifest" />
+    <link rel="icon" href="/locate/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/locate/icon-192.png" />
+    <link rel="stylesheet" href="/gw/static/app.css" />
+    <script src="/locate/app.js" defer></script>
+  </head>
+  <body>
+    <nav class="gw-nav">
+      <a href="/">Globe</a><a href="/pulse/">Pulse</a><a href="/locate/">Locate</a>
+    </nav>
+    <main class="gw-main">
+      <h1>Share my location with Claude</h1>
+      <p class="muted">
+        Sends one fix to your connector. Claude only ever sees the latest fix, and fixes are deleted
+        after 24 hours.
+      </p>
+      <button id="update" class="big" type="button">Update My Location</button>
+      <label class="row"
+        ><input id="watch" type="checkbox" /> Keep updating while this page is open</label
+      >
+      <div id="status" class="status card" aria-live="polite">Ready.</div>
+      <div id="setup" class="card warn" hidden>
+        <strong>This phone is not set up yet.</strong>
+        <p class="muted">
+          On the server run <code>npm run devices -- add my-phone --pwa</code> and open the setup
+          link it prints on this phone.
+        </p>
+      </div>
+      <p class="muted">
+        <button id="forget" type="button" class="secondary">Forget this device</button>
+      </p>
+    </main>
+  </body>
 </html>

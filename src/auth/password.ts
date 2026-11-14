@@ -7,11 +7,21 @@ import { promisify } from 'node:util';
 import { kvGet, kvSet, type DB } from '../db.js';
 import { verifyTotp } from './totp.js';
 
-const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number, opts: object) => Promise<Buffer>;
+const scrypt = promisify(scryptCb) as (
+  pw: string,
+  salt: Buffer,
+  len: number,
+  opts: object,
+) => Promise<Buffer>;
 
 export async function hashPassword(password: string, logN = 15): Promise<string> {
   const salt = randomBytes(16);
-  const hash = await scrypt(password, salt, 32, { N: 2 ** logN, r: 8, p: 1, maxmem: 128 * 1024 * 1024 });
+  const hash = await scrypt(password, salt, 32, {
+    N: 2 ** logN,
+    r: 8,
+    p: 1,
+    maxmem: 128 * 1024 * 1024,
+  });
   return `scrypt$${logN}$8$1$${salt.toString('base64url')}$${hash.toString('base64url')}`;
 }
 
@@ -20,12 +30,17 @@ export async function verifyPassword(password: string, stored: string): Promise<
   if (!m) return false;
   const [, logN, r, p, salt, hash] = m;
   const expected = Buffer.from(hash!, 'base64url');
-  const got = await scrypt(password.slice(0, 1024), Buffer.from(salt!, 'base64url'), expected.length, {
-    N: 2 ** Number(logN),
-    r: Number(r),
-    p: Number(p),
-    maxmem: 128 * 1024 * 1024,
-  });
+  const got = await scrypt(
+    password.slice(0, 1024),
+    Buffer.from(salt!, 'base64url'),
+    expected.length,
+    {
+      N: 2 ** Number(logN),
+      r: Number(r),
+      p: Number(p),
+      maxmem: 128 * 1024 * 1024,
+    },
+  );
   return got.length === expected.length && timingSafeEqual(got, expected);
 }
 
@@ -64,7 +79,12 @@ export class Lockout {
 
   fail(ip: string): void {
     this.bump(`ip:${ip}`, this.policy.perIpMax, this.policy.perIpWindowMs, this.policy.perIpLockMs);
-    this.bump('global', this.policy.globalMax, this.policy.globalWindowMs, this.policy.globalLockMs);
+    this.bump(
+      'global',
+      this.policy.globalMax,
+      this.policy.globalWindowMs,
+      this.policy.globalLockMs,
+    );
   }
 
   succeed(ip: string): void {
@@ -73,12 +93,14 @@ export class Lockout {
 
   private bump(key: string, max: number, windowMs: number, lockMs: number): void {
     const t = this.now();
-    const row = this.db.prepare('SELECT count, first_at FROM login_failures WHERE key = ?').get(key) as
-      | { count: number; first_at: number }
-      | undefined;
+    const row = this.db
+      .prepare('SELECT count, first_at FROM login_failures WHERE key = ?')
+      .get(key) as { count: number; first_at: number } | undefined;
     if (!row || t - row.first_at > windowMs) {
       this.db
-        .prepare('INSERT INTO login_failures(key, count, first_at, locked_until) VALUES (?, 1, ?, NULL) ON CONFLICT(key) DO UPDATE SET count = 1, first_at = excluded.first_at, locked_until = NULL')
+        .prepare(
+          'INSERT INTO login_failures(key, count, first_at, locked_until) VALUES (?, 1, ?, NULL) ON CONFLICT(key) DO UPDATE SET count = 1, first_at = excluded.first_at, locked_until = NULL',
+        )
         .run(key, t);
       return;
     }

@@ -1,14 +1,19 @@
 /**
- * Express application. Route map (public = reachable without Cloudflare Access):
+ * Two Express applications on two listeners.
  *
- *   GET  /healthz                                   public, {ok:true} only
- *   GET  /.well-known/oauth-protected-resource[/mcp] public metadata
- *   GET  /.well-known/oauth-authorization-server     public metadata
- *   *    /mcp                                        OAuth bearer token (audience-bound)
- *   POST /oauth/token | /oauth/register | /oauth/revoke   public OAuth endpoints (own auth)
- *   GET  /oauth/authorize, POST /oauth/authorize/decision, /oauth/admin, /auth/*  owner login
- *   POST /api/location                              device token
- *   /locate, /pulse, / (GEV proxy)                  owner login (UI)
+ * PUBLIC listener (PORT, reached only through the Cloudflare Tunnel). Routes ONLY:
+ *   GET  /healthz                                     {ok:true}
+ *   GET  /.well-known/oauth-protected-resource[/mcp]   RFC 9728 metadata
+ *   GET  /.well-known/oauth-authorization-server       RFC 8414 metadata
+ *   *    /mcp                                          OAuth bearer token (audience-bound)
+ *   POST /oauth/token | /oauth/register | /oauth/revoke
+ *   POST /api/location                                device token
+ *   (+ /oauth/authorize and /auth/login only in the opt-in PUBLIC_AUTHORIZE_FALLBACK mode)
+ * Everything else: 404.
+ *
+ * PRIVATE listener (PRIVATE_PORT on 127.0.0.1, reached only through tailscale serve):
+ *   /, /pulse, /locate, /oauth/authorize, consent, /oauth/admin, /api/location (for the PWA),
+ *   login pages in dev. Identity: Tailscale-User-Login from the trusted proxy.
  */
 import type { Server } from 'node:http';
 import express, { type Express, type Request, type Response } from 'express';
@@ -42,21 +47,34 @@ export interface AppDeps {
   locations: LocationStore;
   runner: ToolRunner;
   limiter?: RateLimiter;
-  /** Extra route installers (OAuth AS, location ingest, UI) mounted before the fallback. */
-  mount?: Array<(app: Express, ctx: AppContext) => void>;
 }
 
+export type Listener = 'public' | 'private';
+
 export interface AppContext {
+  listener: Listener;
   sec: SecurityConfig;
   limiter: RateLimiter;
 }
 
-export function securityConfig(config: Config): SecurityConfig {
+export type Mount = (app: Express, ctx: AppContext) => void;
+
+export function securityConfig(config: Config, listener: Listener): SecurityConfig {
+  if (listener === 'public') {
+    return {
+      allowedHosts: config.allowedHosts,
+      publicOrigin: config.PUBLIC_ORIGIN,
+      trustedProxies: config.TRUSTED_PROXY_IPS,
+      clientIpHeader: 'cf-connecting-ip',
+      hsts: config.PUBLIC_ORIGIN.startsWith('https://'),
+    };
+  }
   return {
-    allowedHosts: config.allowedHosts,
-    publicOrigin: config.PUBLIC_ORIGIN,
-    trustedProxies: config.TRUSTED_PROXY_IPS,
-    hsts: config.PUBLIC_ORIGIN.startsWith('https://'),
+    allowedHosts: config.privateAllowedHosts,
+    publicOrigin: config.privateOrigin,
+    trustedProxies: config.TAILSCALE_TRUSTED_PROXY_IPS,
+    clientIpHeader: 'x-forwarded-for',
+    hsts: config.privateOrigin.startsWith('https://'),
   };
 }
 
@@ -70,23 +88,39 @@ export function protectedResourceMetadata(config: Config) {
   };
 }
 
-export function createApp(deps: AppDeps): Express {
-  const { config } = deps;
+function baseApp(sec: SecurityConfig, limiter: RateLimiter): Express {
   const app = express();
-  const sec = securityConfig(config);
-  const limiter = deps.limiter ?? new RateLimiter();
   app.disable('x-powered-by');
   app.set('trust proxy', false);
   app.set('etag', false);
-
   app.use(baseHeaders(sec));
   app.use(hostCheck(sec));
-  // Coarse per-IP ceiling for everything (Cloudflare rate-limits too).
   app.use(rateLimit(limiter, 'all', 1200, 60_000, (req) => ipOf(req, sec)));
-
   app.get('/healthz', (_req, res) => {
     res.set('Cache-Control', 'no-store').json({ ok: true });
   });
+  return app;
+}
+
+function finish(app: Express, logger: Logger): Express {
+  app.use((_req, res) => {
+    res.status(404).type('text/plain').send('Not found');
+  });
+  app.use((err: unknown, _req: Request, res: Response, _next: express.NextFunction) => {
+    const status = (err as { status?: number }).status ?? 500;
+    if (status >= 500)
+      logger.error('http_error', { error: err instanceof Error ? err.message : String(err) });
+    if (!res.headersSent)
+      res.status(status).json({ error: status === 413 ? 'payload_too_large' : 'request_error' });
+  });
+  return app;
+}
+
+export function createPublicApp(deps: AppDeps, mounts: Mount[] = []): Express {
+  const { config } = deps;
+  const sec = securityConfig(config, 'public');
+  const limiter = deps.limiter ?? new RateLimiter();
+  const app = baseApp(sec, limiter);
 
   const prm = protectedResourceMetadata(config);
   const sendPrm = (_req: Request, res: Response) => {
@@ -95,10 +129,11 @@ export function createApp(deps: AppDeps): Express {
   app.get('/.well-known/oauth-protected-resource', sendPrm);
   app.get('/.well-known/oauth-protected-resource/mcp', sendPrm);
 
-  // ---- MCP ----
   const mcpHandler = toNodeHandler(
     createMcpHttpHandler({ config, runner: deps.runner, locations: deps.locations }),
-    { maxRequestBodySize: 256 * 1024 },
+    {
+      maxRequestBodySize: 256 * 1024,
+    },
   );
   const bearer = bearerAuth({
     tokens: deps.tokens,
@@ -119,23 +154,24 @@ export function createApp(deps: AppDeps): Express {
         return;
       }
       mcpHandler(req, res).catch((err: unknown) => {
-        deps.logger.error('mcp_handler_error', { error: err instanceof Error ? err.message : String(err) });
+        deps.logger.error('mcp_handler_error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
         if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
       });
     },
   );
 
-  for (const m of deps.mount ?? []) m(app, { sec, limiter });
+  for (const m of mounts) m(app, { listener: 'public', sec, limiter });
+  return finish(app, deps.logger);
+}
 
-  app.use((_req, res) => {
-    res.status(404).type('text/plain').send('Not found');
-  });
-  app.use((err: unknown, _req: Request, res: Response, _next: express.NextFunction) => {
-    const status = (err as { status?: number }).status ?? 500;
-    if (status >= 500) deps.logger.error('http_error', { error: err instanceof Error ? err.message : String(err) });
-    if (!res.headersSent) res.status(status).json({ error: status === 413 ? 'payload_too_large' : 'request_error' });
-  });
-  return app;
+export function createPrivateApp(deps: AppDeps, mounts: Mount[] = []): Express {
+  const sec = securityConfig(deps.config, 'private');
+  const limiter = deps.limiter ?? new RateLimiter();
+  const app = baseApp(sec, limiter);
+  for (const m of mounts) m(app, { listener: 'private', sec, limiter });
+  return finish(app, deps.logger);
 }
 
 /** Node server timeouts: bounded request intake; responses may stream up to the tool timeout. */

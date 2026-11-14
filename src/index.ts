@@ -5,7 +5,8 @@ import { installAllRoutes } from './routes.js';
 import { startGateway } from './gateway.js';
 
 async function main() {
-  if (process.env.GATEWAY_ENV_FILE !== 'none') loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
+  if (process.env.GATEWAY_ENV_FILE !== 'none')
+    loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
   let config;
   try {
     config = loadConfig();
@@ -19,10 +20,10 @@ async function main() {
   const logger = createLogger({ level: config.LOG_LEVEL, base: { app: 'godseye-gateway' } });
   if (config.loginProvider === 'none') {
     logger.warn('no_login_provider', {
-      note: 'Neither CF_ACCESS_* nor GATEWAY_PASSWORD_HASH/GATEWAY_TOTP_SECRET is set: UI and /oauth/authorize will refuse all logins.',
+      note: 'Neither OWNER_TAILSCALE_LOGIN nor GATEWAY_PASSWORD_HASH/GATEWAY_TOTP_SECRET is set: the UI and /oauth/authorize will refuse all logins.',
     });
   }
-  const gw = await startGateway(config, { logger, mount: installAllRoutes() });
+  const gw = await startGateway(config, { logger, routes: installAllRoutes() });
   const shutdown = (sig: string) => {
     logger.info('shutdown', { signal: sig });
     gw.close().then(

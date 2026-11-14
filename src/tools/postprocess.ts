@@ -94,7 +94,8 @@ export function rewriteLinks<T>(value: T, fromOrigins: string[], to: string, dep
     for (const o of fromOrigins) if (s.includes(o)) s = s.split(o).join(to);
     return s as T;
   }
-  if (Array.isArray(value)) return value.map((v) => rewriteLinks(v, fromOrigins, to, depth + 1)) as T;
+  if (Array.isArray(value))
+    return value.map((v) => rewriteLinks(v, fromOrigins, to, depth + 1)) as T;
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
@@ -131,18 +132,22 @@ export function isStreetViewFallback(def: Pick<ToolDef, 'name'>, data: unknown):
 export function fitJson(data: unknown, maxChars: number): { json: string; truncated: boolean } {
   let json = safeStringify(data);
   if (json.length <= maxChars) return { json, truncated: false };
-  let work: unknown = structuredClone(data);
+  const work: unknown = structuredClone(data);
   for (let i = 0; i < 30 && json.length > maxChars; i++) {
     const largest = findLargestArray(work);
     if (!largest || largest.arr.length <= 1) break;
     const keep = Math.max(1, Math.floor(largest.arr.length / 2));
     const dropped = largest.arr.length - keep;
     largest.arr.splice(keep);
-    largest.parent[largest.key + '_truncated'] = `${dropped} more item(s) omitted to fit the result size limit`;
+    largest.parent[largest.key + '_truncated'] =
+      `${dropped} more item(s) omitted to fit the result size limit`;
     json = safeStringify(work);
   }
   if (json.length > maxChars) {
-    return { json: json.slice(0, maxChars - 40) + '…[truncated: result too large]', truncated: true };
+    return {
+      json: json.slice(0, maxChars - 40) + '…[truncated: result too large]',
+      truncated: true,
+    };
   }
   return { json, truncated: true };
 }
@@ -154,7 +159,8 @@ function findLargestArray(
   depth = 0,
 ): { arr: unknown[]; parent: Record<string, unknown>; key: string; size: number } | undefined {
   if (depth > 8 || !v || typeof v !== 'object') return undefined;
-  let best: { arr: unknown[]; parent: Record<string, unknown>; key: string; size: number } | undefined;
+  let best:
+    { arr: unknown[]; parent: Record<string, unknown>; key: string; size: number } | undefined;
   if (Array.isArray(v) && parent && key !== undefined) {
     best = { arr: v, parent, key, size: safeStringify(v).length };
   }
@@ -196,7 +202,8 @@ export async function postprocess(
     if ('dropped' in r) notes.push(r.dropped);
     else outImages.push({ type: 'image', data: r.image.data, mimeType: r.image.mimeType });
   }
-  if (images.length > opts.maxImages) notes.push(`${images.length - opts.maxImages} additional image(s) omitted`);
+  if (images.length > opts.maxImages)
+    notes.push(`${images.length - opts.maxImages} additional image(s) omitted`);
 
   const header = [
     `[source: ${def.source === 'gev' ? "God's Eye View" : def.source} · tool ${def.name} · retrieved ${now.toISOString()}]`,

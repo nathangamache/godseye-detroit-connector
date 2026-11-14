@@ -2,8 +2,8 @@
  * Configuration: read from process.env (optionally seeded from a .env file),
  * validated with zod. Every value has a safe default except secrets.
  *
- * Production mode fails closed: Cloudflare Access must be configured, and the
- * public origin must be https.
+ * Production mode fails closed: the Tailscale owner login and an https tailnet
+ * origin must be configured, and the public origin must be https.
  */
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -189,11 +189,24 @@ const schema = z.object({
   LOOPBACK_REDIRECT_URIS: list(['http://localhost/callback', 'http://127.0.0.1/callback']),
   DCR_MAX_CLIENTS: int(500, 1, 100_000),
 
+  // Private (tailnet-only) listener for everything a human logs into
+  PRIVATE_HOST: z.string().default('127.0.0.1'),
+  PRIVATE_PORT: int(7702, 0, 65535),
+  /** The browser-facing origin of the private listener, e.g. https://godseye.<tailnet>.ts.net */
+  PRIVATE_ORIGIN: optionalString,
+  /** authorization_endpoint advertised in AS metadata (default: PRIVATE_ORIGIN/oauth/authorize). */
+  AUTHORIZATION_ENDPOINT: optionalString,
+  /** Origin used for links in tool results (default: PRIVATE_ORIGIN, where the globe lives). */
+  LINK_ORIGIN: optionalString,
+  /** FALLBACK: serve /oauth/authorize on the public listener behind password+TOTP. Off by default. */
+  PUBLIC_AUTHORIZE_FALLBACK: z.enum(['off', 'password']).default('off'),
+
   // Login
-  LOGIN_PROVIDER: z.enum(['auto', 'cf-access', 'password']).default('auto'),
-  OWNER_EMAIL: optionalString,
-  CF_ACCESS_TEAM_DOMAIN: optionalString,
-  CF_ACCESS_AUD: optionalString,
+  LOGIN_PROVIDER: z.enum(['auto', 'tailscale', 'password']).default('auto'),
+  /** Tailscale login name (Tailscale-User-Login) of the only person who may log in. */
+  OWNER_TAILSCALE_LOGIN: optionalString,
+  /** Peers allowed to assert Tailscale-User-Login on the private listener (tailscale serve). */
+  TAILSCALE_TRUSTED_PROXY_IPS: list(['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   GATEWAY_PASSWORD_HASH: optionalString,
   GATEWAY_TOTP_SECRET: optionalString,
   SESSION_SECRET: optionalString,
@@ -212,9 +225,18 @@ export interface Config extends RawConfig {
   publicHost: string;
   mcpResource: string;
   issuer: string;
+  /** Host allowlist for the public listener. */
   allowedHosts: string[];
-  loginProvider: 'cf-access' | 'password' | 'none';
-  cfAccess?: { teamDomain: string; aud: string; ownerEmail: string };
+  /** Host allowlist for the private listener. */
+  privateAllowedHosts: string[];
+  privateOrigin: string;
+  authorizationEndpoint: string;
+  linkOrigin: string;
+  /** Login provider on the private listener. */
+  loginProvider: 'tailscale' | 'password' | 'none';
+  ownerTailscaleLogin?: string;
+  /** Password+TOTP on the public listener's /oauth/authorize (fallback mode only). */
+  publicAuthorize: boolean;
   toolRateLimits: RateLimitSpec[];
   gevApiOrigins: string[];
 }
@@ -229,7 +251,10 @@ const WINDOWS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 8
 
 export function parseRateLimits(spec: string): RateLimitSpec[] {
   const out: RateLimitSpec[] = [];
-  for (const part of spec.split(',').map((s) => s.trim()).filter(Boolean)) {
+  for (const part of spec
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)) {
     const m = /^([a-z0-9_:-]+)=(\d+)\/(s|m|h|d)$/i.exec(part);
     if (!m) throw new Error(`bad TOOL_RATE_LIMITS entry: ${part}`);
     out.push({ bucket: m[1]!, limit: Number(m[2]), windowMs: WINDOWS[m[3]!.toLowerCase()]! });
@@ -237,8 +262,16 @@ export function parseRateLimits(spec: string): RateLimitSpec[] {
   return out;
 }
 
-function normalizeTeamDomain(s: string): string {
-  return s.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+function originOf(name: string, value: string): URL {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    throw new ConfigError(`${name} must be an absolute URL`);
+  }
+  if ((u.pathname !== '/' && u.pathname !== '') || u.search || u.hash)
+    throw new ConfigError(`${name} must be an origin with no path`);
+  return u;
 }
 
 export class ConfigError extends Error {}
@@ -252,44 +285,62 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const raw = parsed.data;
   const mode =
     raw.GATEWAY_MODE ??
-    (raw.NODE_ENV === 'production' ? 'production' : raw.NODE_ENV === 'test' ? 'test' : 'development');
-  let publicUrl: URL;
-  try {
-    publicUrl = new URL(raw.PUBLIC_ORIGIN);
-  } catch {
-    throw new ConfigError('PUBLIC_ORIGIN must be an absolute URL');
-  }
-  if (publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash) {
-    throw new ConfigError('PUBLIC_ORIGIN must be an origin with no path');
-  }
+    (raw.NODE_ENV === 'production'
+      ? 'production'
+      : raw.NODE_ENV === 'test'
+        ? 'test'
+        : 'development');
+  const publicUrl = originOf('PUBLIC_ORIGIN', raw.PUBLIC_ORIGIN);
   const issuer = publicUrl.origin;
-
-  const cfConfigured = Boolean(raw.CF_ACCESS_TEAM_DOMAIN && raw.CF_ACCESS_AUD && raw.OWNER_EMAIL);
+  const privateUrl = originOf(
+    'PRIVATE_ORIGIN',
+    raw.PRIVATE_ORIGIN ?? `http://127.0.0.1:${raw.PRIVATE_PORT}`,
+  );
+  const privateOrigin = privateUrl.origin;
   const passwordConfigured = Boolean(raw.GATEWAY_PASSWORD_HASH && raw.GATEWAY_TOTP_SECRET);
+  const tailscaleConfigured = Boolean(raw.OWNER_TAILSCALE_LOGIN);
+  const publicAuthorize = raw.PUBLIC_AUTHORIZE_FALLBACK === 'password';
 
   if (mode === 'production') {
-    if (publicUrl.protocol !== 'https:') throw new ConfigError('production requires an https PUBLIC_ORIGIN');
-    if (!cfConfigured) {
+    if (publicUrl.protocol !== 'https:')
+      throw new ConfigError('production requires an https PUBLIC_ORIGIN');
+    if (!raw.PRIVATE_ORIGIN || privateUrl.protocol !== 'https:') {
       throw new ConfigError(
-        'production mode requires CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and OWNER_EMAIL (fail closed)',
+        'production requires an https PRIVATE_ORIGIN (the tailnet URL, e.g. https://godseye.<tailnet>.ts.net)',
       );
     }
-    if (raw.LOGIN_PROVIDER === 'password') {
-      throw new ConfigError('LOGIN_PROVIDER=password is not allowed in production; use cf-access');
+    if (!tailscaleConfigured) {
+      throw new ConfigError('production mode requires OWNER_TAILSCALE_LOGIN (fail closed)');
     }
+    if (raw.LOGIN_PROVIDER === 'password') {
+      throw new ConfigError('LOGIN_PROVIDER=password is not allowed in production; use tailscale');
+    }
+  }
+  if (publicAuthorize && !passwordConfigured) {
+    throw new ConfigError(
+      'PUBLIC_AUTHORIZE_FALLBACK=password needs GATEWAY_PASSWORD_HASH and GATEWAY_TOTP_SECRET',
+    );
   }
 
   let loginProvider: Config['loginProvider'];
-  if (raw.LOGIN_PROVIDER === 'cf-access') {
-    if (!cfConfigured) throw new ConfigError('LOGIN_PROVIDER=cf-access needs CF_ACCESS_* and OWNER_EMAIL');
-    loginProvider = 'cf-access';
+  if (raw.LOGIN_PROVIDER === 'tailscale') {
+    if (!tailscaleConfigured)
+      throw new ConfigError('LOGIN_PROVIDER=tailscale needs OWNER_TAILSCALE_LOGIN');
+    loginProvider = 'tailscale';
   } else if (raw.LOGIN_PROVIDER === 'password') {
     if (!passwordConfigured)
-      throw new ConfigError('LOGIN_PROVIDER=password needs GATEWAY_PASSWORD_HASH and GATEWAY_TOTP_SECRET');
+      throw new ConfigError(
+        'LOGIN_PROVIDER=password needs GATEWAY_PASSWORD_HASH and GATEWAY_TOTP_SECRET',
+      );
     loginProvider = 'password';
   } else {
-    loginProvider = cfConfigured ? 'cf-access' : passwordConfigured ? 'password' : 'none';
+    loginProvider = tailscaleConfigured ? 'tailscale' : passwordConfigured ? 'password' : 'none';
   }
+
+  const authorizationEndpoint =
+    raw.AUTHORIZATION_ENDPOINT ??
+    (publicAuthorize ? `${issuer}/oauth/authorize` : `${privateOrigin}/oauth/authorize`);
+  const linkOrigin = (raw.LINK_ORIGIN ?? privateOrigin).replace(/\/+$/, '');
 
   const gevUrl = new URL(raw.GEV_URL);
   const gevApiOrigins = new Set<string>([gevUrl.origin]);
@@ -298,6 +349,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const allowedHosts = Array.from(
     new Set([publicUrl.hostname, '127.0.0.1', 'localhost', ...raw.EXTRA_ALLOWED_HOSTS]),
   );
+  const privateAllowedHosts = Array.from(new Set([privateUrl.hostname, '127.0.0.1', 'localhost']));
 
   return {
     ...raw,
@@ -307,14 +359,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     issuer,
     mcpResource: `${issuer}/mcp`,
     allowedHosts,
+    privateAllowedHosts,
+    privateOrigin,
+    authorizationEndpoint,
+    linkOrigin,
     loginProvider,
-    cfAccess: cfConfigured
-      ? {
-          teamDomain: normalizeTeamDomain(raw.CF_ACCESS_TEAM_DOMAIN!),
-          aud: raw.CF_ACCESS_AUD!,
-          ownerEmail: raw.OWNER_EMAIL!.toLowerCase(),
-        }
-      : undefined,
+    ownerTailscaleLogin: raw.OWNER_TAILSCALE_LOGIN?.toLowerCase(),
+    publicAuthorize,
     toolRateLimits: parseRateLimits(raw.TOOL_RATE_LIMITS),
     gevApiOrigins: Array.from(gevApiOrigins),
   };

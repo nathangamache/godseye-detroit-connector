@@ -33,7 +33,8 @@ export function checkCimdUrl(raw: string): URL {
     throw new CimdFetchError('client_id is not a URL');
   }
   if (u.protocol !== 'https:') throw new CimdFetchError('client_id URL must be https');
-  if (u.username || u.password) throw new CimdFetchError('client_id URL must not contain credentials');
+  if (u.username || u.password)
+    throw new CimdFetchError('client_id URL must not contain credentials');
   if (u.hash) throw new CimdFetchError('client_id URL must not contain a fragment');
   if (u.port && u.port !== '443') throw new CimdFetchError('client_id URL must use port 443');
   if (u.pathname === '/' || !u.pathname) throw new CimdFetchError('client_id URL must have a path');
@@ -41,9 +42,13 @@ export function checkCimdUrl(raw: string): URL {
 }
 
 /** Resolves and validates every address; returns the one to connect to. */
-export async function resolvePublic(host: string, resolver: Resolver = defaultResolver): Promise<LookupAddress> {
+export async function resolvePublic(
+  host: string,
+  resolver: Resolver = defaultResolver,
+): Promise<LookupAddress> {
   if (isLiteralIp(host)) {
-    if (isPrivateIp(stripBrackets(host))) throw new CimdFetchError('client_id host resolves to a non-public address');
+    if (isPrivateIp(stripBrackets(host)))
+      throw new CimdFetchError('client_id host resolves to a non-public address');
     return { address: stripBrackets(host), family: host.includes(':') ? 6 : 4 };
   }
   let addrs: LookupAddress[];
@@ -54,7 +59,8 @@ export async function resolvePublic(host: string, resolver: Resolver = defaultRe
   }
   if (!addrs.length) throw new CimdFetchError('client_id host does not resolve');
   for (const a of addrs) {
-    if (isPrivateIp(a.address)) throw new CimdFetchError('client_id host resolves to a non-public address');
+    if (isPrivateIp(a.address))
+      throw new CimdFetchError('client_id host resolves to a non-public address');
   }
   return addrs[0]!;
 }
@@ -66,7 +72,9 @@ function isLiteralIp(h: string): boolean {
   return /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.startsWith('[') || h.includes(':');
 }
 
-export function makeCimdFetcher(opts: { timeoutMs?: number; maxBytes?: number; resolver?: Resolver } = {}): CimdFetcher {
+export function makeCimdFetcher(
+  opts: { timeoutMs?: number; maxBytes?: number; resolver?: Resolver } = {},
+): CimdFetcher {
   const timeoutMs = opts.timeoutMs ?? 5000;
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   return async (raw) => {
@@ -80,16 +88,26 @@ export function makeCimdFetcher(opts: { timeoutMs?: number; maxBytes?: number; r
           port: 443,
           path: url.pathname + url.search,
           method: 'GET',
-          headers: { accept: 'application/json', 'user-agent': 'godseye-detroit-connector/0.1 (oauth client metadata)' },
+          headers: {
+            accept: 'application/json',
+            'user-agent': 'godseye-detroit-connector/0.1 (oauth client metadata)',
+          },
           timeout: timeoutMs,
           // Pin the connection to the address we validated.
-          lookup: (_h: string, _o: unknown, cb: (err: Error | null, address: string, family: number) => void) =>
-            cb(null, addr.address, addr.family),
+          lookup: (
+            _h: string,
+            _o: unknown,
+            cb: (err: Error | null, address: string, family: number) => void,
+          ) => cb(null, addr.address, addr.family),
         },
         (res) => {
           if (res.statusCode !== 200) {
             res.resume();
-            reject(new CimdFetchError(`client metadata fetch returned HTTP ${res.statusCode} (redirects are not followed)`));
+            reject(
+              new CimdFetchError(
+                `client metadata fetch returned HTTP ${res.statusCode} (redirects are not followed)`,
+              ),
+            );
             return;
           }
           const ct = String(res.headers['content-type'] ?? '');
@@ -112,14 +130,26 @@ export function makeCimdFetcher(opts: { timeoutMs?: number; maxBytes?: number; r
           res.on('end', () => {
             const cc = String(res.headers['cache-control'] ?? '');
             const m = /max-age=(\d+)/.exec(cc);
-            resolve({ body: Buffer.concat(chunks).toString('utf8'), maxAgeS: m ? Number(m[1]) : undefined });
+            resolve({
+              body: Buffer.concat(chunks).toString('utf8'),
+              maxAgeS: m ? Number(m[1]) : undefined,
+            });
           });
           res.on('error', reject);
         },
       );
-      const hard = setTimeout(() => req.destroy(new CimdFetchError('client metadata fetch timed out')), timeoutMs);
+      const hard = setTimeout(
+        () => req.destroy(new CimdFetchError('client metadata fetch timed out')),
+        timeoutMs,
+      );
       req.on('timeout', () => req.destroy(new CimdFetchError('client metadata fetch timed out')));
-      req.on('error', (e) => reject(e instanceof CimdFetchError ? e : new CimdFetchError(`client metadata fetch failed: ${e.message}`)));
+      req.on('error', (e) =>
+        reject(
+          e instanceof CimdFetchError
+            ? e
+            : new CimdFetchError(`client metadata fetch failed: ${e.message}`),
+        ),
+      );
       req.on('close', () => clearTimeout(hard));
       req.end();
     });
