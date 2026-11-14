@@ -12,6 +12,10 @@ updates:
   - package-ecosystem: docker
     directory: /deploy/docker
     schedule: { interval: weekly }
+  # The Tailscale sidecar: tailscaled sets the identity headers, so its fixes matter.
+  - package-ecosystem: docker
+    directory: /deploy/tailscale
+    schedule: { interval: weekly }
   - package-ecosystem: docker-compose
     directory: /deploy
     schedule: { interval: weekly }

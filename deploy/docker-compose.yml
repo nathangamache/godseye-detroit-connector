@@ -13,7 +13,7 @@
 # re-dials every tailnet connection on a port serve does not own to 127.0.0.1:<same port>. A
 # listener on 127.0.0.1 or 0.0.0.0 would be reachable by any tailnet peer, with forged
 # Tailscale-User-Login headers. The gateway refuses to start in production with such a bind.
-#   cloudflared  tunnel -> http://gateway:7700 (public listener only)
+#   cloudflared  tunnel -> http://gateway:7700 (public listener only; edge network only)
 #
 #   cd deploy
 #   docker-compose -p godseye build
@@ -23,7 +23,19 @@
 # Works with Compose v2 (`docker compose`) and the installed docker-compose 1.29 (use `up -d`;
 # 1.29's attached `up` crashes against Docker 29). Secrets: deploy/secrets/*.env, mode 600.
 # Nothing here mounts the docker socket or a home directory.
+#
+# Networks (subnets pinned so the host firewall rules in docs/host-firewall.md stay valid):
+#   edge        172.30.77.0/24  cloudflared .10, tailscale+gateway .20     internet (tunnel, tailnet)
+#   backend     172.30.78.0/24  tailscale+gateway .20, gev .11, gev-mcp .12  INTERNAL: no egress
+#   gev-egress  172.30.79.0/24  gev .11                                     internet (GEV's providers)
+# cloudflared cannot reach GEV or gev-mcp at all; gev-mcp has no route anywhere but GEV.
+# Every container resolves names through public DNS (no LAN resolver, no MagicDNS, no tailnet
+# search domain: a tailnet device named like a service can't capture its traffic).
 version: "2.4"
+
+x-dns: &dns
+  dns: ["${GODSEYE_DNS_1:-1.1.1.1}", "${GODSEYE_DNS_2:-9.9.9.9}"]
+  dns_search: ["."]
 
 x-hardening: &hardening
   read_only: true
@@ -37,7 +49,7 @@ x-hardening: &hardening
 
 services:
   gev:
-    <<: *hardening
+    <<: [*hardening, *dns]
     image: godseye-runtime:0.1.0
     build: { context: .., dockerfile: deploy/docker/Dockerfile }
     container_name: godseye-gev
@@ -58,8 +70,9 @@ services:
       NODE_ENV: production
       HOME: /tmp
       UV_THREADPOOL_SIZE: "4"
-      # The gateway reaches GEV as http://gev:7701 and rewrites Host/Origin to that.
-      GEV_ALLOWED_HOSTS: gev,godseye.gamachecloud.com
+      # The gateway reaches GEV as http://gev:7701 and rewrites Host/Origin to that; no public
+      # hostname is accepted (a mis-published tunnel route to GEV gets nothing).
+      GEV_ALLOWED_HOSTS: gev
     env_file: [./secrets/gev.env]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7701/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -78,14 +91,18 @@ services:
     pids_limit: 256
     cpus: 2.0
     cpuset: "24-31"
+    # GEV needs the internet for its data (TomTom, FIRMS, AIS, weather, ...): that is the
+    # trade-off. gev-egress gives it that and nothing else; the host firewall keeps it off the
+    # LAN, the tailnet and the host. backend is how the gateway and gev-mcp reach it.
     networks:
-      godseye: { ipv4_address: 172.30.77.11 }
+      backend: { ipv4_address: 172.30.78.11 }
+      gev-egress: { ipv4_address: 172.30.79.11 }
 
   # The GEV MCP child (upstream GEV code) runs here, not in the gateway: it never shares the
   # gateway's uid, network namespace (private listener) or /data. The gateway connects over
   # TCP and names the tools its policy allows; the relay spawns the child with exactly those.
   gev-mcp:
-    <<: *hardening
+    <<: [*hardening, *dns]
     image: godseye-runtime:0.1.0
     container_name: godseye-gev-mcp
     user: "10001:10001"
@@ -99,8 +116,8 @@ services:
       GEV_URL: http://gev:7701
       GEV_WRAPPER: /app/gev/stdio-all-surfaces.mjs
       GEV_RELAY_PORT: "7704"
-      # Only the gateway (the sidecar's address) may open a session.
-      GEV_RELAY_ALLOWED_PEERS: 172.30.77.20
+      # Only the gateway (the sidecar's backend address) may open a session.
+      GEV_RELAY_ALLOWED_PEERS: 172.30.78.20
       UV_THREADPOOL_SIZE: "2"
     healthcheck:
       test: ["CMD", "node", "-e", "require('net').connect(7704,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
@@ -117,10 +134,10 @@ services:
     cpus: 1.0
     cpuset: "24-31"
     networks:
-      godseye: { ipv4_address: 172.30.77.12 }
+      backend: { ipv4_address: 172.30.78.12 }
 
   tailscale:
-    <<: *hardening
+    <<: [*hardening, *dns]
     image: godseye-tailscale:0.1.0
     build: { context: ./tailscale }
     container_name: godseye-tailscale
@@ -145,11 +162,13 @@ services:
     pids_limit: 128
     cpus: 1.0
     cpuset: "24-31"
+    # The gateway shares this network namespace, so its DNS and networks are the gateway's too.
     networks:
-      godseye:
+      edge:
         ipv4_address: 172.30.77.20
         # cloudflared reaches the gateway's PUBLIC listener as http://gateway:7700.
         aliases: [gateway]
+      backend: { ipv4_address: 172.30.78.20 }
 
   gateway:
     <<: *hardening
@@ -194,14 +213,16 @@ services:
     cpuset: "24-31"
 
   cloudflared:
-    <<: *hardening
+    <<: [*hardening, *dns]
     profiles: [tunnel]
     image: cloudflare/cloudflared:2026.11.0@sha256:bf723075c9a1a35e785bdcac0e8420f504e8074cc65784ed03300b8219aafadc
     container_name: godseye-cloudflared
     user: "65532:65532"
     depends_on: [gateway]
     # The public hostname's service in the Cloudflare dashboard must be http://gateway:7700
-    # (the gateway's PUBLIC listener; UI paths there return 404).
+    # (the gateway's PUBLIC listener; UI paths there return 404). The tunnel is remotely
+    # managed, so its ingress lives in the Cloudflare account: whatever is configured there,
+    # this container can only reach the edge network (gateway:7700) and the internet.
     command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
     env_file: [./secrets/cloudflared.env]   # TUNNEL_TOKEN=...
     mem_limit: 256m
@@ -209,7 +230,7 @@ services:
     pids_limit: 128
     cpus: 1.0
     networks:
-      godseye: { ipv4_address: 172.30.77.10 }
+      edge: { ipv4_address: 172.30.77.10 }
 
 volumes:
   gateway-data:
@@ -219,9 +240,25 @@ volumes:
   gev-dotcache:
 
 networks:
-  godseye:
-    name: godseye
+  edge:
+    name: godseye-edge
     driver: bridge
     ipam:
       config:
         - subnet: 172.30.77.0/24
+          gateway: 172.30.77.1
+  backend:
+    name: godseye-backend
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.78.0/24
+          gateway: 172.30.78.1
+  gev-egress:
+    name: godseye-gev-egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.79.0/24
+          gateway: 172.30.79.1

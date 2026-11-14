@@ -1,4 +1,5 @@
-# Optional override for local debugging only: publishes the gateway on 127.0.0.1:7700.
+# Optional override for local debugging only: publishes the gateway's PUBLIC listener on
+# host 127.0.0.1:7700 (Docker forwards it to the sidecar's edge address, 172.30.77.20).
 #   docker-compose -p godseye -f docker-compose.yml -f docker-compose.debug.yml up -d gev tailscale gateway
 # Never publish on 0.0.0.0; the gateway already authenticates, but the tunnel is the only public path.
 version: "2.4"

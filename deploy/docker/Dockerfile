@@ -1,11 +1,11 @@
 # godseye runtime image: Node 24 + the compiled gateway.
-# The same image runs two services (deploy/docker-compose.yml):
-#   gateway  node dist/src/index.js            (spawns the GEV stdio MCP child from /gev)
+# The same image runs three services (deploy/docker-compose.yml):
+#   gateway  node dist/src/index.js            (no GEV code: talks to gev-mcp over TCP)
 #   gev      node /gev/node_modules/vite/bin/vite.js preview ...  (GEV clone mounted read-only)
-# Built with the classic builder (no BuildKit-only syntax), base pinned by digest.
-ARG NODE_IMAGE=node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
-
-FROM ${NODE_IMAGE} AS build
+#   gev-mcp  node dist/scripts/gev-relay.js    (GEV MCP child; GEV clone mounted read-only)
+# Built with the classic builder (no BuildKit-only syntax), base pinned by digest. The FROM
+# lines name the image directly (no ARG) so Dependabot can see and update them.
+FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS build
 WORKDIR /app
 ENV npm_config_fund=false npm_config_audit=false npm_config_update_notifier=false
 COPY package.json package-lock.json .npmrc ./
@@ -15,7 +15,7 @@ COPY src ./src
 COPY scripts ./scripts
 RUN npx tsc -p tsconfig.build.json && npm prune --omit=dev
 
-FROM ${NODE_IMAGE}
+FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 ENV NODE_ENV=production
 WORKDIR /app
 RUN groupadd --gid 10001 godseye \

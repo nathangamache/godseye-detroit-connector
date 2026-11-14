@@ -1,7 +1,8 @@
 # Local verification without Tailscale or the tunnel: replaces the tailscale sidecar with an
-# idle container that owns the network namespace, so the private listener can be exercised from
-# inside it (standing in for `tailscale serve`). Never used in production.
-#   docker-compose -p godseye -f docker-compose.yml -f docker-compose.verify.yml up -d gev tailscale gateway
+# idle container that owns the network namespace (with the same addresses on the edge and
+# backend networks), so the listeners can be exercised from inside it (standing in for
+# `tailscale serve`). Never used in production.
+#   docker-compose -p godseye -f docker-compose.yml -f docker-compose.verify.yml up -d gev gev-mcp tailscale gateway
 version: "2.4"
 services:
   tailscale:
@@ -9,3 +10,5 @@ services:
     build: { context: .., dockerfile: deploy/docker/Dockerfile }
     user: "10001:10001"
     command: ["node", "-e", "setInterval(() => {}, 1 << 30)"]
+    # The image's healthcheck is the gateway's; the stand-in has nothing to check.
+    healthcheck: { disable: true }

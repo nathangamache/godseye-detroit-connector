@@ -1,0 +1,20 @@
+# Applies deploy/host-firewall/godseye-firewall.sh after Docker (and Tailscale) start, and
+# again whenever Docker restarts. Install as root (see docs/host-firewall.md):
+#   install -o root -g root -m 0755 deploy/host-firewall/godseye-firewall.sh /usr/local/sbin/
+#   install -o root -g root -m 0644 deploy/host-firewall/godseye-firewall.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now godseye-firewall.service
+[Unit]
+Description=godseye container egress firewall (DOCKER-USER and INPUT rules)
+After=docker.service tailscaled.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/godseye-firewall.sh apply
+ExecReload=/usr/local/sbin/godseye-firewall.sh apply
+ExecStop=/usr/local/sbin/godseye-firewall.sh remove
+
+[Install]
+WantedBy=docker.service
