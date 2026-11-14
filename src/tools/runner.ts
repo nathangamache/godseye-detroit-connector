@@ -97,6 +97,22 @@ export class ToolRunner {
     }
   }
 
+  /** Runs fn while holding one concurrency slot (composite tools count as one call). */
+  async withSlot(signal: AbortSignal, fn: () => Promise<McpToolResult>): Promise<McpToolResult> {
+    let release: () => void;
+    try {
+      release = await this.slots.acquire(this.opts.queueWaitMs ?? 15_000, signal);
+    } catch (err) {
+      if (err instanceof BusyError) return ToolRunner.error(err.message);
+      throw err;
+    }
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
   /** Runs a tool without policy/validation (internal composites such as whats_happening_here). */
   async callRaw(def: ToolDef, args: Record<string, unknown>, ctx: ToolContext, timeoutMs: number): Promise<ToolOutput> {
     return this.callWithTimeout(def, args, ctx, timeoutMs);
