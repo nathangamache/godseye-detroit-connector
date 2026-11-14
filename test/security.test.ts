@@ -13,8 +13,18 @@ import { CimdFetchError, checkCimdUrl, makeCimdFetcher } from '../src/oauth/cimd
 import { redirectMatches, validateCimd } from '../src/oauth/clients.js';
 import { installAllRoutes } from '../src/routes.js';
 import { isPrivateIp } from '../src/util/net.js';
+import { securityConfig } from '../src/app.js';
+import { sameOriginPost } from '../src/http/security.js';
 import { PROD_ENV } from './helpers.js';
-import { fakeCimdFetch, freePort } from './oauth-helpers.js';
+import {
+  CLAUDE_CALLBACK,
+  CLAUDE_CIMD_URL,
+  Jar,
+  authorizeUrl,
+  fakeCimdFetch,
+  freePort,
+  pkce,
+} from './oauth-helpers.js';
 
 describe('SSRF guards for CIMD fetches', () => {
   it('classifies private and special-use addresses', () => {
@@ -285,6 +295,23 @@ describe('production configuration', () => {
     expect(() => loadConfig({ ...prod, UI_HOST: '127.0.0.1' })).toThrow(/UI_HOST/);
     expect(c.publicAuthorize).toBe(false);
   });
+  it('sameOriginPost compares only the configured origin in production', () => {
+    const req = (headers: Record<string, string>) =>
+      ({ protocol: 'http', headers: { host: '127.0.0.2:7702', ...headers } }) as never;
+    const c = loadConfig(prod);
+    for (const l of ['public', 'private', 'ui'] as const) {
+      const sec = securityConfig(c, l);
+      expect(sec.strictOrigin, l).toBe(true);
+      expect(sameOriginPost(sec, req({ origin: sec.publicOrigin }))).toBe(true);
+      expect(sameOriginPost(sec, req({ origin: 'http://127.0.0.2:7702' }))).toBe(false);
+    }
+    // Dev keeps accepting the browser's own http://<Host> (e.g. localhost vs 127.0.0.1).
+    const dev = securityConfig(loadConfig({}), 'private');
+    expect(dev.strictOrigin).toBe(false);
+    expect(sameOriginPost(dev, req({ origin: 'http://127.0.0.2:7702' }))).toBe(true);
+    expect(sameOriginPost(dev, req({ origin: 'https://evil.example' }))).toBe(false);
+  });
+
   it('the public authorize fallback is opt-in and needs password+TOTP', () => {
     expect(() => loadConfig({ ...prod, PUBLIC_AUTHORIZE_FALLBACK: 'password' })).toThrow(
       /GATEWAY_PASSWORD_HASH/,
@@ -353,6 +380,42 @@ describe('production mode listeners', () => {
     expect(html).toContain('Signed in as owner@example.com via tailscale');
     expect(html).toContain('action="/oauth/stepup"');
     expect((await fetch(gw.privateUrl + '/auth/login')).status).toBe(404); // no password login in production
+  });
+
+  it('owner form POSTs must carry the configured https origin, never http://<Host>', async () => {
+    const p = pkce();
+    const url = authorizeUrl(
+      { origin: 'https://godseye.gamachecloud.com', privateOrigin: gw.privateUrl },
+      { clientId: CLAUDE_CIMD_URL, redirectUri: CLAUDE_CALLBACK, challenge: p.challenge },
+    );
+    const jar = new Jar();
+    const page = await fetch(url, { headers: { 'tailscale-user-login': OWNER } });
+    expect(page.status).toBe(200);
+    jar.store(page);
+    const html = await page.text();
+    const requestId = /name="request_id" value="([^"]+)"/.exec(html)![1]!;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]!;
+    const decide = (origin: string) =>
+      fetch(`${gw.privateUrl}/oauth/authorize/decision`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          'tailscale-user-login': OWNER,
+          cookie: jar.header(),
+          'content-type': 'application/x-www-form-urlencoded',
+          'sec-fetch-site': 'same-origin',
+          origin,
+        },
+        // Deny needs no step-up code, so only the origin check decides here.
+        body: new URLSearchParams({ request_id: requestId, csrf, decision: 'deny' }),
+      });
+    // Behind tailscale serve req.protocol is http, so http://<Host> used to pass.
+    const host = new URL(gw.privateUrl).host;
+    expect((await decide(`http://${host}`)).status).toBe(403);
+    expect((await decide('http://godseye.example-tailnet.ts.net')).status).toBe(403);
+    const ok = await decide('https://godseye.example-tailnet.ts.net');
+    expect(ok.status).toBe(302);
+    expect(new URL(ok.headers.get('location')!).searchParams.get('error')).toBe('access_denied');
   });
 
   it('the public listener 404s every UI path, even with an identity header', async () => {

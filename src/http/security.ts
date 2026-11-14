@@ -12,6 +12,11 @@ export interface SecurityConfig {
   /** Forwarding header the trusted proxy sets with the client IP. */
   clientIpHeader: string;
   hsts: boolean;
+  /**
+   * Production: form POSTs must carry exactly publicOrigin (the configured https origin).
+   * Otherwise http://<Host> is accepted too (dev: localhost vs 127.0.0.1).
+   */
+  strictOrigin: boolean;
 }
 
 /** Baseline headers on every response the gateway itself produces. */
@@ -94,13 +99,16 @@ export function mcpOriginCheck(cfg: SecurityConfig): RequestHandler {
 /**
  * For state-changing form POSTs: the request must be same-origin.
  * Browsers always send Origin on POST; Sec-Fetch-Site is checked when present.
+ * In production only the configured origin counts: behind tailscale serve req.protocol is
+ * http, so comparing with http://<Host> would accept an origin no page of ours has.
  */
 export function sameOriginPost(cfg: SecurityConfig, req: Request): boolean {
   const origin = req.headers.origin;
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return false;
   if (!origin) return false;
-  return origin === cfg.publicOrigin || origin === `${req.protocol}://${req.headers.host}`;
+  if (origin === cfg.publicOrigin) return true;
+  return !cfg.strictOrigin && origin === `${req.protocol}://${req.headers.host}`;
 }
 
 export function ipOf(req: Request, cfg: SecurityConfig): string {

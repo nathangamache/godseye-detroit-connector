@@ -71,6 +71,8 @@ export interface AppContext {
 export type Mount = (app: Express, ctx: AppContext) => void;
 
 export function securityConfig(config: Config, listener: Listener): SecurityConfig {
+  // Production compares a POST's Origin with the configured https origin only.
+  const strictOrigin = config.mode === 'production';
   if (listener === 'public') {
     return {
       allowedHosts: config.allowedHosts,
@@ -78,6 +80,7 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
       trustedProxies: config.TRUSTED_PROXY_IPS,
       clientIpHeader: 'cf-connecting-ip',
       hsts: config.PUBLIC_ORIGIN.startsWith('https://'),
+      strictOrigin,
     };
   }
   if (listener === 'ui') {
@@ -87,6 +90,7 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
       trustedProxies: [],
       clientIpHeader: 'x-forwarded-for',
       hsts: config.uiOrigin.startsWith('https://'),
+      strictOrigin,
     };
   }
   return {
@@ -97,6 +101,7 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
     trustedProxies: [],
     clientIpHeader: 'x-forwarded-for',
     hsts: config.privateOrigin.startsWith('https://'),
+    strictOrigin,
   };
 }
 
