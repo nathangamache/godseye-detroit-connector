@@ -26,10 +26,19 @@ function lineSentence(l: NearestLine): string {
     ? `; trackage rights: ${l.trackage_rights.join(', ')}`
     : '';
   const pax = l.passenger ? `; passenger: ${l.passenger}` : '';
-  return `Nearest active rail line: ${name} (${l.kind}${l.tracks ? `, ${l.tracks} track${l.tracks > 1 ? 's' : ''}` : ''}${rights}${pax}), ${humanDistance(l.distance_m)} ${l.direction}.`;
+  const tracks = l.track_counts ? `, ${l.track_counts.text}` : '';
+  return `Nearest active rail line: ${name} (${l.kind}${tracks}${rights}${pax}), ${humanDistance(l.distance_m)} ${l.direction}.`;
 }
 
-function crossingSentence(c: CrossingHit): string {
+/** How the road meets the tracks: grade separation (from FRA's position) or the warning devices. */
+function levelPhrase(c: CrossingHit): string {
+  return c.grade_separated
+    ? `grade-separated: ${c.separation ?? 'not at grade'} (FRA position "${c.position}")`
+    : (c.warning_devices ?? 'warning devices unknown');
+}
+
+/** `label`: "Nearest at-grade crossing", "Nearest crossing of any kind", ... */
+function crossingSentence(c: CrossingHit, label: string): string {
   const where = [c.street, c.city].filter(Boolean).join(', ');
   const rr = [
     c.railroad,
@@ -42,18 +51,27 @@ function crossingSentence(c: CrossingHit): string {
     c.trains_per_day !== undefined
       ? ` About ${c.trains_per_day} train${c.trains_per_day === 1 ? '' : 's'}/day per the FRA inventory${c.max_timetable_speed_mph ? `, timetable speed up to ${c.max_timetable_speed_mph} mph` : ''}.`
       : '';
-  return `Nearest at-grade crossing: FRA ${c.fra_crossing_id}${where ? ` at ${where}` : ''}${rr ? ` (${rr})` : ''}, ${humanDistance(c.distance_m)} ${c.direction}; ${c.warning_devices ?? 'warning devices unknown'}.${trains}`;
+  const tracks = c.track_counts ? `; ${c.track_counts.text}` : '';
+  return `${label}: FRA ${c.fra_crossing_id}${where ? ` at ${where}` : ''}${rr ? ` (${rr})` : ''}, ${humanDistance(c.distance_m)} ${c.direction}; ${levelPhrase(c)}${tracks}.${trains}`;
+}
+
+/** One crossing in a list summary; track counts only where FRA and NARN disagree. */
+function crossingBrief(c: CrossingHit): string {
+  const names = namesPhrase(c.line_names, c.subdivision);
+  const sep = c.grade_separated ? `, grade-separated: ${c.separation ?? 'not at grade'}` : '';
+  const tracks = c.track_counts?.agree === false ? ` [${c.track_counts.text}]` : '';
+  return `FRA ${c.fra_crossing_id}${c.street ? ` at ${c.street}` : ''}${names ? ` (${names})` : ''}, ${humanDistance(c.distance_m)} ${c.direction}${sep}${tracks}`;
 }
 
 export function railTools(index: RailIndex): ToolDef[] {
   const asOf = index.datasetAsOf();
-  const dataNote = `Static public datasets (FRA crossing inventory revised through ${asOf ?? 'unknown'}; NARN lines). They describe infrastructure, not live train positions. FRA and NARN often name the same track differently; line_names lists every name.`;
+  const dataNote = `Static public datasets (FRA crossing inventory revised through ${asOf ?? 'unknown'}; NARN lines). They describe infrastructure, not live train positions. FRA and NARN often name the same track differently; line_names lists every name, and where the two disagree on an attribute (track counts) both are given with their source.`;
   return [
     {
       name: 'nearest_rail',
       title: 'Nearest rail line and train crossing',
       description:
-        'Nearest railroad line (owner, trackage rights, every subdivision name the FRA and NARN datasets give it, distance, direction) and the nearest at-grade grade crossing (FRA crossing ID, street, railroad, daily train counts, warning devices, distance, bearing) to a point. Michigan coverage. Use for train, railroad, track or crossing questions.',
+        'Nearest railroad line (owner, trackage rights, every subdivision name the FRA and NARN datasets give it, track count, distance, direction) and two crossings, each labelled: the nearest crossing of any kind (a grade-separated one says whether the road passes over or under the tracks) and the nearest at-grade crossing (FRA crossing ID, street, railroad, daily train counts, warning devices, distance, bearing). Where FRA and NARN disagree (e.g. track counts), both are shown with their source. Michigan coverage. Use for train, railroad, track or crossing questions.',
       source: 'gateway',
       family: 'pulse',
       inputSchema: {
@@ -80,22 +98,44 @@ export function railTools(index: RailIndex): ToolDef[] {
         const main =
           line && line.kind !== 'main line' ? index.nearestMainLine(lat, lon, maxM) : undefined;
         const crossing = index.nearestCrossing(lat, lon, maxM);
-        if (!line && !crossing) {
+        const any = index.nearestCrossingAnyKind(lat, lon, maxM);
+        if (!line && !any) {
           return {
             summary: `No rail line or crossing within ${maxM / 1000} km. Coverage is Michigan only.`,
-            data: { line: null, crossing: null, dataset_as_of: asOf },
+            data: {
+              line: null,
+              crossing: null,
+              nearest_crossing_any_kind: null,
+              dataset_as_of: asOf,
+            },
           };
         }
         const parts = [line ? lineSentence(line) : 'No active rail line found in range.'];
         if (main)
           parts.push(lineSentence(main).replace('Nearest active rail line', 'Nearest main line'));
-        parts.push(crossing ? crossingSentence(crossing) : 'No at-grade crossing found in range.');
+        if (any && crossing && any.fra_crossing_id === crossing.fra_crossing_id)
+          parts.push(
+            crossingSentence(
+              crossing,
+              'Nearest crossing of any kind is also the nearest at-grade crossing',
+            ),
+          );
+        else {
+          if (any) parts.push(crossingSentence(any, 'Nearest crossing of any kind'));
+          parts.push(
+            crossing
+              ? crossingSentence(crossing, 'Nearest at-grade crossing')
+              : 'No at-grade crossing found in range.',
+          );
+        }
         return {
           summary: `${parts.join(' ')} ${dataNote}`,
           data: {
             line: line ?? null,
             main_line: main ?? null,
+            /** The nearest at-grade crossing. */
             crossing: crossing ?? null,
+            nearest_crossing_any_kind: any ?? null,
             dataset_as_of: asOf,
           },
         };
@@ -105,7 +145,7 @@ export function railTools(index: RailIndex): ToolDef[] {
       name: 'crossings_near',
       title: 'List grade crossings in a radius',
       description:
-        'Railroad grade crossings within a radius of a point, nearest first, from the FRA crossing inventory: crossing ID, street, railroad, line names (FRA subdivision and the NARN name for the same track), milepost, at-grade vs grade-separated, warning devices, daily train counts, distance and bearing. Michigan coverage.',
+        'Railroad grade crossings within a radius of a point, nearest first, from the FRA crossing inventory: crossing ID, street, railroad, line names (FRA subdivision and the NARN name for the same track), milepost, at-grade vs grade-separated (road over or under the tracks), warning devices, daily train counts, track counts (FRA and NARN, labelled when they disagree), distance and bearing. The summary names the nearest crossing of any kind and the nearest at-grade one. Michigan coverage.',
       source: 'gateway',
       family: 'pulse',
       inputSchema: {
@@ -136,15 +176,29 @@ export function railTools(index: RailIndex): ToolDef[] {
       attribution: metaFor('crossings_near').attribution,
       async run(args) {
         const radiusKm = (args.radius_km as number | undefined) ?? 2;
-        const hits = index.crossingsNear(args.lat as number, args.lon as number, radiusKm * 1000, {
-          atGradeOnly: Boolean(args.at_grade_only),
+        const lat = args.lat as number;
+        const lon = args.lon as number;
+        const atGradeOnly = Boolean(args.at_grade_only);
+        const hits = index.crossingsNear(lat, lon, radiusKm * 1000, {
+          atGradeOnly,
           limit: (args.limit as number | undefined) ?? 20,
         });
         const first = hits[0];
-        const firstNames = first ? namesPhrase(first.line_names, first.subdivision) : undefined;
-        const summary = first
-          ? `${hits.length} crossing(s) within ${radiusKm} km; nearest is FRA ${first.fra_crossing_id}${first.street ? ` at ${first.street}` : ''}${firstNames ? ` (${firstNames})` : ''}, ${humanDistance(first.distance_m)} ${first.direction}. ${dataNote}`
-          : `No crossings within ${radiusKm} km (Michigan coverage only). ${dataNote}`;
+        let summary: string;
+        if (!first)
+          summary = `No ${atGradeOnly ? 'at-grade ' : ''}crossings within ${radiusKm} km (Michigan coverage only). ${dataNote}`;
+        else if (atGradeOnly)
+          summary = `${hits.length} at-grade crossing(s) within ${radiusKm} km; nearest at-grade: ${crossingBrief(first)}. ${dataNote}`;
+        else {
+          const separated = hits.filter((h) => h.grade_separated).length;
+          const atGrade = first.grade_separated
+            ? index.crossingsNear(lat, lon, radiusKm * 1000, { atGradeOnly: true, limit: 1 })[0]
+            : first;
+          const nearest = first.grade_separated
+            ? `nearest of any kind: ${crossingBrief(first)}; nearest at-grade: ${atGrade ? crossingBrief(atGrade) : `none within ${radiusKm} km`}`
+            : `nearest of any kind is at grade: ${crossingBrief(first)}`;
+          summary = `${hits.length} crossing(s) within ${radiusKm} km (${hits.length - separated} at grade, ${separated} grade-separated); ${nearest}. ${dataNote}`;
+        }
         return {
           summary,
           data: { radius_km: radiusKm, count: hits.length, crossings: hits, dataset_as_of: asOf },

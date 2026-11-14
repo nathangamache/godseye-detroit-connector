@@ -146,7 +146,53 @@ export interface NearestLine {
    * crossings on the same track nearby (the two often differ for the same rails).
    */
   line_names: LineName[];
+  /** FRA's main-track count at the nearest crossing on this same NARN segment, if it gives one. */
+  fra_main_tracks?: number;
+  /** NARN's tracks and FRA's main tracks, each labelled when they differ. */
+  track_counts?: TrackCounts;
 }
+
+/**
+ * Track counts as each dataset gives them: NARN's tracks on a segment, FRA's main tracks at a
+ * crossing (0 or missing counts as not given). `text` is "2 tracks" from one dataset, "2 tracks
+ * (NARN and FRA agree)", or both labelled when they disagree: "NARN: 2 tracks; FRA: 1 main track".
+ */
+export interface TrackCounts {
+  narn_tracks?: number;
+  fra_main_tracks?: number;
+  /** Present only when both datasets give a count. */
+  agree?: boolean;
+  text: string;
+}
+
+export function trackCounts(narn?: number, fraMain?: number): TrackCounts | undefined {
+  const n = narn !== undefined && narn > 0 ? narn : undefined;
+  const f = fraMain !== undefined && fraMain > 0 ? fraMain : undefined;
+  const count = (k: number, what: string) => `${k} ${what}${k === 1 ? '' : 's'}`;
+  if (n !== undefined && f !== undefined)
+    return n === f
+      ? {
+          narn_tracks: n,
+          fra_main_tracks: f,
+          agree: true,
+          text: `${count(n, 'track')} (NARN and FRA agree)`,
+        }
+      : {
+          narn_tracks: n,
+          fra_main_tracks: f,
+          agree: false,
+          text: `NARN: ${count(n, 'track')}; FRA: ${count(f, 'main track')}`,
+        };
+  if (n !== undefined) return { narn_tracks: n, text: count(n, 'track') };
+  if (f !== undefined) return { fra_main_tracks: f, text: `${count(f, 'main track')} (FRA)` };
+  return undefined;
+}
+
+/** What FRA's position says of a crossing that is not at grade. */
+const SEPARATION: Record<string, string> = {
+  'RR Under': 'road over the tracks',
+  'RR Over': 'road under the tracks',
+};
 
 export interface CrossingHit {
   fra_crossing_id: string;
@@ -174,6 +220,14 @@ export interface CrossingHit {
   fra_url: string;
   /** FRA's subdivision name for this crossing plus NARN's for the segment it sits on. */
   line_names: LineName[];
+  /** Not at grade: the road passes over or under the tracks (FRA position "RR Under"/"RR Over"). */
+  grade_separated: boolean;
+  /** For a grade-separated crossing: "road over the tracks" or "road under the tracks". */
+  separation?: string;
+  /** NARN's track count for the segment the crossing sits on, if it gives one. */
+  narn_tracks?: number;
+  /** FRA's main tracks and NARN's tracks, each labelled when they differ. */
+  track_counts?: TrackCounts;
 }
 
 /** How far a crossing may sit from a NARN segment and still be "on" it (coordinates are ~1-10 m). */
@@ -301,6 +355,23 @@ export class RailIndex {
     return names;
   }
 
+  /**
+   * FRA's main-track count at the crossing nearest the point among those on NARN segment
+   * `segIdx` (within SAME_TRACK_RADIUS_M), for comparing with NARN's count for that segment.
+   */
+  fraMainTracksOnSegment(segIdx: number, lat: number, lon: number): number | undefined {
+    const match = this.crossingSegments();
+    const { dLat, dLon } = degreeBox(lat, SAME_TRACK_RADIUS_M);
+    let best: { tracks: number; d: number } | undefined;
+    for (const i of this.xIdx.search(lon - dLon, lat - dLat, lon + dLon, lat + dLat)) {
+      const c = this.crossings[i];
+      if (!c || match[i] !== segIdx || !c.tracks || c.tracks <= 0) continue;
+      const d = haversineM(lat, lon, c.lat, c.lon);
+      if (d <= SAME_TRACK_RADIUS_M && (!best || d < best.d)) best = { tracks: c.tracks, d };
+    }
+    return best?.tracks;
+  }
+
   /** FRA's name for a crossing's line plus NARN's name for the segment it sits on. */
   lineNamesForCrossing(crossingIdx: number): LineName[] {
     const c = this.crossings[crossingIdx];
@@ -362,6 +433,8 @@ export class RailIndex {
       if (best && best.d <= r) {
         const s = best.seg;
         const brg = bearingDeg(lat, lon, best.p.lat, best.p.lon);
+        const fraMain = this.fraMainTracksOnSegment(best.idx, best.p.lat, best.p.lon);
+        const counts = trackCounts(s.tracks, fraMain);
         return {
           railroad: railroadName(s.own?.[0]),
           owners: (s.own ?? []).map((o) => railroadName(o)!),
@@ -379,6 +452,8 @@ export class RailIndex {
           closest_point: { lat: round5(best.p.lat), lon: round5(best.p.lon) },
           narn_arc_id: s.arc,
           line_names: this.lineNamesForSegment(best.idx, best.p.lat, best.p.lon),
+          ...(fraMain !== undefined ? { fra_main_tracks: fraMain } : {}),
+          ...(counts ? { track_counts: counts } : {}),
         };
       }
     }
@@ -405,16 +480,33 @@ export class RailIndex {
       if (opts.atGradeOnly && c.pos !== 'At Grade') continue;
       const d = haversineM(lat, lon, c.lat, c.lon);
       if (d > radiusM) continue;
-      hits.push(toHit(c, lat, lon, d, this.lineNamesForCrossing(i)));
+      const seg = this.crossingSegments()[i] ?? -1;
+      const narnTracks = seg >= 0 ? this.lines[seg]?.tracks : undefined;
+      hits.push(toHit(c, lat, lon, d, this.lineNamesForCrossing(i), narnTracks));
     }
     hits.sort((a, b) => a.distance_m - b.distance_m);
     return hits.slice(0, opts.limit ?? 25);
   }
 
+  /** The nearest at-grade crossing (where road and rail traffic meet). */
   nearestCrossing(lat: number, lon: number, maxM = 50_000): CrossingHit | undefined {
+    return this.nearestOf(lat, lon, maxM, true);
+  }
+
+  /** The nearest crossing of any kind, grade-separated ones (bridges, underpasses) included. */
+  nearestCrossingAnyKind(lat: number, lon: number, maxM = 50_000): CrossingHit | undefined {
+    return this.nearestOf(lat, lon, maxM, false);
+  }
+
+  private nearestOf(
+    lat: number,
+    lon: number,
+    maxM: number,
+    atGradeOnly: boolean,
+  ): CrossingHit | undefined {
     for (const r of [500, 2000, 10_000, maxM]) {
       if (r > maxM) break;
-      const hits = this.crossingsNear(lat, lon, r, { atGradeOnly: true, limit: 1 });
+      const hits = this.crossingsNear(lat, lon, r, { atGradeOnly, limit: 1 });
       if (hits.length) return hits[0];
     }
     return undefined;
@@ -456,6 +548,7 @@ function toHit(
   lon: number,
   d: number,
   lineNames: LineName[],
+  narnTracks?: number,
 ): CrossingHit {
   const counts = {
     day_thru: c.day,
@@ -468,6 +561,7 @@ function toHit(
     ? (c.day ?? 0) + (c.night ?? 0) + (c.switching ?? 0) + (c.transit ?? 0)
     : undefined;
   const brg = bearingDeg(lat, lon, c.lat, c.lon);
+  const tracks = trackCounts(narnTracks, c.tracks);
   return {
     fra_crossing_id: c.id,
     street: c.street,
@@ -493,5 +587,9 @@ function toHit(
     fra_record_revised: c.rev,
     fra_url: `https://safetydata.fra.dot.gov/OfficeofSafety/PublicSite/Crossing/Crossing.aspx?phasetype=C&rpttype=I&txtcrossingnum=${encodeURIComponent(c.id)}`,
     line_names: lineNames,
+    grade_separated: c.pos !== undefined && c.pos !== 'At Grade',
+    ...(c.pos && SEPARATION[c.pos] ? { separation: SEPARATION[c.pos] } : {}),
+    ...(narnTracks !== undefined && narnTracks > 0 ? { narn_tracks: narnTracks } : {}),
+    ...(tracks ? { track_counts: tracks } : {}),
   };
 }
