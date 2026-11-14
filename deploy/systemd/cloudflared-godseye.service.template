@@ -1,0 +1,27 @@
+# TEMPLATE (dev / non-docker mode only). In production cloudflared runs as a container in
+# deploy/docker-compose.yml (profile "tunnel"). Nothing here is installed or started.
+#
+# To use instead of the container:
+#   1. Download the static binary from https://github.com/cloudflare/cloudflared/releases
+#      (cloudflared-linux-amd64, release 2026.11.0), verify its checksum, and put it at
+#      ~/.local/bin/cloudflared (chmod 755). No root needed.
+#   2. Save the remotely-managed tunnel token:  install -m 600 /dev/null ~/.config/cloudflared/godseye.token
+#      then paste the token into that file.
+#   3. In the dashboard, point the public hostname at http://localhost:7700.
+#   4. cp this file to ~/.config/systemd/user/cloudflared-godseye.service and daemon-reload.
+[Unit]
+Description=Cloudflare Tunnel for godseye.gamachecloud.com (user-local cloudflared)
+After=network-online.target godseye-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/cloudflared --no-autoupdate tunnel --protocol http2 run --token-file %h/.config/cloudflared/godseye.token
+Restart=on-failure
+RestartSec=5
+Nice=5
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

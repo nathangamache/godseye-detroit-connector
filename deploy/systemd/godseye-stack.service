@@ -1,0 +1,22 @@
+# systemd --user unit: PRODUCTION stack (hardened containers: gev, tailscale sidecar, gateway, cloudflared).
+# Not enabled or started by this repo. Complete docs/security.md "Go-live checklist" first.
+#   cp deploy/systemd/godseye-stack.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user start godseye-stack       # later: systemctl --user enable godseye-stack
+# Uses the installed docker-compose 1.29 in detached mode. With Compose v2 installed, replace
+# "/usr/bin/docker-compose" by "/usr/bin/docker compose".
+[Unit]
+Description=godseye production stack (docker compose)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/nathangamache/projects/godseye/godseye-detroit-connector/deploy
+ExecStart=/usr/bin/docker-compose -p godseye --profile tunnel up -d --remove-orphans
+ExecStop=/usr/bin/docker-compose -p godseye --profile tunnel stop
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

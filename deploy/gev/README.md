@@ -28,8 +28,10 @@ Preview ignores the `PORT` env, so the port is a flag.
 
 * MCP: the gateway spawns `gev/stdio-all-surfaces.mjs` (this repo) with
   `--api-base http://127.0.0.1:7701`. GEV's own HTTP `/mcp` is never exposed.
-* UI: the gateway reverse-proxies `/` to the preview server after authenticating the request.
-  It strips the nine proxy headers GEV's same-site gate rejects, rewrites `Host` and `Origin`
+* UI: the gateway's private (tailnet-only) listener reverse-proxies `/` to the preview server
+  after verifying the owner's Tailscale identity.
+  It strips the nine proxy headers GEV's same-site gate rejects (plus `cf-*`/`tailscale-*`
+  headers and cookies), rewrites `Host` and `Origin`
   to the upstream origin, and blocks `/api/setup/*`, `/api/realtime/oauth-*`, `/mcp`,
   `/panel/*` and Vite internals. Because stripping those headers makes every request look like
   the local owner to GEV, the gateway must authenticate everything it proxies.
