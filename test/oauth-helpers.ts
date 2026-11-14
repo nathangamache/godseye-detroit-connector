@@ -8,7 +8,7 @@ import { generateTotpSecret, totp } from '../src/auth/totp.js';
 import { REPO_ROOT, loadConfig } from '../src/config.js';
 import { startGateway, type Gateway } from '../src/gateway.js';
 import { childSpawnSpec } from '../src/gev/child.js';
-import { nullLogger } from '../src/log.js';
+import { nullLogger, type Logger } from '../src/log.js';
 import type { CimdFetcher } from '../src/oauth/cimd.js';
 import { installAllRoutes, type RouteOptions } from '../src/routes.js';
 import { MOCK_GEV } from './helpers.js';
@@ -70,7 +70,7 @@ export interface TestGateway {
   close(): Promise<void>;
 }
 
-export async function startPasswordGateway(env: Record<string, string> = {}, routeOpts: RouteOptions = {}): Promise<TestGateway> {
+export async function startPasswordGateway(env: Record<string, string> = {}, routeOpts: RouteOptions = {}, logger: Logger = nullLogger): Promise<TestGateway> {
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
   const dir = mkdtempSync(path.join(tmpdir(), 'gw-oauth-'));
@@ -89,7 +89,7 @@ export async function startPasswordGateway(env: Record<string, string> = {}, rou
     ...env,
   });
   const gw = await startGateway(config, {
-    logger: nullLogger,
+    logger,
     gevChild: childSpawnSpec({ gevRoot: REPO_ROOT, gevUrl: 'http://127.0.0.1:7701', wrapper: MOCK_GEV }),
     mount: installAllRoutes({ cimdFetch: fakeCimdFetch, ...routeOpts }),
   });
