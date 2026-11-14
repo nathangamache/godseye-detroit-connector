@@ -60,6 +60,12 @@ services:
     build: { context: .., dockerfile: deploy/docker/Dockerfile }
     container_name: godseye-gev
     user: "10001:10001"
+    # get_regional_brief fetches Google News RSS first, which news.google.com's robots.txt and
+    # Google's terms forbid for automated clients (and AI crawlers by name). Upstream GEV has no
+    # switch, so the name resolves to loopback here: the fetch fails fast and GEV falls back to
+    # GDELT (unrestricted use with attribution).
+    extra_hosts:
+      - "news.google.com:127.0.0.1"
     working_dir: /gev
     command:
       - node
