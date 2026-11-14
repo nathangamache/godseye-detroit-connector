@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parseStepUpKey } from './auth/stepup.js';
+import { isIpv6Loopback, isUnspecifiedIp, parseIp } from './util/net.js';
 
 /** Repository root (works from src/ under vitest and from dist/src/ when compiled). */
 export const REPO_ROOT = (() => {
@@ -325,27 +326,25 @@ export function parseRelayUrl(u: string): { host: string; port: number } | null 
  * client's own headers intact. A listener on loopback 127.0.0.1, ::1 or a wildcard
  * address is therefore reachable by any tailnet peer the policy admits, and its peer
  * address (127.0.0.1) is indistinguishable from tailscale serve's.
+ *
+ * The address is parsed, not looked up as a string, so every spelling counts: brackets,
+ * case, whitespace, zero compression or none ("0:0:0:0:0:0:0:0", "::0", "0::"), a zone, and
+ * IPv4-mapped forms ("::ffff:0:0", "::ffff:7f00:1", "0:0:0:0:0:ffff:7f00:1").
  */
-const NETSTACK_REACHABLE = new Set([
-  '',
-  '0.0.0.0',
-  '::',
-  '127.0.0.1',
-  '::1',
-  '::ffff:127.0.0.1',
-  '::ffff:0.0.0.0',
-  'localhost',
-]);
-
 export function isNetstackReachable(host: string): boolean {
-  return NETSTACK_REACHABLE.has(
-    host
-      .trim()
-      .toLowerCase()
-      .replace(/^\[|\]$/g, ''),
-  );
+  const h = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
+  if (h === '' || h === 'localhost' || h.endsWith('.localhost')) return true;
+  const ip = parseIp(h);
+  if (!ip) return false;
+  if (isUnspecifiedIp(h) || isIpv6Loopback(h)) return true;
+  return ip.v4 === '127.0.0.1';
 }
 
+/** A bare dotted IPv4 loopback address (127.0.0.0/8), exactly as a listener would bind it. */
 function isLoopbackV4(ip: string): boolean {
   return isIP(ip) === 4 && ip.startsWith('127.');
 }
@@ -369,6 +368,7 @@ export function checkProductionBinds(raw: {
       );
     }
   }
+  // (isIP: a bare literal, exactly as listen() gets it; no hostnames, brackets or spaces.)
   if (isNetstackReachable(raw.HOST) || isIP(raw.HOST) === 0) {
     throw new ConfigError(
       `production requires HOST to be the gateway's compose-network address (e.g. 172.30.77.20), not "${raw.HOST}": ` +
@@ -387,8 +387,8 @@ export function checkProductionBinds(raw: {
     }
   }
   for (const ip of raw.TAILSCALE_TRUSTED_PROXY_IPS) {
-    const n = ip.replace(/^::ffff:/i, '');
-    if (!(isLoopbackV4(n) || n === '::1')) {
+    const p = parseIp(ip);
+    if (!p || !(p.v4?.startsWith('127.') || isIpv6Loopback(ip))) {
       throw new ConfigError(
         `TAILSCALE_TRUSTED_PROXY_IPS must be loopback (tailscale serve in the shared netns), not "${ip}"`,
       );
@@ -501,7 +501,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   // A specific bind address is also an acceptable Host (health checks and the in-container
   // smoke test reach the listener by IP); wildcard binds are not.
-  const bindHost = (h: string) => (isIP(h) && !['0.0.0.0', '::'].includes(h) ? [h] : []);
+  const bindHost = (h: string) => (isIP(h) && !isUnspecifiedIp(h) ? [h] : []);
   const allowedHosts = Array.from(
     new Set([
       publicUrl.hostname,

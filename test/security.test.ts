@@ -52,6 +52,32 @@ describe('SSRF guards for CIMD fetches', () => {
       expect(isPrivateIp(ip), ip).toBe(false);
   });
 
+  it('classifies non-canonical IPv6 spellings like their canonical forms', () => {
+    for (const ip of [
+      '0:0:0:0:0:0:0:1',
+      '0:0:0:0:0:0:0:0',
+      '::0',
+      '0::',
+      '::0:1',
+      '::ffff:7f00:1',
+      '0:0:0:0:0:ffff:7f00:1',
+      '0:0:0:0:0:FFFF:a00:1', // 10.0.0.1
+      '::ffff:0:0',
+      'FE80::1',
+      'fe80:0:0:0:0:0:0:1',
+      'fC00::1',
+      'FF02::1',
+      '0064:ff9b::7f00:1',
+      '2001:0DB8::1',
+      '::127.0.0.1', // deprecated IPv4-compatible
+      '[::1]',
+      '::1%lo',
+    ])
+      expect(isPrivateIp(ip), ip).toBe(true);
+    for (const ip of ['0:0:0:0:0:ffff:808:808', '2606:4700:0:0:0:0:0:1111', '2606:4700:4700::1111'])
+      expect(isPrivateIp(ip), ip).toBe(false);
+  });
+
   it('rejects non-https, odd ports, credentials and fragments', () => {
     expect(() => checkCimdUrl('http://claude.ai/oauth/x')).toThrow(CimdFetchError);
     expect(() => checkCimdUrl('https://claude.ai:8443/oauth/x')).toThrow(/port/);
@@ -295,6 +321,46 @@ describe('production configuration', () => {
     expect(() => loadConfig({ ...prod, UI_HOST: '127.0.0.1' })).toThrow(/UI_HOST/);
     expect(c.publicAuthorize).toBe(false);
   });
+  it('refuses non-canonical spellings of wildcard and loopback binds exactly like the canonical ones', () => {
+    // Each of these, once bound, accepts connections to 127.0.0.1 (where the netstack re-dials).
+    const reachable = [
+      '0:0:0:0:0:0:0:0',
+      '0000:0000:0000:0000:0000:0000:0000:0000',
+      '::0',
+      '0::',
+      '[::]',
+      '::ffff:0:0',
+      '::ffff:0.0.0.0',
+      '::ffff:7f00:1',
+      '0:0:0:0:0:ffff:7f00:1',
+      '::FFFF:127.0.0.1',
+      '0:0:0:0:0:0:0:1',
+      '::0:1',
+      '[::1]',
+      '::1%lo',
+      ' 0.0.0.0 ',
+      ' 127.0.0.1',
+      'LOCALHOST',
+      'localhost.',
+    ];
+    for (const HOST of reachable)
+      expect(() => loadConfig({ ...prod, HOST }), HOST).toThrow(/HOST to be/);
+    // The private and UI listeners take only a bare dotted 127.x alias other than 127.0.0.1.
+    for (const host of [...reachable, '::ffff:7f00:2', '::ffff:127.0.0.2'])
+      for (const name of ['PRIVATE_HOST', 'UI_HOST'])
+        expect(() => loadConfig({ ...prod, [name]: host }), `${name}=${host}`).toThrow(
+          new RegExp(name),
+        );
+    expect(() => loadConfig({ ...prod, PRIVATE_HOST: '127.0.0.2 ' })).toThrow(/PRIVATE_HOST/);
+    // (UI_HOST is trimmed when read, so this one binds 127.0.0.2.)
+    expect(loadConfig({ ...prod, UI_HOST: '127.0.0.2 ' }).uiHost).toBe('127.0.0.2');
+    for (const ip of ['0:0:0:0:0:0:0:1', '::ffff:7f00:1', '0:0:0:0:0:ffff:7f00:1', '::0'])
+      expect(() => loadConfig({ ...prod, TRUSTED_PROXY_IPS: ip }), ip).toThrow(/TRUSTED_PROXY_IPS/);
+    // Another spelling of a fine address stays fine.
+    expect(loadConfig({ ...prod, HOST: '::ffff:172.30.77.20' }).mode).toBe('production');
+    expect(loadConfig({ ...prod, UI_HOST: '127.0.0.4' }).uiHost).toBe('127.0.0.4');
+  });
+
   it('sameOriginPost compares only the configured origin in production', () => {
     const req = (headers: Record<string, string>) =>
       ({ protocol: 'http', headers: { host: '127.0.0.2:7702', ...headers } }) as never;
