@@ -125,6 +125,21 @@ describe('find_tools list mode', () => {
     expect(text).toMatch(/Categories: rail \(3\), scanner \(5\)/);
   });
 
+  it('the published schema makes query optional, and list mode needs nothing else', async () => {
+    const { tools } = await client.listTools();
+    const schema = tools.find((t) => t.name === 'find_tools')!.inputSchema as {
+      properties?: Record<string, { type?: string }>;
+      required?: string[];
+    };
+    expect(schema.properties?.query?.type).toBe('string');
+    // No argument is required: claude.ai may call find_tools with {} to browse.
+    expect(schema.required ?? []).toEqual([]);
+    for (const args of [{}, { limit: 3 }, { offset: 2 }, { category: 'rail' }]) {
+      const { json } = await find(args);
+      expect(json.mode, JSON.stringify(args)).toBe('list');
+    }
+  });
+
   it('"*", "all", "all tools" and "list" are list mode too (not a keyword search)', async () => {
     for (const query of ['*', 'all', 'all tools', 'list', '  ALL  ']) {
       const { json } = await find({ query });
