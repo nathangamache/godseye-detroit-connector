@@ -250,6 +250,42 @@ const schema = z.object({
    * latest fix, never its coordinates) when that fix is at most this old.
    */
   LOCATION_PROXIMITY_MINUTES: int(30, 1, 24 * 60),
+
+  // ---- aviation ----
+  // flights_near and aircraft_lookup (src/extra/aviation). No keys: adsb.fi (personal,
+  // non-commercial terms), adsb.lol as fallback, and a local copy of the FAA registry.
+  /**
+   * Private registrants (individual, co-owned, partnership): "private individual" plus city
+   * and state (private_hidden), the label alone (type_only), or the name in single-aircraft
+   * lookups (full; names are only kept in the copy with this setting). Street and ZIP: never.
+   */
+  AIRCRAFT_OWNER_DISCLOSURE: z
+    .enum(['private_hidden', 'type_only', 'full'])
+    .default('private_hidden'),
+  /** Withhold the owner name of LADD-flagged aircraft unless the registrant is a government. */
+  AIRCRAFT_LADD_WITHHOLD: bool(true),
+  /** Daily FAA registry download (about 06:15 UTC, If-Modified-Since) into the data volume. */
+  AIRCRAFT_REGISTRY_SYNC: bool(true),
+  /** Where the registry copy lives (default DATA_DIR/aviation). */
+  AIRCRAFT_REGISTRY_DIR: optionalString,
+  AIRCRAFT_REGISTRY_URL: z
+    .string()
+    .default('https://registry.faa.gov/database/ReleasableAircraft.zip')
+    .refine((s) => /^https?:\/\/[^\s/]+\/\S*$/.test(s), 'must be an http(s) URL'),
+  /** adsb.lol calls per rolling 24 h (its keyless quota is per IP, shared with GEV). */
+  ADSBLOL_DAILY_MAX: int(100, 0, 10_000),
+  /** Default quotas for aviation buckets that TOOL_RATE_LIMITS does not set. */
+  AVIATION_RATE_LIMITS: z
+    .string()
+    .default('flights_near=60/h,flights_near=600/d,aircraft_lookup=120/h')
+    .refine((s) => {
+      try {
+        parseRateLimits(s);
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'expected bucket=N/(s|m|h|d) entries'),
 });
 
 export type RawConfig = z.infer<typeof schema>;
