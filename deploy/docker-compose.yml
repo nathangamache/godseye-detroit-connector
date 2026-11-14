@@ -1,0 +1,176 @@
+# Production stack: hardened containers, no published host ports.
+#
+#   gev          GEV preview (read-only clone)                        gev:7701 on the network
+#   tailscale    sidecar; the gateway joins its network namespace.    tailnet https://godseye.<tailnet>.ts.net
+#                `tailscale serve` -> 127.0.0.1:7702 (gateway PRIVATE listener: UI, authorize, admin)
+#   gateway      PUBLIC listener 0.0.0.0:7700 (tunnel only) + PRIVATE listener 127.0.0.1:7702
+#   cloudflared  tunnel -> http://gateway:7700 (public listener only)
+#
+#   cd deploy
+#   docker-compose -p godseye build
+#   docker-compose -p godseye --profile tunnel up -d        # everything
+#   docker-compose -p godseye up -d gev tailscale gateway    # without the public tunnel
+#
+# Works with Compose v2 (`docker compose`) and the installed docker-compose 1.29 (use `up -d`;
+# 1.29's attached `up` crashes against Docker 29). Secrets: deploy/secrets/*.env, mode 600.
+# Nothing here mounts the docker socket or a home directory.
+version: "2.4"
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  gev:
+    <<: *hardening
+    image: godseye-runtime:0.1.0
+    build: { context: .., dockerfile: deploy/docker/Dockerfile }
+    container_name: godseye-gev
+    user: "10001:10001"
+    working_dir: /gev
+    command:
+      - node
+      - node_modules/vite/bin/vite.js
+      - preview
+      - --configLoader
+      - runner
+      - --host
+      - 0.0.0.0
+      - --port
+      - "7701"
+      - --strictPort
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      UV_THREADPOOL_SIZE: "4"
+      # The gateway reaches GEV as http://gev:7701 and rewrites Host/Origin to that.
+      GEV_ALLOWED_HOSTS: gev,godseye.gamachecloud.com
+    env_file: [./secrets/gev.env]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7701/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    volumes:
+      - ${GEV_CLONE:-/home/nathangamache/projects/godseye/gods-eye-view}:/gev:ro
+      - gev-cache:/gev/.gev-cache
+      - gev-logs:/gev/.gev-logs
+      - gev-dotcache:/gev/.cache
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
+    cpus: 2.0
+    cpuset: "24-31"
+    networks:
+      godseye: { ipv4_address: 172.30.77.11 }
+
+  tailscale:
+    <<: *hardening
+    image: godseye-tailscale:0.1.0
+    build: { context: ./tailscale }
+    container_name: godseye-tailscale
+    user: "10002:10002"
+    environment:
+      TS_HOSTNAME: godseye
+      TS_USERSPACE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /tmp/tailscaled.sock
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_AUTH_ONCE: "true"
+      TS_ACCEPT_DNS: "false"
+      # Recommended: a tagged, pre-approved auth key and "--advertise-tags=tag:godseye".
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    env_file: [./secrets/tailscale.env]   # TS_AUTHKEY=tskey-auth-...
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    cpus: 1.0
+    cpuset: "24-31"
+    networks:
+      godseye:
+        ipv4_address: 172.30.77.20
+        # cloudflared reaches the gateway's PUBLIC listener as http://gateway:7700.
+        aliases: [gateway]
+
+  gateway:
+    <<: *hardening
+    image: godseye-runtime:0.1.0
+    build: { context: .., dockerfile: deploy/docker/Dockerfile }
+    container_name: godseye-gateway
+    user: "10001:10001"
+    # Share the sidecar's network namespace: the PRIVATE listener on 127.0.0.1:7702 is
+    # reachable only by tailscaled (tailscale serve), never by cloudflared or GEV.
+    network_mode: "service:tailscale"
+    depends_on: [gev, tailscale]
+    environment:
+      GATEWAY_MODE: production
+      GATEWAY_ENV_FILE: none
+      HOST: 0.0.0.0
+      PORT: "7700"
+      PRIVATE_HOST: 127.0.0.1
+      PRIVATE_PORT: "7702"
+      TAILSCALE_TRUSTED_PROXY_IPS: 127.0.0.1,::1
+      DATA_DIR: /data
+      GEV_ROOT: /gev
+      GEV_URL: http://gev:7701
+      GEV_WRAPPER: /app/gev/stdio-all-surfaces.mjs
+      # Only cloudflared's fixed address may set CF-Connecting-IP.
+      TRUSTED_PROXY_IPS: 172.30.77.10
+      PULSE_URL: ${PULSE_URL:-http://pulse-api:7710}
+      HOME: /tmp
+      UV_THREADPOOL_SIZE: "4"
+    env_file: [./secrets/gateway.env]
+    volumes:
+      - gateway-data:/data
+      - ${GEV_CLONE:-/home/nathangamache/projects/godseye/gods-eye-view}:/gev:ro
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 256
+    cpus: 2.0
+    cpuset: "24-31"
+
+  cloudflared:
+    <<: *hardening
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:2026.11.0@sha256:bf723075c9a1a35e785bdcac0e8420f504e8074cc65784ed03300b8219aafadc
+    container_name: godseye-cloudflared
+    user: "65532:65532"
+    depends_on: [gateway]
+    # The public hostname's service in the Cloudflare dashboard must be http://gateway:7700
+    # (the gateway's PUBLIC listener; UI paths there return 404).
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    env_file: [./secrets/cloudflared.env]   # TUNNEL_TOKEN=...
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    cpus: 1.0
+    networks:
+      godseye: { ipv4_address: 172.30.77.10 }
+
+volumes:
+  gateway-data:
+  tailscale-state:
+  gev-cache:
+  gev-logs:
+  gev-dotcache:
+
+networks:
+  godseye:
+    name: godseye
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.77.0/24

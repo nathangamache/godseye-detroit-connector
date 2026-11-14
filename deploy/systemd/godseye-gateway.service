@@ -1,0 +1,30 @@
+# systemd --user unit: the gateway in DEV / plain-node mode.
+#   PUBLIC listener  127.0.0.1:7700  (point the dev cloudflared at it)
+#   PRIVATE listener 127.0.0.1:7702  (expose to the tailnet with: tailscale serve --bg --https=443 http://127.0.0.1:7702)
+# Production runs in hardened containers instead: see godseye-stack.service.
+# Not enabled or started by this repo. To use:
+#   cp deploy/systemd/godseye-gateway.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user start godseye-gateway
+[Unit]
+Description=godseye-detroit-connector gateway (dev mode, public 127.0.0.1:7700, private 127.0.0.1:7702)
+After=network-online.target godseye-gev.service
+Wants=godseye-gev.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nathangamache/projects/godseye/godseye-detroit-connector
+# The gateway reads ./.env itself (mode 600). Build first: npm ci && npm run build
+ExecStart=/home/nathangamache/.nvm/versions/node/v24.22.3/bin/node dist/src/index.js
+Environment=UV_THREADPOOL_SIZE=4
+Restart=on-failure
+RestartSec=5
+Nice=10
+CPUAffinity=16-31
+MemoryMax=768M
+TasksMax=256
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target
