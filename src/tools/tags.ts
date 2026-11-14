@@ -25,10 +25,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
     attribution: FRA_NARN,
   },
   crossings_near: {
-    tags: [
-      'crossing', 'crossings', 'grade crossing', 'railroad crossing', 'level crossing', 'train',
-      'rail', 'railroad', 'track', 'gates', 'blocked crossing', 'fra crossing id', 'dot number',
-    ],
+    tags: ['list of grade crossings', 'all crossings within radius', 'gates', 'fra crossing id', 'dot number', 'railroad'],
     attribution: FRA_NARN,
   },
   // --- Pulse (scanner radio pipeline) ---
