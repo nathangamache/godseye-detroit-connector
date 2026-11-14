@@ -23,16 +23,13 @@
     setupEl.hidden = Boolean(token());
   }
 
-  function claimFromHash() {
-    var m = /[#&]setup=(gsc_[A-Za-z0-9_-]+)/.exec(location.hash);
-    if (!m) return Promise.resolve();
-    history.replaceState(null, '', location.pathname);
+  function claim(code) {
     say('Setting up this device…');
     return fetch('/locate/claim', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'godseye-locate' },
-      body: JSON.stringify({ code: m[1] }),
+      body: JSON.stringify({ code: code }),
     })
       .then(function (r) {
         return r.json().then(function (j) {
@@ -44,6 +41,20 @@
       .catch(function (e) {
         say('Setup failed: ' + e.message + '. Ask for a new setup link.');
       });
+  }
+
+  // A setup link opens in the browser; a Home Screen app has its own storage and always
+  // starts at /locate/, so it is set up by pasting the link or code instead.
+  function codeFrom(text) {
+    var m = /(gsc_[A-Za-z0-9_-]+)/.exec(text || '');
+    return m ? m[1] : null;
+  }
+
+  function claimFromHash() {
+    var m = /[#&]setup=(gsc_[A-Za-z0-9_-]+)/.exec(location.hash);
+    if (!m) return Promise.resolve();
+    history.replaceState(null, '', location.pathname);
+    return claim(m[1]);
   }
 
   function distM(a, b, c, d) {
@@ -134,6 +145,20 @@
       say('Stopped watching.');
     }
   });
+
+  var setupForm = document.getElementById('setup-form');
+  if (setupForm)
+    setupForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var input = document.getElementById('setup-code');
+      var code = codeFrom(input.value);
+      input.value = '';
+      if (!code) {
+        say('That is not a setup code (it starts with gsc_).');
+        return;
+      }
+      claim(code).then(refreshSetup);
+    });
 
   document.getElementById('forget').addEventListener('click', function () {
     localStorage.removeItem(KEY);

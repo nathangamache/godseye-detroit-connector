@@ -32,9 +32,23 @@
       <div id="setup" class="card warn" hidden>
         <strong>This phone is not set up yet.</strong>
         <p class="muted">
-          On the server run <code>npm run devices -- add my-phone --pwa</code> and open the setup
-          link it prints on this phone.
+          On the server run <code>npm run devices -- add my-phone --pwa</code>. Open the setup link
+          it prints on this phone, or paste the link or its code below. A Home Screen app keeps its
+          own storage and can't open links, so paste the code there.
         </p>
+        <form id="setup-form" class="row">
+          <label for="setup-code">Setup code or link</label>
+          <input
+            id="setup-code"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            inputmode="text"
+            placeholder="gsc_..."
+          />
+          <button type="submit">Set up</button>
+        </form>
       </div>
       <p class="muted">
         <button id="forget" type="button" class="secondary">Forget this device</button>

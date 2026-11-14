@@ -231,7 +231,16 @@ describe('HTTP ingest and /locate', () => {
     ); // never on the public listener
     const r = await fetch(`${t.privateOrigin}/locate/`, { headers: { cookie: jar.header() } });
     expect(r.status).toBe(200);
-    expect(await r.text()).toMatch(/Update My Location/);
+    const html = await r.text();
+    expect(html).toMatch(/Update My Location/);
+    // A Home Screen app can't open setup links, so the page must take a pasted code.
+    expect(html).toMatch(/id="setup-form"/);
+    expect(html).toMatch(/id="setup-code"/);
+    const js = await (
+      await fetch(`${t.privateOrigin}/locate/app.js`, { headers: { cookie: jar.header() } })
+    ).text();
+    expect(js).toMatch(/getElementById\('setup-form'\)/);
+    expect(js).toMatch(/gsc_\[A-Za-z0-9_-\]\+/);
     expect(r.headers.get('content-security-policy')).toMatch(/script-src 'self'/);
     expect(r.headers.get('permissions-policy')).toMatch(/geolocation=\(self\)/);
     const sw = await fetch(`${t.privateOrigin}/locate/sw.js`, {

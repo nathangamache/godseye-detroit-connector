@@ -109,6 +109,8 @@ export function installLocationIngest(app: Express, ctx: AppContext, d: Location
             .json({ error: 'rate_limited' });
           return;
         }
+        // Reason only: never the token or any coordinates.
+        d.logger.warn('location_rejected', { reason: token ? 'unknown_device_token' : 'no_token' });
         res
           .status(401)
           .set('WWW-Authenticate', 'Basic realm="godseye-location", charset="UTF-8"')
@@ -135,6 +137,11 @@ export function installLocationIngest(app: Express, ctx: AppContext, d: Location
         const parsed = parseLocation(item, d.now());
         if (parsed === null) continue;
         if (typeof parsed === 'string') {
+          d.logger.warn('location_rejected', {
+            reason: 'invalid_location',
+            detail: parsed,
+            device: device.name,
+          });
           res.status(400).json({ error: 'invalid_location', error_description: parsed });
           return;
         }
