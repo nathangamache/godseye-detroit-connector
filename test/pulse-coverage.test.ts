@@ -8,6 +8,7 @@ import {
   feedKind,
   isExampleFeed,
   parseFeedsStatus,
+  pulseCoveredFor,
   verdictSentence,
   type FeedsStatus,
 } from '../src/pulse/coverage.js';
@@ -36,6 +37,13 @@ const railFeed = (over: Record<string, unknown> = {}) => ({
   receiver: { state: 'online', last_seen_at: '2026-11-14T11:59:00Z' },
   coverage: { lines: [{ railroad: 'CSX', name: 'Alpha Subdivision', aliases: [] }] },
   ...over,
+});
+
+/** A shipped placeholder rail feed: reported online, never coverage. */
+const EXAMPLE_RAIL = railFeed({
+  feed_id: 'example_rail_road',
+  name: 'Example railroad road channel',
+  example: true,
 });
 
 const status = (feeds: unknown[], summary?: Record<string, string>): FeedsStatus =>
@@ -346,5 +354,124 @@ describe('verdicts are tied to the point', () => {
         pulseCovered: true,
       }).state,
     ).toBe('quiet');
+  });
+
+  it('rail voice: a feed Pulse did not list for the point was not searched, so never quiet', () => {
+    // feeds/status: the line's road channel online, plus an EOT receiver online. Pulse's
+    // rail/activity listed only its EOT channel for the point (so covered:true), which means it
+    // never searched the road channel's transcripts here.
+    const s = status([railFeed(), eotFeed()], { rail_radio: 'listening', eot: 'listening' });
+    const v = assess('rail_radio', s, {
+      messages: 0,
+      window_min: 30,
+      tracks: TRACK,
+      pulseChannels: [],
+      pulseCovered: true,
+    });
+    expect(v).toMatchObject({
+      state: 'no_receiver',
+      reason: 'not_searched',
+      feeds: [{ feed_id: 'csx_alpha_road' }],
+    });
+    const t = verdictSentence(v, NOW, 'this line');
+    expect(t).toMatch(
+      /^No rail radio receiver confirmed on this line: Pulse's own lookup for this point did not list CSX Alpha road among its rail voice channels, so it was not searched here/,
+    );
+    expect(t).toMatch(/0 rail messages means no coverage, not a quiet line/);
+    expect(t).not.toMatch(/quiet: |really is quiet/);
+    // Same when Pulse listed another line's channel only, or the unlisted feed is offline.
+    const other = status([
+      railFeed(),
+      railFeed({ feed_id: 'cn_zulu_road', name: 'CN Zulu road', coverage: {} }),
+    ]);
+    expect(
+      assess('rail_radio', other, {
+        messages: 0,
+        window_min: 30,
+        tracks: TRACK,
+        pulseChannels: ['CN Zulu road'],
+      }),
+    ).toMatchObject({ state: 'quiet', feeds: [{ feed_id: 'cn_zulu_road' }] });
+    const off = status([
+      railFeed({ receiver: { state: 'offline', last_seen_at: '2026-11-14T09:00:00Z' } }),
+    ]);
+    expect(
+      assess('rail_radio', off, { messages: 0, window_min: 30, tracks: TRACK, pulseChannels: [] }),
+    ).toMatchObject({ state: 'no_receiver', reason: 'not_searched' });
+    // Pulse's summary alone ("listening") with no feed it listed is not quiet either.
+    expect(
+      assess('rail_radio', status([], { rail_radio: 'listening' }), {
+        messages: 0,
+        window_min: 30,
+        tracks: TRACK,
+        pulseChannels: [],
+      }),
+    ).toMatchObject({ state: 'no_receiver', reason: 'not_searched', feeds: [] });
+    // The listed feed decides: online is quiet, and activity names only listed feeds.
+    expect(
+      assess('rail_radio', s, {
+        messages: 0,
+        window_min: 30,
+        tracks: TRACK,
+        pulseChannels: ['CSX Alpha road'],
+      }).state,
+    ).toBe('quiet');
+    expect(
+      assess('rail_radio', s, { messages: 2, window_min: 30, tracks: TRACK, pulseChannels: [] }),
+    ).toMatchObject({ state: 'activity', messages: 2, feeds: [] });
+  });
+
+  it("rail/activity's covered is split per kind", () => {
+    const s = status([railFeed(), eotFeed(), EXAMPLE_RAIL]);
+    const road = (receiver_state?: string) => ({
+      channel: 'CSX Alpha road',
+      kind: 'road',
+      ...(receiver_state ? { receiver_state } : {}),
+    });
+    const eotCh = (receiver_state?: string) => ({
+      channel: EOT,
+      kind: 'eot',
+      ...(receiver_state ? { receiver_state } : {}),
+    });
+    const cov = (covered: boolean, channels: unknown[]) => ({ covered, channels });
+    // A reported EOT receiver makes Pulse's covered true; voice is still not covered.
+    const eotOnly = cov(true, [eotCh('online')]);
+    expect(pulseCoveredFor('rail_radio', eotOnly, s)).toBe(false);
+    expect(pulseCoveredFor('eot', eotOnly, s)).toBe(true);
+    // Per-channel receiver_state decides each kind.
+    const voiceNever = cov(true, [road('not_installed'), eotCh('online')]);
+    expect(pulseCoveredFor('rail_radio', voiceNever, s)).toBe(false);
+    expect(pulseCoveredFor('eot', voiceNever, s)).toBe(true);
+    const eotNever = cov(true, [road('offline'), eotCh('not_installed')]);
+    expect(pulseCoveredFor('rail_radio', eotNever, s)).toBe(true);
+    expect(pulseCoveredFor('eot', eotNever, s)).toBe(false);
+    // An example placeholder Pulse lists doesn't count, as in Pulse's own rule.
+    const exampleOnly = cov(true, [
+      road('not_installed'),
+      { channel: 'Example railroad road channel', kind: 'road', receiver_state: 'online' },
+      eotCh('online'),
+    ]);
+    expect(pulseCoveredFor('rail_radio', exampleOnly, s)).toBe(false);
+    // Without per-channel states: covered:false holds for both kinds, and an EOT listing alone
+    // doesn't make voice covered; covered:true with both kinds listed can't be split.
+    expect(pulseCoveredFor('rail_radio', cov(true, [eotCh()]), s)).toBe(false);
+    expect(pulseCoveredFor('eot', cov(true, [eotCh()]), s)).toBe(true);
+    expect(pulseCoveredFor('rail_radio', cov(false, [road(), eotCh()]), s)).toBe(false);
+    expect(pulseCoveredFor('eot', cov(false, [road(), eotCh()]), s)).toBe(false);
+    expect(pulseCoveredFor('rail_radio', cov(true, [road(), eotCh()]), s)).toBe(true);
+    // No channel list (malformed or older answer): covered as given.
+    expect(pulseCoveredFor('rail_radio', { covered: true }, s)).toBe(true);
+    expect(pulseCoveredFor('eot', {}, s)).toBeUndefined();
+    // Fed to assess: a listed voice channel whose receiver never reported is not quiet, even
+    // though feeds/status shows it online and Pulse's covered is true because of the EOT one.
+    expect(
+      assess('rail_radio', s, {
+        messages: 0,
+        window_min: 30,
+        tracks: TRACK,
+        pulseChannels: ['CSX Alpha road'],
+        pulseCovered: pulseCoveredFor('rail_radio', voiceNever, s),
+      }),
+    ).toMatchObject({ state: 'no_receiver', reason: 'pulse_not_covered' });
   });
 });

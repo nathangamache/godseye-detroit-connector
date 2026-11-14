@@ -12,6 +12,7 @@ import {
   lineLabel,
   matchCoverageLine,
   parseFeedsStatus,
+  pulseCoveredFor,
   reportsCoverage,
   verdictSentence,
   type FeedsStatus,
@@ -269,27 +270,31 @@ export function pulseTools(client: PulseClient, opts: PulseToolOptions = {}): To
             typeof c === 'object' &&
             typeof (c as { channel?: unknown }).channel === 'string',
         );
-        const pulseVoice = chans.filter((c) => c.kind !== 'eot').map((c) => c.channel);
-        // The EOT channels Pulse lists for THIS point: it lists one only when its receiver is
-        // within range of the point or has no location set. v1.1 always sends the list, so
-        // there a missing list means none.
-        const pulseEot =
-          Array.isArray(cov.channels) || (status && reportsCoverage(status))
-            ? chans.filter((c) => c.kind === 'eot').map((c) => c.channel)
-            : undefined;
-        const pulseCovered = typeof cov.covered === 'boolean' ? cov.covered : undefined;
+        // The channels Pulse lists for THIS point, per kind. Voice: only these were searched for
+        // transcripts here. EOT: it lists one only when its receiver is within range of the
+        // point or has no location set. v1.1 always sends the list, so there a missing list
+        // means none.
+        const known = Array.isArray(cov.channels) || Boolean(status && reportsCoverage(status));
+        const pulseVoice = known
+          ? chans.filter((c) => c.kind !== 'eot').map((c) => c.channel)
+          : undefined;
+        const pulseEot = known
+          ? chans.filter((c) => c.kind === 'eot').map((c) => c.channel)
+          : undefined;
+        // Pulse's `covered` lumps voice and EOT together: split it so that a reported EOT
+        // receiver doesn't make voice covered, nor the reverse.
         const railVerdict = assess('rail_radio', status, {
           messages: voice,
           window_min: since,
           tracks,
           pulseChannels: pulseVoice,
-          pulseCovered,
+          pulseCovered: pulseCoveredFor('rail_radio', cov, status),
         });
         const eotVerdict = assess('eot', status, {
           messages: packets,
           window_min: since,
           pulseChannels: pulseEot,
-          pulseCovered,
+          pulseCovered: pulseCoveredFor('eot', cov, status),
         });
         // Packets no receiver covering this point heard are not activity here.
         const ignored = eotVerdict.state === 'no_receiver' ? (eotVerdict.ignored_messages ?? 0) : 0;

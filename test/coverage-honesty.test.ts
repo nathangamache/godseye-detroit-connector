@@ -566,4 +566,83 @@ describe('rail_activity_near ties each verdict to the point', () => {
       await h.close();
     }
   });
+
+  it('rail voice: a feed on the line that Pulse did not list (search) for the point is not "quiet"', async () => {
+    // feeds/status: 'Line road' online, its coverage line the track at the point, and an EOT
+    // receiver online. Pulse's rail/activity lists only the EOT channel for the point, so
+    // covered is true because of it, and it never searched Line road's transcripts here.
+    const lineRoad = {
+      ...ZULU,
+      feed_id: 'line_road',
+      name: 'Line road',
+      coverage: { lines: [{ name: split.narn, aliases: [split.fra] }] },
+    };
+    const eotOnline = {
+      feed_id: 'eot_hot',
+      name: EOT_NAME,
+      category: 'rail',
+      enabled: true,
+      state: 'up',
+      chunks_last_hour: 9,
+      source: 'sdr:traintap',
+      receiver: { state: 'online', last_seen_at: iso(5_000), device: 'traintap' },
+      coverage: { area: 'Elsewhere County', radius_km: 25 },
+    };
+    const answer = (channels: unknown[]) => () => ({
+      generated_at: iso(0),
+      coverage: { covered: true, channels },
+      transcripts: [],
+      detector_readouts: [],
+      eot_hot: [],
+      reason_labels: [],
+    });
+    const eotChannel = { channel: EOT_NAME, kind: 'eot', receiver_state: 'online' };
+    const feeds = () => ({
+      generated_at: iso(0),
+      feeds: [lineRoad, eotOnline],
+      coverage_summary: {
+        rail_radio: 'listening',
+        eot: 'listening',
+        public_safety: 'not_configured',
+      },
+    });
+    const h = await harness({ feeds, rail: answer([eotChannel]), incidents: noIncidents });
+    try {
+      const t = await h.run('rail_activity_near', { lat: split.lat, lon: split.lon });
+      expect(t).toMatch(
+        /Rail radio: No rail radio receiver confirmed on this line \(.*\): Pulse's own lookup for this point did not list Line road among its rail voice channels, so it was not searched here/,
+      );
+      expect(t).not.toMatch(/Rail radio: Listening and quiet/);
+      expect(t).toMatch(/"not_searched"/);
+      // EOT/HOT is judged on its own channel and stays quiet.
+      expect(t).toMatch(/EOT\/HOT: Listening and quiet: EOT\/HOT receiver online/);
+      const w = text(
+        await h.client.callTool({
+          name: 'whats_happening_here',
+          arguments: { lat: split.lat, lon: split.lon },
+        }),
+      );
+      expect(w).toMatch(/did not list Line road among its rail voice channels/);
+      expect(w).not.toMatch(/rail radio receiver online \(Line road\)/);
+    } finally {
+      await h.close();
+    }
+    // Listed, but its receiver never reported per rail/activity (covered is true only because
+    // of the EOT receiver): not quiet either, whatever feeds/status says.
+    const h2 = await harness({
+      feeds,
+      rail: answer([
+        { channel: 'Line road', kind: 'road', receiver_state: 'not_installed' },
+        eotChannel,
+      ]),
+    });
+    try {
+      const t = await h2.run('rail_activity_near', { lat: split.lat, lon: split.lon });
+      expect(t).toMatch(/Rail radio: No rail radio receiver confirmed on this line \(/);
+      expect(t).not.toMatch(/Rail radio: Listening and quiet/);
+      expect(t).toMatch(/EOT\/HOT: Listening and quiet: EOT\/HOT receiver online/);
+    } finally {
+      await h2.close();
+    }
+  });
 });

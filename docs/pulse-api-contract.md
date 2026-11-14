@@ -105,7 +105,7 @@ them, then returns:
   subdivision?: string; railroad?: string;
   coverage: {
     covered: boolean;              // false = no monitored channel for this line yet
-    channels: { channel: string; frequency_mhz?: number; railroad?: string; subdivision?: string; kind: "road" | "dispatcher" | "detector" | "eot" }[];
+    channels: { channel: string; frequency_mhz?: number; railroad?: string; subdivision?: string; kind: "road" | "dispatcher" | "detector" | "eot"; receiver_state?: "not_installed" | "offline" | "online" }[];
     note?: string;
   };
   transcripts: (Transcript & { reason_label?: ReasonLabel })[];   // rail voice traffic, newest first
@@ -213,12 +213,17 @@ location, a placeholder scanner feed):
   matches them against each rail feed's `coverage.lines` names **and** aliases. Names are
   compared normalised: case, parenthesised marks such as `(CSXT)`, "Subdivision"/"Sub"/"District",
   a leading railroad mark, "MAIN LINE" vs "MAINLINE"; railroads must agree when both sides name
-  one (legacy marks such as GTW/CN or ATK/AMTK count as the same railroad). A feed that Pulse's own
-  `rail/activity` lists in `coverage.channels` also counts. The matched line's `name` is sent as the
-  `subdivision` hint. When no line is identified at the point (no named track near it in the rail
-  datasets, for example outside their coverage) and Pulse lists no voice channel for it, no rail
-  voice receiver is tied to the point: the result says no rail line was identified here, never
-  "quiet".
+  one (legacy marks such as GTW/CN or ATK/AMTK count as the same railroad). The matched line's
+  `name` is sent as the `subdivision` hint. Pulse searches transcripts only on the voice channels
+  its `rail/activity` lists in `coverage.channels`, so when that list is sent (every v1.1 Pulse
+  does) only a listed voice channel can be **quiet** or **offline** for the point; a feed the
+  gateway matched to the line by name but Pulse did not list (Pulse picks channels its own way, for
+  example at a junction, or with an exact railroad mark) gives **no receiver confirmed: Pulse did
+  not search it for this point**, never "quiet". Without the list (older Pulse), a feed on the
+  matched line or one Pulse lists counts. When no line is identified at the point (no named track
+  near it in the rail datasets, for example outside their coverage) and Pulse lists no voice
+  channel for it, no rail voice receiver is tied to the point: the result says no rail line was
+  identified here, never "quiet".
 * EOT/HOT is judged by the `kind: "eot"` channels `rail/activity` lists for the point (Pulse lists
   one only when its receiver is within range of the point or has no location set). An EOT/HOT
   receiver Pulse doesn't list for the point gives **no EOT/HOT receiver near this point**, and any
@@ -227,12 +232,17 @@ location, a placeholder scanner feed):
   some packets may come from the other one.
 * On v1.1, `coverage.covered: false` from `rail/activity` is never reported as quiet, even if
   feeds/status shows a matching receiver online: the result says no receiver is confirmed.
+  Pulse computes `covered` over the voice and EOT channels together, so the gateway splits it per
+  kind: with each listed channel's `receiver_state`, a kind is covered when one of its listed
+  channels (not an example or disabled feed) has reported; without per-channel states,
+  `covered: false` holds for both kinds and a kind with no listed channel is not covered (an EOT
+  listing never makes rail voice covered, nor the reverse).
 * Each result then states exactly one of: **activity found**; **listening and quiet** (a
   receiver covering the point is online and 0 messages arrived in the window); **receiver
   offline since T**; **no receiver** (none of that kind is set up, a channel is set up but its
   receiver never reported, no channel covers this line, naming the lines Pulse does cover, no
-  line identified at the point, no EOT/HOT receiver near the point, or Pulse's point lookup says
-  not covered); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`;
+  line identified at the point, no EOT/HOT receiver near the point, Pulse's point lookup says
+  not covered, or Pulse did not search the line's channel for the point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`;
   unknown, not "quiet"). EOT/HOT
   results add that packets can't be tied to the place when the EOT receiver has no
   `coverage.area`/`radius_km`. Scanner results list the areas the listening feeds cover (the

@@ -8,7 +8,8 @@
  *
  *   activity found · listening and quiet · receiver offline since T ·
  *   no receiver (none configured / never reported / none for this line / no line identified /
- *   none near this point / Pulse's point lookup says not covered) · can't say (old Pulse)
+ *   none near this point / Pulse's point lookup says not covered / not searched by Pulse for
+ *   this point) · can't say (old Pulse)
  *
  * Example/placeholder feeds (ids starting "example_" or flagged example: true) never count.
  * Rail lines are matched on every name the datasets give a track and every alias Pulse lists,
@@ -16,8 +17,10 @@
  *
  * Every verdict is about the point asked: "quiet" needs a receiver that covers it. Rail voice
  * is judged per line (the line identified at the point, or the channels Pulse's rail/activity
- * lists for it); EOT/HOT per the "eot" channels rail/activity lists for the point (Pulse lists
- * one only when its receiver is within range of the point or has no location set).
+ * lists for it); when Pulse sends that list, only a voice channel it lists can be quiet, since
+ * Pulse searched no other channel's transcripts for the point. EOT/HOT is judged per the "eot"
+ * channels rail/activity lists for the point (Pulse lists one only when its receiver is within
+ * range of the point or has no location set). rail/activity's `covered` is split per kind.
  */
 import {
   formatLineNames,
@@ -188,7 +191,12 @@ export type NoReceiverReason =
   /** EOT/HOT: Pulse's rail/activity lists no EOT channel for the point (receivers too far). */
   | 'not_near'
   /** rail/activity said covered:false for the point (v1.1): no listed receiver has reported. */
-  | 'pulse_not_covered';
+  | 'pulse_not_covered'
+  /**
+   * Rail voice: rail/activity's channel list for the point doesn't include these feeds (they
+   * match the line by name only), so Pulse never searched their transcripts there.
+   */
+  | 'not_searched';
 
 export type Verdict =
   | {
@@ -221,10 +229,15 @@ export interface AssessOptions {
   /**
    * Channel names (labels or feed ids) of this kind that Pulse's own rail/activity lookup listed
    * for the point: road/dispatcher/detector channels for rail radio, "eot" channels for EOT/HOT.
-   * For EOT/HOT, `[]` means Pulse listed none for this point; undefined means it isn't known.
+   * `[]` means Pulse listed none for this point; undefined means the list isn't known (an older
+   * Pulse). For rail radio, a list means only the feeds in it were searched, so only they can
+   * be quiet or offline; without one, a feed whose coverage line is the track at the point counts.
    */
   pulseChannels?: string[];
-  /** rail/activity's coverage.covered for the point (v1.1: a listed receiver has reported). */
+  /**
+   * rail/activity's coverage.covered for the point, for this kind (pulseCoveredFor): v1.1, a
+   * listed receiver of this kind has reported.
+   */
   pulseCovered?: boolean;
 }
 
@@ -267,6 +280,42 @@ export function assess(
   if (v.state === 'quiet' && opts.pulseCovered === false && status && reportsCoverage(status))
     return { kind, state: 'no_receiver', reason: 'pulse_not_covered', feeds: v.feeds };
   return v;
+}
+
+/**
+ * rail/activity's `coverage.covered` for one kind. Pulse computes `covered` over the voice and EOT
+ * channels it lists together, so a reported EOT receiver near the point makes it true where no
+ * voice channel is listed (and the reverse). Each listed channel carries its own
+ * `receiver_state`: when every listed channel of the kind has one, the kind is covered when one
+ * of them (not an example placeholder or a disabled feed) has reported, online or offline, as
+ * in Pulse's own rule. Without per-channel states, covered:false holds for both kinds, a kind
+ * Pulse lists no channel for is not covered, and covered:true is kept for a kind it lists.
+ */
+export function pulseCoveredFor(
+  kind: 'rail_radio' | 'eot',
+  coverage: unknown,
+  status?: FeedsStatus,
+): boolean | undefined {
+  const cov = (coverage && typeof coverage === 'object' ? coverage : {}) as Record<string, unknown>;
+  const covered = typeof cov.covered === 'boolean' ? cov.covered : undefined;
+  if (!Array.isArray(cov.channels) || covered === false) return covered;
+  const notCoverage = new Set(
+    (status?.feeds ?? [])
+      .filter((f) => isExampleFeed(f) || f.enabled === false)
+      .flatMap((f) => [f.feed_id, f.name ?? ''].map((x) => x.toLowerCase())),
+  );
+  const mine = (cov.channels as unknown[]).filter(
+    (c): c is { channel: string; kind?: unknown; receiver_state?: unknown } =>
+      Boolean(c) &&
+      typeof c === 'object' &&
+      typeof (c as { channel?: unknown }).channel === 'string' &&
+      ((c as { kind?: unknown }).kind === 'eot') === (kind === 'eot') &&
+      !notCoverage.has((c as { channel: string }).channel.toLowerCase()),
+  );
+  if (!mine.length) return false;
+  if (mine.every((c) => RECEIVER_STATES.has(c.receiver_state as ReceiverState)))
+    return mine.some((c) => c.receiver_state !== 'not_installed');
+  return covered;
 }
 
 /** The lines Pulse's channels of a kind hear, for "no receiver here; Pulse covers X". */
@@ -317,14 +366,16 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
     elsewhere = all.filter((f) => !listed(f) && f.receiver?.state !== 'not_installed').map(ref);
   }
 
+  // Rail voice on a Pulse that sent rail/activity's channel list: it searched only those.
+  const searchedOnly = kind === 'rail_radio' && opts.pulseChannels !== undefined;
   if (kind === 'rail_radio' && usable) {
     // Rail voice is judged per line: the line identified at the point, or the channels Pulse's
-    // own lookup named for it. With neither, no receiver can be tied to this point.
-    feeds = all.filter(
-      (f) =>
-        (f.coverage?.lines ?? []).some((l) => tracks.some((t) => trackMatchesLine(t, l))) ||
-        listed(f),
-    );
+    // own lookup named for it. With neither, no receiver can be tied to this point. When Pulse
+    // sent its list, a feed matched to the line by name only was not searched for this point,
+    // so it can't make it quiet (or offline): only the voice channels Pulse listed count.
+    const onLine = (f: FeedInfo) =>
+      (f.coverage?.lines ?? []).some((l) => tracks.some((t) => trackMatchesLine(t, l)));
+    feeds = all.filter((f) => listed(f) || (!searchedOnly && onLine(f)));
     if (!tracks.length && !channels.size && opts.messages === 0) {
       if (!all.length && summary === 'no_receiver')
         return { kind, state: 'no_receiver', reason: 'never_reported', feeds: [] };
@@ -338,6 +389,9 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
         feeds: [],
       };
     }
+    const unsearched = searchedOnly && !feeds.length ? all.filter(onLine) : [];
+    if (unsearched.length && opts.messages === 0)
+      return { kind, state: 'no_receiver', reason: 'not_searched', feeds: unsearched.map(ref) };
   }
 
   if (opts.messages > 0)
@@ -353,8 +407,11 @@ function judge(kind: CoverageKind, status: FeedsStatus | undefined, opts: Assess
 
   if (!all.length) {
     // Nothing we can see of this kind; Pulse's own summary decides (it may classify feeds we can't).
+    // Not for rail voice with Pulse's list: no channel it searched is a receiver we can see.
     if (summary === 'listening')
-      return { kind, state: 'quiet', window_min: opts.window_min, feeds: [] };
+      return searchedOnly
+        ? { kind, state: 'no_receiver', reason: 'not_searched', feeds: [] }
+        : { kind, state: 'quiet', window_min: opts.window_min, feeds: [] };
     if (summary === 'receiver_offline') return { kind, state: 'offline', feeds: [] };
     if (summary === 'no_receiver')
       return { kind, state: 'no_receiver', reason: 'never_reported', feeds: [] };
@@ -427,7 +484,9 @@ const unlocated = (v: { kind: CoverageKind; feeds: FeedRef[] }) =>
 /**
  * One sentence stating which situation applies: activity found, listening and quiet, receiver
  * offline since T, no receiver (none set up / never reported / none for this line / no line
- * identified / none near this point / not covered per Pulse's point lookup), or Pulse can't say. `place` is a noun phrase: "this line (FRA: X Sub; NARN: Y Sub)", "this area".
+ * identified / none near this point / not covered per Pulse's point lookup / not searched by
+ * Pulse for this point), or Pulse can't say. `place` is a noun phrase: "this line (FRA: X Sub;
+ * NARN: Y Sub)", "this area".
  */
 export function verdictSentence(v: Verdict, now: number, place = 'this point'): string {
   const n = NOUN[v.kind];
@@ -492,6 +551,13 @@ function noReceiverSentence(v: Extract<Verdict, { state: 'no_receiver' }>, place
         ? `Pulse's ${n.rx}${v.feeds.length === 1 ? '' : 's'} (${rx}${v.feeds.length > 3 ? ` and ${v.feeds.length - 3} more` : ''}) ${v.feeds.length === 1 ? 'is' : 'are'} not listed for this point, so ${v.feeds.length === 1 ? 'it is' : 'they are'} too far away to hear trains here.`
         : `Pulse lists no ${n.rx} within range of this point.`;
       return `No ${n.rx} ${at}: ${who}${tail}`;
+    }
+    case 'not_searched': {
+      const one = v.feeds.length === 1;
+      const why = v.feeds.length
+        ? `Pulse's own lookup for this point did not list ${names(v.feeds)} among its rail voice channels, so ${one ? 'it was' : 'they were'} not searched here (${one ? 'it matches' : 'they match'} this line by name only)`
+        : `Pulse's own lookup for this point lists no rail voice channel that its feed status reports as a receiver, so none was searched here`;
+      return `No ${n.rx} confirmed ${at}: ${why}.${tail}`;
     }
     case 'pulse_not_covered':
       return `No ${n.rx} confirmed ${at}: Pulse's own lookup for this point says no receiver for the channels that cover it has reported (covered: false)${v.feeds.length ? `, though its feed status lists ${names(v.feeds)} online` : ''}.${tail}`;
