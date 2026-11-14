@@ -16,6 +16,8 @@ import { createLogger, type Logger } from './log.js';
 import { TokenStore } from './oauth/tokens.js';
 import { RailIndex } from './rail/index.js';
 import { railTools } from './rail/tools.js';
+import { PulseClient } from './pulse/client.js';
+import { pulseTools } from './pulse/tools.js';
 import { ToolPolicy } from './tools/policy.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/runner.js';
@@ -107,6 +109,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   } else {
     logger.warn('rail_data_missing', { dir: config.RAIL_DATA_DIR });
   }
+  const pulse = new PulseClient({ baseUrl: config.PULSE_URL, token: config.PULSE_API_TOKEN, timeoutMs: config.PULSE_TIMEOUT_MS });
+  for (const t of pulseTools(pulse)) registry.register(t);
   for (const t of overrides.extraTools ?? []) registry.register(t);
   return {
     config,
