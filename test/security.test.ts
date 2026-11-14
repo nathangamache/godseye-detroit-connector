@@ -1,13 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTVerifyGetKey } from 'jose';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CfAccessVerifier } from '../src/auth/cfAccess.js';
+import { tailscaleIdentity } from '../src/auth/tailscale.js';
 import { base32Encode, hotp, totp, verifyTotp } from '../src/auth/totp.js';
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { safeNext } from '../src/auth/login.js';
-import { loadConfig } from '../src/config.js';
+import { ConfigError, loadConfig } from '../src/config.js';
 import { startGateway, type Gateway } from '../src/gateway.js';
 import { nullLogger } from '../src/log.js';
 import { CimdFetchError, checkCimdUrl, makeCimdFetcher } from '../src/oauth/cimd.js';
@@ -18,10 +17,28 @@ import { fakeCimdFetch, freePort } from './oauth-helpers.js';
 
 describe('SSRF guards for CIMD fetches', () => {
   it('classifies private and special-use addresses', () => {
-    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.91', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '::1', '::', 'fd7a:115c:a1e0::1', 'fe80::1', '::ffff:10.0.0.1', '::ffff:127.0.0.1', 'not-an-ip']) {
+    for (const ip of [
+      '127.0.0.1',
+      '10.1.2.3',
+      '172.16.0.1',
+      '172.31.255.255',
+      '192.168.1.91',
+      '169.254.169.254',
+      '100.64.0.1',
+      '0.0.0.0',
+      '224.0.0.1',
+      '::1',
+      '::',
+      'fd7a:115c:a1e0::1',
+      'fe80::1',
+      '::ffff:10.0.0.1',
+      '::ffff:127.0.0.1',
+      'not-an-ip',
+    ]) {
       expect(isPrivateIp(ip), ip).toBe(true);
     }
-    for (const ip of ['160.79.104.10', '8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) expect(isPrivateIp(ip), ip).toBe(false);
+    for (const ip of ['160.79.104.10', '8.8.8.8', '1.1.1.1', '2606:4700:4700::1111'])
+      expect(isPrivateIp(ip), ip).toBe(false);
   });
 
   it('rejects non-https, odd ports, credentials and fragments', () => {
@@ -29,7 +46,9 @@ describe('SSRF guards for CIMD fetches', () => {
     expect(() => checkCimdUrl('https://claude.ai:8443/oauth/x')).toThrow(/port/);
     expect(() => checkCimdUrl('https://u:p@claude.ai/oauth/x')).toThrow(/credentials/);
     expect(() => checkCimdUrl('https://claude.ai/oauth/x#f')).toThrow(/fragment/);
-    expect(checkCimdUrl('https://claude.ai/oauth/mcp-oauth-client-metadata').hostname).toBe('claude.ai');
+    expect(checkCimdUrl('https://claude.ai/oauth/mcp-oauth-client-metadata').hostname).toBe(
+      'claude.ai',
+    );
   });
 
   it('blocks hosts that resolve to private addresses (DNS checked before connecting)', async () => {
@@ -37,7 +56,12 @@ describe('SSRF guards for CIMD fetches', () => {
       const fetcher = makeCimdFetcher({ resolver: async () => [{ address, family: 4 }] });
       await expect(fetcher('https://attacker.example/client.json')).rejects.toThrow(/non-public/);
     }
-    const mixed = makeCimdFetcher({ resolver: async () => [{ address: '8.8.8.8', family: 4 }, { address: '::1', family: 6 }] });
+    const mixed = makeCimdFetcher({
+      resolver: async () => [
+        { address: '8.8.8.8', family: 4 },
+        { address: '::1', family: 6 },
+      ],
+    });
     await expect(mixed('https://attacker.example/client.json')).rejects.toThrow(/non-public/);
     const literal = makeCimdFetcher();
     await expect(literal('https://127.0.0.1/client.json')).rejects.toThrow(/non-public/);
@@ -46,25 +70,78 @@ describe('SSRF guards for CIMD fetches', () => {
 
   it('validates CIMD documents', () => {
     const url = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
-    expect(validateCimd(url, JSON.stringify({ client_id: url, client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' })).client_name).toBe('Claude');
-    expect(() => validateCimd(url, JSON.stringify({ client_id: 'https://other/x', redirect_uris: ['https://a/b'] }))).toThrow(/does not match/);
-    expect(() => validateCimd(url, JSON.stringify({ client_id: url, redirect_uris: [] }))).toThrow(/redirect_uris/);
-    expect(() => validateCimd(url, JSON.stringify({ client_id: url, redirect_uris: ['https://a/b'], token_endpoint_auth_method: 'private_key_jwt' }))).toThrow(/public/);
+    expect(
+      validateCimd(
+        url,
+        JSON.stringify({
+          client_id: url,
+          client_name: 'Claude',
+          redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+          token_endpoint_auth_method: 'none',
+        }),
+      ).client_name,
+    ).toBe('Claude');
+    expect(() =>
+      validateCimd(
+        url,
+        JSON.stringify({ client_id: 'https://other/x', redirect_uris: ['https://a/b'] }),
+      ),
+    ).toThrow(/does not match/);
+    expect(() => validateCimd(url, JSON.stringify({ client_id: url, redirect_uris: [] }))).toThrow(
+      /redirect_uris/,
+    );
+    expect(() =>
+      validateCimd(
+        url,
+        JSON.stringify({
+          client_id: url,
+          redirect_uris: ['https://a/b'],
+          token_endpoint_auth_method: 'private_key_jwt',
+        }),
+      ),
+    ).toThrow(/public/);
     expect(() => validateCimd(url, 'not json')).toThrow();
   });
 
   it('redirect matching is exact except loopback ports', () => {
-    expect(redirectMatches('https://claude.ai/api/mcp/auth_callback', 'https://claude.ai/api/mcp/auth_callback')).toBe(true);
-    expect(redirectMatches('https://claude.ai/api/mcp/auth_callback', 'https://claude.ai/api/mcp/auth_callback/')).toBe(false);
-    expect(redirectMatches('https://claude.ai/api/mcp/auth_callback', 'https://claude.ai.evil.example/api/mcp/auth_callback')).toBe(false);
-    expect(redirectMatches('http://localhost/callback', 'http://localhost:4321/callback')).toBe(true);
-    expect(redirectMatches('http://localhost/callback', 'http://localhost:4321/callback?x=1')).toBe(false);
-    expect(redirectMatches('http://127.0.0.1/callback', 'http://localhost:4321/callback')).toBe(false);
+    expect(
+      redirectMatches(
+        'https://claude.ai/api/mcp/auth_callback',
+        'https://claude.ai/api/mcp/auth_callback',
+      ),
+    ).toBe(true);
+    expect(
+      redirectMatches(
+        'https://claude.ai/api/mcp/auth_callback',
+        'https://claude.ai/api/mcp/auth_callback/',
+      ),
+    ).toBe(false);
+    expect(
+      redirectMatches(
+        'https://claude.ai/api/mcp/auth_callback',
+        'https://claude.ai.evil.example/api/mcp/auth_callback',
+      ),
+    ).toBe(false);
+    expect(redirectMatches('http://localhost/callback', 'http://localhost:4321/callback')).toBe(
+      true,
+    );
+    expect(redirectMatches('http://localhost/callback', 'http://localhost:4321/callback?x=1')).toBe(
+      false,
+    );
+    expect(redirectMatches('http://127.0.0.1/callback', 'http://localhost:4321/callback')).toBe(
+      false,
+    );
   });
 
   it('open-redirect safe next parameter', () => {
     expect(safeNext('/oauth/admin')).toBe('/oauth/admin');
-    for (const bad of ['//evil.example', 'https://evil.example', '/\\evil', '/x\r\nSet-Cookie: a=b']) expect(safeNext(bad)).toBe('/');
+    for (const bad of [
+      '//evil.example',
+      'https://evil.example',
+      '/\\evil',
+      '/x\r\nSet-Cookie: a=b',
+    ])
+      expect(safeNext(bad)).toBe('/');
   });
 });
 
@@ -90,99 +167,210 @@ describe('TOTP and password hashing', () => {
   });
 });
 
-const TEAM = 'testteam.cloudflareaccess.com';
-const AUD = 'test-aud-tag';
-const OWNER = 'owner@example.com';
-type Key = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
-let privateKey: Key;
-let jwks: JWTVerifyGetKey;
+describe('Tailscale identity (private listener)', () => {
+  const fakeReq = (remote: string, headers: Record<string, string | string[]>) =>
+    ({ socket: { remoteAddress: remote }, headers }) as never;
+  const opts = { trustedProxies: ['127.0.0.1', '::1'], ownerLogin: 'owner@example.com' };
 
-async function cfJwt(over: { email?: string; aud?: string; iss?: string; expSecs?: number; key?: Key } = {}) {
-  return new SignJWT({ email: over.email ?? OWNER, type: 'app' })
-    .setProtectedHeader({ alg: 'ES256', kid: 'k1' })
-    .setIssuer(over.iss ?? `https://${TEAM}`)
-    .setAudience(over.aud ?? AUD)
-    .setSubject('user-1')
-    .setIssuedAt()
-    .setExpirationTime(Math.floor(Date.now() / 1000) + (over.expSecs ?? 300))
-    .sign(over.key ?? privateKey);
-}
-
-beforeAll(async () => {
-  const kp = await generateKeyPair('ES256');
-  privateKey = kp.privateKey;
-  const pub = await exportJWK(kp.publicKey);
-  jwks = createLocalJWKSet({ keys: [{ ...pub, kid: 'k1', alg: 'ES256', use: 'sig' }] });
-});
-
-describe('Cloudflare Access JWT verification', () => {
-  it('accepts only the owner, for our team and audience, unexpired', async () => {
-    const v = new CfAccessVerifier({ teamDomain: TEAM, aud: AUD, ownerEmail: OWNER, jwks });
-    expect(await v.verify(await cfJwt())).toMatchObject({ email: OWNER });
-    expect(await v.verify(await cfJwt({ email: 'someone@else.com' }))).toBeNull();
-    expect(await v.verify(await cfJwt({ aud: 'other-aud' }))).toBeNull();
-    expect(await v.verify(await cfJwt({ iss: 'https://evil.cloudflareaccess.com' }))).toBeNull();
-    expect(await v.verify(await cfJwt({ expSecs: -120 }))).toBeNull();
-    const other = await generateKeyPair('ES256');
-    expect(await v.verify(await cfJwt({ key: other.privateKey }))).toBeNull();
-    expect(await v.verify(undefined)).toBeNull();
-    expect(await v.verify('eyJhbGciOiJub25lIn0.eyJlbWFpbCI6Im93bmVyQGV4YW1wbGUuY29tIn0.')).toBeNull();
+  it('trusts the login header only from the trusted proxy and only for the owner', () => {
+    expect(
+      tailscaleIdentity(
+        fakeReq('127.0.0.1', { 'tailscale-user-login': 'Owner@Example.com' }),
+        opts,
+      ),
+    ).toMatchObject({ login: 'owner@example.com' });
+    expect(
+      tailscaleIdentity(
+        fakeReq('::ffff:127.0.0.1', { 'tailscale-user-login': 'owner@example.com' }),
+        opts,
+      ),
+    ).not.toBeNull();
+    expect(
+      tailscaleIdentity(
+        fakeReq('172.30.77.11', { 'tailscale-user-login': 'owner@example.com' }),
+        opts,
+      ),
+    ).toBeNull();
+    expect(
+      tailscaleIdentity(
+        fakeReq('127.0.0.1', { 'tailscale-user-login': 'someone@example.com' }),
+        opts,
+      ),
+    ).toBeNull();
+    expect(tailscaleIdentity(fakeReq('127.0.0.1', {}), opts)).toBeNull();
+    expect(
+      tailscaleIdentity(
+        fakeReq('127.0.0.1', { 'tailscale-user-login': ['owner@example.com', 'x@y'] }),
+        opts,
+      ),
+    ).toBeNull();
+    expect(
+      tailscaleIdentity(
+        fakeReq('127.0.0.1', { 'tailscale-user-login': 'owner@example.com, other@x' }),
+        opts,
+      ),
+    ).toBeNull();
   });
 });
 
-describe('production mode', () => {
+describe('production configuration', () => {
+  const prod = {
+    GATEWAY_MODE: 'production',
+    PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
+    OWNER_TAILSCALE_LOGIN: 'owner@example.com',
+  };
+  it('fails closed without the Tailscale owner or an https tailnet origin', () => {
+    expect(() => loadConfig({ GATEWAY_MODE: 'production' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...prod, OWNER_TAILSCALE_LOGIN: '' })).toThrow(
+      /OWNER_TAILSCALE_LOGIN/,
+    );
+    expect(() =>
+      loadConfig({ ...prod, PRIVATE_ORIGIN: 'http://godseye.example-tailnet.ts.net' }),
+    ).toThrow(/https PRIVATE_ORIGIN/);
+    expect(() =>
+      loadConfig({
+        ...prod,
+        LOGIN_PROVIDER: 'password',
+        GATEWAY_PASSWORD_HASH: 'x',
+        GATEWAY_TOTP_SECRET: 'y',
+      }),
+    ).toThrow(/not allowed in production/);
+    const c = loadConfig(prod);
+    expect(c.loginProvider).toBe('tailscale');
+    expect(c.authorizationEndpoint).toBe('https://godseye.example-tailnet.ts.net/oauth/authorize');
+    expect(c.issuer).toBe('https://godseye.gamachecloud.com');
+    expect(c.mcpResource).toBe('https://godseye.gamachecloud.com/mcp');
+    expect(c.linkOrigin).toBe('https://godseye.example-tailnet.ts.net');
+    expect(c.publicAuthorize).toBe(false);
+  });
+  it('the public authorize fallback is opt-in and needs password+TOTP', () => {
+    expect(() => loadConfig({ ...prod, PUBLIC_AUTHORIZE_FALLBACK: 'password' })).toThrow(
+      /GATEWAY_PASSWORD_HASH/,
+    );
+    const c = loadConfig({
+      ...prod,
+      PUBLIC_AUTHORIZE_FALLBACK: 'password',
+      GATEWAY_PASSWORD_HASH: 'scrypt$x',
+      GATEWAY_TOTP_SECRET: 'ABC',
+    });
+    expect(c.authorizationEndpoint).toBe('https://godseye.gamachecloud.com/oauth/authorize');
+  });
+});
+
+describe('production mode listeners', () => {
   let gw: Gateway;
-  let base: string;
   let dir: string;
+  const OWNER = 'owner@example.com';
   beforeAll(async () => {
     dir = mkdtempSync(path.join(tmpdir(), 'gw-prod-'));
-    const port = await freePort();
     const config = loadConfig({
       GATEWAY_MODE: 'production',
-      PORT: String(port),
+      PORT: String(await freePort()),
+      PRIVATE_PORT: String(await freePort()),
+      PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
+      OWNER_TAILSCALE_LOGIN: OWNER,
       DATA_DIR: dir,
-      CF_ACCESS_TEAM_DOMAIN: TEAM,
-      CF_ACCESS_AUD: AUD,
-      OWNER_EMAIL: OWNER,
       GEV_MCP_ENABLED: 'false',
       PULSE_URL: 'http://127.0.0.1:9',
     });
-    gw = await startGateway(config, { logger: nullLogger, gevChild: false, mount: installAllRoutes({ cimdFetch: fakeCimdFetch, cfJwks: jwks }) });
-    base = gw.url;
+    gw = await startGateway(config, {
+      logger: nullLogger,
+      gevChild: false,
+      routes: installAllRoutes({ cimdFetch: fakeCimdFetch }),
+    });
   });
   afterAll(async () => {
     await gw?.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('refuses to start without Cloudflare Access configuration', () => {
-    expect(() => loadConfig({ GATEWAY_MODE: 'production' })).toThrow(/fail closed/);
-  });
-
-  it('owner routes reject a missing or invalid Access JWT and accept a valid one', async () => {
-    for (const p of ['/oauth/admin', '/oauth/authorize?client_id=x']) {
-      expect((await fetch(base + p, { redirect: 'manual' })).status, p).toBe(403);
-      const bad = await fetch(base + p, { redirect: 'manual', headers: { 'cf-access-jwt-assertion': await cfJwt({ email: 'intruder@example.com' }) } });
-      expect(bad.status, p).toBe(403);
-      const forged = await fetch(base + p, { redirect: 'manual', headers: { 'cf-access-jwt-assertion': 'abc.def.ghi' } });
-      expect(forged.status, p).toBe(403);
+  it('private owner routes reject a missing or wrong Tailscale identity and accept the owner', async () => {
+    for (const p of ['/oauth/admin', '/oauth/authorize?client_id=x', '/locate/', '/pulse/', '/']) {
+      expect((await fetch(gw.privateUrl + p, { redirect: 'manual' })).status, p).toBe(403);
+      expect(
+        (
+          await fetch(gw.privateUrl + p, {
+            redirect: 'manual',
+            headers: { 'tailscale-user-login': 'intruder@example.com' },
+          })
+        ).status,
+        p,
+      ).toBe(403);
     }
-    const ok = await fetch(base + '/oauth/admin', { headers: { 'cf-access-jwt-assertion': await cfJwt() } });
+    const ok = await fetch(gw.privateUrl + '/oauth/admin', {
+      headers: { 'tailscale-user-login': OWNER },
+    });
     expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain('Signed in as owner@example.com via cf-access');
-    // No password login route exists in production.
-    expect((await fetch(base + '/auth/login')).status).toBe(404);
+    expect(await ok.text()).toContain('Signed in as owner@example.com via tailscale');
+    expect((await fetch(gw.privateUrl + '/auth/login')).status).toBe(404); // no password login in production
   });
 
-  it('public endpoints stay public and leak nothing', async () => {
-    const h = await fetch(base + '/healthz');
+  it('the public listener 404s every UI path, even with an identity header', async () => {
+    for (const p of [
+      '/',
+      '/index.html',
+      '/assets/app.js',
+      '/pulse/',
+      '/locate/',
+      '/oauth/authorize',
+      '/oauth/admin',
+      '/auth/login',
+      '/gw/static/app.css',
+      '/api/setup/status',
+      '/panel/',
+    ]) {
+      const r = await fetch(gw.url + p, {
+        redirect: 'manual',
+        headers: { 'tailscale-user-login': OWNER },
+      });
+      expect(r.status, p).toBe(404);
+    }
+  });
+
+  it('the public listener serves only the machine endpoints and leaks nothing', async () => {
+    const h = await fetch(gw.url + '/healthz');
     expect(await h.json()).toEqual({ ok: true });
     expect(h.headers.get('strict-transport-security')).toMatch(/max-age/);
     expect(h.headers.get('x-content-type-options')).toBe('nosniff');
     expect(h.headers.get('referrer-policy')).toBe('no-referrer');
     expect(h.headers.get('access-control-allow-origin')).toBeNull();
-    const mcp = await fetch(base + '/mcp', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    const mcp = await fetch(gw.url + '/mcp', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
     expect(mcp.status).toBe(401);
-    expect(mcp.headers.get('www-authenticate')).toBe('Bearer resource_metadata="https://godseye.gamachecloud.com/.well-known/oauth-protected-resource"');
+    expect(mcp.headers.get('www-authenticate')).toBe(
+      'Bearer resource_metadata="https://godseye.gamachecloud.com/.well-known/oauth-protected-resource"',
+    );
+    const as = (await (
+      await fetch(gw.url + '/.well-known/oauth-authorization-server')
+    ).json()) as Record<string, string>;
+    expect(as.authorization_endpoint).toBe(
+      'https://godseye.example-tailnet.ts.net/oauth/authorize',
+    );
+    expect(as.token_endpoint).toBe('https://godseye.gamachecloud.com/oauth/token');
+    expect((await fetch(gw.url + '/api/location', { method: 'POST', body: '{}' })).status).toBe(
+      401,
+    );
+    expect(
+      (
+        await fetch(gw.url + '/oauth/token', {
+          method: 'POST',
+          body: 'grant_type=x',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        })
+      ).status,
+    ).toBe(401);
+    // The private listener has no /mcp.
+    expect(
+      (
+        await fetch(gw.privateUrl + '/mcp', {
+          method: 'POST',
+          body: '{}',
+          headers: { 'tailscale-user-login': OWNER },
+        })
+      ).status,
+    ).toBe(404);
   });
 });

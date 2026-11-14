@@ -1,11 +1,11 @@
 /**
  * Location ingest and the /locate PWA.
  *
- *   POST /api/location   public path (Cloudflare Access bypass); per-device token:
+ *   POST /api/location   public listener (OwnTracks) and private listener (PWA); per-device token:
  *                        Authorization: Bearer gdt_...   or   Basic <any user>:<gdt_...> (OwnTracks)
  *                        Body: OwnTracks JSON ({_type:"location", lat, lon, acc, tst, batt, vel})
  *                              or the PWA's {lat, lon, accuracy, timestamp}. Responds [] (OwnTracks).
- *   GET  /locate/        owner-only page (Access); static shell + service worker
+ *   GET  /locate/        owner-only page (tailnet); static shell + service worker
  *   POST /locate/claim   owner-only; exchanges a one-time setup code for a device token
  */
 import path from 'node:path';
@@ -23,7 +23,6 @@ export interface LocationDeps {
   config: Config;
   locations: LocationStore;
   audit: Audit;
-  login: Login;
   logger: Logger;
   webRoot: string;
   now: () => number;
@@ -31,7 +30,12 @@ export interface LocationDeps {
 
 export type ParsedFix = Omit<Fix, 'deviceId'>;
 
-const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined);
+const num = (v: unknown) =>
+  typeof v === 'number' && Number.isFinite(v)
+    ? v
+    : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))
+      ? Number(v)
+      : undefined;
 
 /** Parses one location payload. Returns null for non-location OwnTracks messages, or an error string. */
 export function parseLocation(body: unknown, now: number): ParsedFix | null | string {
@@ -81,9 +85,13 @@ export function deviceTokenFrom(req: Request): string | undefined {
   return undefined;
 }
 
-export function installLocation(app: Express, ctx: AppContext, d: LocationDeps): void {
+/** POST /api/location (public listener for OwnTracks; private listener for the tailnet PWA). */
+export function installLocationIngest(app: Express, ctx: AppContext, d: LocationDeps): void {
   const ip = (req: Request) => ipOf(req, ctx.sec);
-  const json = express.json({ limit: '16kb', type: ['application/json', 'text/json', 'application/octet-stream'] });
+  const json = express.json({
+    limit: '16kb',
+    type: ['application/json', 'text/json', 'application/octet-stream'],
+  });
 
   app.post(
     '/api/location',
@@ -94,10 +102,16 @@ export function installLocation(app: Express, ctx: AppContext, d: LocationDeps):
       if (!device) {
         const r = ctx.limiter.hit(`loc-auth-fail:${ip(req)}`, 20, 15 * 60_000);
         if (!r.ok) {
-          res.status(429).set('Retry-After', String(Math.ceil(r.retryAfterMs / 1000))).json({ error: 'rate_limited' });
+          res
+            .status(429)
+            .set('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)))
+            .json({ error: 'rate_limited' });
           return;
         }
-        res.status(401).set('WWW-Authenticate', 'Basic realm="godseye-location", charset="UTF-8"').json({ error: 'unauthorized' });
+        res
+          .status(401)
+          .set('WWW-Authenticate', 'Basic realm="godseye-location", charset="UTF-8"')
+          .json({ error: 'unauthorized' });
         return;
       }
       res.locals.device = device;
@@ -125,35 +139,58 @@ export function installLocation(app: Express, ctx: AppContext, d: LocationDeps):
         }
         d.locations.insert({ ...parsed, deviceId: device.id });
         stored++;
-        d.logger.debug('location_fix', { device: device.name, source: parsed.source, acc: parsed.accuracyM, lat: parsed.lat, lon: parsed.lon });
+        d.logger.debug('location_fix', {
+          device: device.name,
+          source: parsed.source,
+          acc: parsed.accuracyM,
+          lat: parsed.lat,
+          lon: parsed.lon,
+        });
       }
       if (stored) d.logger.info('location_stored', { device: device.name, fixes: stored });
       // OwnTracks expects a JSON array (of cards/commands); we send none.
       res.status(200).type('application/json').send('[]');
     },
   );
+}
 
-  // ---------------- /locate PWA (owner only) ----------------
-  const owner = d.login.require();
+/** /locate PWA and its setup-code claim (private listener only). */
+export function installLocate(app: Express, ctx: AppContext, d: LocationDeps, login: Login): void {
+  const ip = (req: Request) => ipOf(req, ctx.sec);
+  const owner = login.require();
   const locateDir = path.join(d.webRoot, 'locate');
   // Exact /locate only (Express' non-strict routing would also match /locate/).
-  app.use((req, res, next) => (req.method === 'GET' && req.originalUrl.split('?')[0] === '/locate' ? res.redirect(301, '/locate/') : next()));
-  app.post('/locate/claim', rateLimit(ctx.limiter, 'claim', 10, 15 * 60_000, ip), owner, express.json({ limit: '2kb' }), (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    if (!sameOriginPost(ctx.sec, req) || req.headers['x-requested-with'] !== 'godseye-locate') {
-      res.status(403).json({ error: 'forbidden' });
-      return;
-    }
-    const code = typeof req.body?.code === 'string' ? req.body.code : '';
-    const claimed = d.locations.claimSetupCode(code);
-    if (!claimed) {
-      d.audit.record('device_claim_failed', { ip: ip(req), subject: req.owner!.subject });
-      res.status(400).json({ error: 'invalid_or_expired_code' });
-      return;
-    }
-    d.audit.record('device_claimed', { ip: ip(req), subject: req.owner!.subject, detail: { device: claimed.name } });
-    res.json({ device_token: claimed.token, device_name: claimed.name });
-  });
+  app.use((req, res, next) =>
+    req.method === 'GET' && req.originalUrl.split('?')[0] === '/locate'
+      ? res.redirect(301, '/locate/')
+      : next(),
+  );
+  app.post(
+    '/locate/claim',
+    rateLimit(ctx.limiter, 'claim', 10, 15 * 60_000, ip),
+    owner,
+    express.json({ limit: '2kb' }),
+    (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (!sameOriginPost(ctx.sec, req) || req.headers['x-requested-with'] !== 'godseye-locate') {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      const code = typeof req.body?.code === 'string' ? req.body.code : '';
+      const claimed = d.locations.claimSetupCode(code);
+      if (!claimed) {
+        d.audit.record('device_claim_failed', { ip: ip(req), subject: req.owner!.subject });
+        res.status(400).json({ error: 'invalid_or_expired_code' });
+        return;
+      }
+      d.audit.record('device_claimed', {
+        ip: ip(req),
+        subject: req.owner!.subject,
+        detail: { device: claimed.name },
+      });
+      res.json({ device_token: claimed.token, device_name: claimed.name });
+    },
+  );
   app.use(
     '/locate/',
     owner,
@@ -163,6 +200,11 @@ export function installLocation(app: Express, ctx: AppContext, d: LocationDeps):
       res.setHeader('Service-Worker-Allowed', '/locate/');
       next();
     },
-    express.static(locateDir, { index: 'index.html', dotfiles: 'deny', fallthrough: false, cacheControl: false }),
+    express.static(locateDir, {
+      index: 'index.html',
+      dotfiles: 'deny',
+      fallthrough: false,
+      cacheControl: false,
+    }),
   );
 }

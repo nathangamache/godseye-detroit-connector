@@ -9,7 +9,12 @@
  * which is why the gateway authenticates before it proxies and blocks GEV's
  * dangerous routes outright.
  */
-import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
+import {
+  request as httpRequest,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import type { Logger } from '../log.js';
 
 export const PROXY_SIGNAL_HEADERS = [
@@ -78,7 +83,7 @@ export function safePath(rawUrl: string): { path: string; search: string } | nul
 }
 
 export function isBlocked(path: string, prefixes: string[]): boolean {
-  let decoded = path;
+  let decoded: string;
   try {
     decoded = decodeURIComponent(path);
   } catch {
@@ -104,7 +109,8 @@ export function upstreamHeaders(
     const key = k.toLowerCase();
     if (v === undefined) continue;
     if (HOP_BY_HOP.has(key) || connectionTokens.includes(key) || ALWAYS_DROP.has(key)) continue;
-    if (key.startsWith('cf-') || key === 'host' || key === 'origin') continue;
+    if (key.startsWith('cf-') || key.startsWith('tailscale-') || key === 'host' || key === 'origin')
+      continue;
     out[key] = v;
   }
   out.host = target.host;
@@ -153,7 +159,8 @@ export function createProxy(opts: ProxyOptions) {
       return;
     }
     const isStream =
-      String(req.headers.accept ?? '').includes('text/event-stream') || /\/events(\/|$)/.test(forwardPath);
+      String(req.headers.accept ?? '').includes('text/event-stream') ||
+      /\/events(\/|$)/.test(forwardPath);
     const upstream = httpRequest(
       {
         protocol: target.protocol,
@@ -171,22 +178,29 @@ export function createProxy(opts: ProxyOptions) {
         }
         const loc = up.headers.location;
         if (typeof loc === 'string' && loc.startsWith(target.origin)) {
-          outHeaders.location = opts.publicOrigin + (opts.stripPrefix ?? '') + loc.slice(target.origin.length);
+          outHeaders.location =
+            opts.publicOrigin + (opts.stripPrefix ?? '') + loc.slice(target.origin.length);
         }
         res.writeHead(up.statusCode ?? 502, outHeaders);
-        if (String(up.headers['content-type'] ?? '').includes('text/event-stream')) res.flushHeaders();
+        if (String(up.headers['content-type'] ?? '').includes('text/event-stream'))
+          res.flushHeaders();
         up.pipe(res);
         up.on('error', () => res.destroy());
       },
     );
     if (!isStream) {
-      upstream.setTimeout(opts.timeoutMs ?? 60_000, () => upstream.destroy(new Error('upstream timeout')));
+      upstream.setTimeout(opts.timeoutMs ?? 60_000, () =>
+        upstream.destroy(new Error('upstream timeout')),
+      );
     }
     upstream.on('error', (err) => {
       opts.logger.warn('proxy_upstream_error', { target: target.host, error: err.message });
       if (!res.headersSent) {
         res
-          .writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          .writeHead(502, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+          })
           .end(opts.unavailableHtml ?? 'Upstream unavailable');
       } else res.destroy();
     });
@@ -196,7 +210,8 @@ export function createProxy(opts: ProxyOptions) {
       seen += chunk.length;
       if (seen > maxBody) {
         upstream.destroy(new Error('request body too large'));
-        if (!res.headersSent) res.writeHead(413, { 'content-type': 'text/plain' }).end('Payload too large');
+        if (!res.headersSent)
+          res.writeHead(413, { 'content-type': 'text/plain' }).end('Payload too large');
         req.destroy();
       }
     });

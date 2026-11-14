@@ -148,12 +148,13 @@ function migrate(db: DB): void {
 }
 
 export function kvGet(db: DB, key: string): string | undefined {
-  return (db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as { value: string } | undefined)?.value;
+  return (
+    db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as { value: string } | undefined
+  )?.value;
 }
 
 export function kvSet(db: DB, key: string, value: string): void {
-  db.prepare('INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(
-    key,
-    value,
-  );
+  db.prepare(
+    'INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  ).run(key, value);
 }

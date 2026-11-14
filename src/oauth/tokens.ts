@@ -82,7 +82,17 @@ export class TokenStore {
         `INSERT INTO auth_codes(code_hash, client_id, redirect_uri, code_challenge, resource, scope, subject, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(sha256hex(code), req.clientId, req.redirectUri, req.codeChallenge, req.resource, req.scope, req.subject, t, t + this.opts.codeTtlS * 1000);
+      .run(
+        sha256hex(code),
+        req.clientId,
+        req.redirectUri,
+        req.codeChallenge,
+        req.resource,
+        req.scope,
+        req.subject,
+        t,
+        t + this.opts.codeTtlS * 1000,
+      );
     return code;
   }
 
@@ -90,7 +100,17 @@ export class TokenStore {
   consumeCode(code: string, clientId: string): CodeResult {
     const hash = sha256hex(code);
     const row = this.db.prepare('SELECT * FROM auth_codes WHERE code_hash = ?').get(hash) as
-      | { client_id: string; redirect_uri: string; code_challenge: string; resource: string; scope: string; subject: string; expires_at: number; used_at: number | null; family_id: string | null }
+      | {
+          client_id: string;
+          redirect_uri: string;
+          code_challenge: string;
+          resource: string;
+          scope: string;
+          subject: string;
+          expires_at: number;
+          used_at: number | null;
+          family_id: string | null;
+        }
       | undefined;
     if (!row) return { ok: false, reason: 'invalid' };
     if (row.used_at) {
@@ -106,12 +126,19 @@ export class TokenStore {
       codeHash: hash,
       redirectUri: row.redirect_uri,
       codeChallenge: row.code_challenge,
-      grant: { clientId: row.client_id, subject: row.subject, scope: row.scope, resource: row.resource },
+      grant: {
+        clientId: row.client_id,
+        subject: row.subject,
+        scope: row.scope,
+        resource: row.resource,
+      },
     };
   }
 
   attachFamilyToCode(codeHash: string, familyId: string): void {
-    this.db.prepare('UPDATE auth_codes SET family_id = ? WHERE code_hash = ?').run(familyId, codeHash);
+    this.db
+      .prepare('UPDATE auth_codes SET family_id = ? WHERE code_hash = ?')
+      .run(familyId, codeHash);
   }
 
   // ---------- tokens ----------
@@ -128,7 +155,9 @@ export class TokenStore {
           )
           .run(fam, grant.clientId, grant.subject, grant.scope, grant.resource, t, t);
       } else {
-        this.db.prepare('UPDATE token_families SET last_used_at = ? WHERE family_id = ?').run(t, fam);
+        this.db
+          .prepare('UPDATE token_families SET last_used_at = ? WHERE family_id = ?')
+          .run(t, fam);
       }
       const ins = this.db.prepare(
         'INSERT INTO tokens(token_hash, family_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
@@ -177,7 +206,8 @@ export class TokenStore {
   }
 
   refresh(refreshToken: string, clientId: string): RefreshResult {
-    if (!refreshToken.startsWith('grt_') || refreshToken.length > 200) return { ok: false, reason: 'unknown' };
+    if (!refreshToken.startsWith('grt_') || refreshToken.length > 200)
+      return { ok: false, reason: 'unknown' };
     const row = this.lookup(refreshToken);
     if (!row || row.kind !== 'refresh') return { ok: false, reason: 'unknown' };
     if (row.family_revoked_at) return { ok: false, reason: 'family_revoked' };
@@ -192,22 +222,36 @@ export class TokenStore {
       }
       // Within the grace window: invalidate the sibling issued at rotation and re-issue.
       this.db
-        .prepare("UPDATE tokens SET revoked_at = ? WHERE family_id = ? AND kind = 'refresh' AND used_at IS NULL AND revoked_at IS NULL")
+        .prepare(
+          "UPDATE tokens SET revoked_at = ? WHERE family_id = ? AND kind = 'refresh' AND used_at IS NULL AND revoked_at IS NULL",
+        )
         .run(t, row.family_id);
     }
     if (row.expires_at <= t) return { ok: false, reason: 'expired' };
-    this.db.prepare('UPDATE tokens SET used_at = COALESCE(used_at, ?) WHERE token_hash = ?').run(t, row.token_hash);
-    const grant: Grant = { clientId: row.client_id, subject: row.subject, scope: row.scope, resource: row.resource };
+    this.db
+      .prepare('UPDATE tokens SET used_at = COALESCE(used_at, ?) WHERE token_hash = ?')
+      .run(t, row.token_hash);
+    const grant: Grant = {
+      clientId: row.client_id,
+      subject: row.subject,
+      scope: row.scope,
+      resource: row.resource,
+    };
     const { tokens } = this.issue(grant, row.family_id);
     return { ok: true, tokens, familyId: row.family_id, grant };
   }
 
   /** RFC 7009 revocation. Refresh tokens take their whole family with them. */
-  revokeToken(token: string): { kind: 'access' | 'refresh'; familyId: string; clientId: string } | null {
+  revokeToken(
+    token: string,
+  ): { kind: 'access' | 'refresh'; familyId: string; clientId: string } | null {
     const row = this.lookup(token);
     if (!row) return null;
     if (row.kind === 'refresh') this.revokeFamily(row.family_id, 'revoked_by_client');
-    else this.db.prepare('UPDATE tokens SET revoked_at = ? WHERE token_hash = ?').run(this.now(), row.token_hash);
+    else
+      this.db
+        .prepare('UPDATE tokens SET revoked_at = ? WHERE token_hash = ?')
+        .run(this.now(), row.token_hash);
     return { kind: row.kind, familyId: row.family_id, clientId: row.client_id };
   }
 
@@ -215,9 +259,13 @@ export class TokenStore {
     const t = this.now();
     this.db.transaction(() => {
       this.db
-        .prepare('UPDATE token_families SET revoked_at = COALESCE(revoked_at, ?), revoked_reason = COALESCE(revoked_reason, ?) WHERE family_id = ?')
+        .prepare(
+          'UPDATE token_families SET revoked_at = COALESCE(revoked_at, ?), revoked_reason = COALESCE(revoked_reason, ?) WHERE family_id = ?',
+        )
         .run(t, reason, familyId);
-      this.db.prepare('UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ?').run(t, familyId);
+      this.db
+        .prepare('UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ?')
+        .run(t, familyId);
     })();
   }
 
@@ -229,7 +277,17 @@ export class TokenStore {
     return fams.length;
   }
 
-  listFamilies(): Array<{ family_id: string; client_id: string; subject: string; scope: string; created_at: number; last_used_at: number | null; revoked_at: number | null; revoked_reason: string | null; refresh_expires_at: number | null }> {
+  listFamilies(): Array<{
+    family_id: string;
+    client_id: string;
+    subject: string;
+    scope: string;
+    created_at: number;
+    last_used_at: number | null;
+    revoked_at: number | null;
+    revoked_reason: string | null;
+    refresh_expires_at: number | null;
+  }> {
     return this.db
       .prepare(
         `SELECT f.family_id, f.client_id, f.subject, f.scope, f.created_at, f.last_used_at, f.revoked_at, f.revoked_reason,
@@ -244,7 +302,9 @@ export class TokenStore {
     this.db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(t - 86_400_000);
     this.db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(t - 86_400_000);
     this.db
-      .prepare('DELETE FROM token_families WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.family_id = token_families.family_id) AND created_at < ?')
+      .prepare(
+        'DELETE FROM token_families WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.family_id = token_families.family_id) AND created_at < ?',
+      )
       .run(t - 86_400_000);
   }
 }

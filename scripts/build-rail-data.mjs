@@ -17,7 +17,12 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 
 const args = Object.fromEntries(
-  process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), []),
+  process.argv
+    .slice(2)
+    .reduce(
+      (acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc),
+      [],
+    ),
 );
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const fraPath = path.resolve(args.fra ?? path.join(root, 'data/raw/fra_mi.csv'));
@@ -66,7 +71,34 @@ const fraBuf = readFileSync(fraPath);
 const rows = parseCsv(fraBuf.toString('utf8'));
 const header = rows.next().value;
 const col = Object.fromEntries(header.map((h, i) => [h, i]));
-const need = ['crossingid', 'reasondescription', 'latitude', 'longitude', 'crossingposition', 'railroadcode', 'railroadname', 'street', 'highwayname', 'cityname', 'countyname', 'railroadsubdivision', 'railroaddivision', 'branchname', 'railroadmilepostnumber', 'crossingtype', 'crossingpurpose', 'totaldaylightthrutrains', 'totalnighttimethrutrains', 'totalswitchingtrains', 'totaltransittrains', 'maximumtimetablespeed', 'numberofmaintracks', 'countroadwaygatearms', 'countmastmountedflashinglight', 'revisiondate'];
+const need = [
+  'crossingid',
+  'reasondescription',
+  'latitude',
+  'longitude',
+  'crossingposition',
+  'railroadcode',
+  'railroadname',
+  'street',
+  'highwayname',
+  'cityname',
+  'countyname',
+  'railroadsubdivision',
+  'railroaddivision',
+  'branchname',
+  'railroadmilepostnumber',
+  'crossingtype',
+  'crossingpurpose',
+  'totaldaylightthrutrains',
+  'totalnighttimethrutrains',
+  'totalswitchingtrains',
+  'totaltransittrains',
+  'maximumtimetablespeed',
+  'numberofmaintracks',
+  'countroadwaygatearms',
+  'countmastmountedflashinglight',
+  'revisiondate',
+];
 for (const n of need) if (!(n in col)) throw new Error(`FRA CSV is missing column ${n}`);
 const g = (r, n) => r[col[n]] ?? '';
 
@@ -119,11 +151,14 @@ for (const r of rows) {
     rev,
   });
 }
-for (const c of crossings) for (const k of Object.keys(c)) if (c[k] === null || c[k] === undefined) delete c[k];
+for (const c of crossings)
+  for (const k of Object.keys(c)) if (c[k] === null || c[k] === undefined) delete c[k];
 
 // ---------------- lines ----------------
 const ACTIVE_NET = new Set(['M', 'O', 'Y', 'I', 'S']);
-const narnFiles = readdirSync(narnDir).filter((f) => /\.geojson$/.test(f)).sort();
+const narnFiles = readdirSync(narnDir)
+  .filter((f) => /\.geojson$/.test(f))
+  .sort();
 const lines = [];
 const narnHashes = {};
 let segTotal = 0;
@@ -139,7 +174,10 @@ for (const f of narnFiles) {
       segInactive++;
       continue;
     }
-    const geoms = feat.geometry?.type === 'MultiLineString' ? feat.geometry.coordinates : [feat.geometry?.coordinates ?? []];
+    const geoms =
+      feat.geometry?.type === 'MultiLineString'
+        ? feat.geometry.coordinates
+        : [feat.geometry?.coordinates ?? []];
     for (const coords of geoms) {
       const pts = [];
       for (const [x, y] of coords) {
@@ -164,7 +202,9 @@ for (const f of narnFiles) {
         county: p.STCNTYFIPS ?? undefined,
         c: pts,
       };
-      for (const k of Object.keys(seg)) if (seg[k] === undefined || (Array.isArray(seg[k]) && !seg[k].length && k !== 'c')) delete seg[k];
+      for (const k of Object.keys(seg))
+        if (seg[k] === undefined || (Array.isArray(seg[k]) && !seg[k].length && k !== 'c'))
+          delete seg[k];
       lines.push(seg);
     }
   }
@@ -177,13 +217,16 @@ writeFileSync(path.join(outDir, 'crossings.json.gz'), cBuf);
 writeFileSync(path.join(outDir, 'lines.json.gz'), lBuf);
 const meta = {
   built_at: new Date().toISOString(),
-  license: 'Public domain: works of the U.S. Government (17 U.S.C. § 105); FRA dataset licence "Public Domain".',
+  license:
+    'Public domain: works of the U.S. Government (17 U.S.C. § 105); FRA dataset licence "Public Domain".',
   sources: {
     crossings: {
       name: 'FRA Crossing Inventory Data (Form 71) - Current',
       publisher: 'Federal Railroad Administration, Office of Safety',
-      dataset: 'https://data.transportation.gov/Railroads/Crossing-Inventory-Data-Form-71-Current/m2f8-22s6',
-      query: 'https://data.transportation.gov/resource/m2f8-22s6.csv?statename=MICHIGAN&$limit=50000',
+      dataset:
+        'https://data.transportation.gov/Railroads/Crossing-Inventory-Data-Form-71-Current/m2f8-22s6',
+      query:
+        'https://data.transportation.gov/resource/m2f8-22s6.csv?statename=MICHIGAN&$limit=50000',
       input_sha256: sha256(fraBuf),
       input_mtime: statSync(fraPath).mtime.toISOString(),
       rows: total,
@@ -211,4 +254,6 @@ writeFileSync(path.join(outDir, 'meta.json'), JSON.stringify(meta, null, 2) + '\
 console.log(
   `crossings: ${crossings.length} kept of ${total} (${closed} closed, ${noCoords} without coordinates) -> ${(cBuf.length / 1024).toFixed(0)} KB`,
 );
-console.log(`lines: ${lines.length} kept of ${segTotal} segments (${segInactive} inactive) -> ${(lBuf.length / 1024).toFixed(0)} KB`);
+console.log(
+  `lines: ${lines.length} kept of ${segTotal} segments (${segInactive} inactive) -> ${(lBuf.length / 1024).toFixed(0)} KB`,
+);

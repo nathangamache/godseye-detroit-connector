@@ -27,7 +27,9 @@ export class SchemaValidator {
 
 export function formatErrors(errors: ErrorObject[]): string[] {
   const out = errors.slice(0, 10).map((e) => {
-    const where = e.instancePath ? e.instancePath.replace(/^\//, '').replace(/\//g, '.') : '(arguments)';
+    const where = e.instancePath
+      ? e.instancePath.replace(/^\//, '').replace(/\//g, '.')
+      : '(arguments)';
     if (e.keyword === 'additionalProperties') {
       return `${where}: unexpected property "${(e.params as { additionalProperty: string }).additionalProperty}"`;
     }

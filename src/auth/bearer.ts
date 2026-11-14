@@ -28,7 +28,10 @@ declare module 'express-serve-static-core' {
   }
 }
 
-export function challenge(opts: BearerOptions, error?: { code: string; description: string }): string {
+export function challenge(
+  opts: BearerOptions,
+  error?: { code: string; description: string },
+): string {
   const parts: string[] = [];
   if (error) parts.push(`error="${error.code}"`, `error_description="${error.description}"`);
   parts.push(`resource_metadata="${opts.resourceMetadataUrl}"`);
@@ -38,7 +41,8 @@ export function challenge(opts: BearerOptions, error?: { code: string; descripti
 export function bearerAuth(opts: BearerOptions) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const header = req.headers.authorization;
-    const m = typeof header === 'string' ? /^Bearer\s+([A-Za-z0-9._~+/=-]+)\s*$/i.exec(header) : null;
+    const m =
+      typeof header === 'string' ? /^Bearer\s+([A-Za-z0-9._~+/=-]+)\s*$/i.exec(header) : null;
     if (!m) {
       res
         .status(401)
@@ -51,16 +55,28 @@ export function bearerAuth(opts: BearerOptions) {
     if (!info || info.resource !== opts.resource) {
       res
         .status(401)
-        .set('WWW-Authenticate', challenge(opts, { code: 'invalid_token', description: 'The access token is invalid or expired' }))
+        .set(
+          'WWW-Authenticate',
+          challenge(opts, {
+            code: 'invalid_token',
+            description: 'The access token is invalid or expired',
+          }),
+        )
         .set('Cache-Control', 'no-store')
-        .json({ error: 'invalid_token', error_description: 'The access token is invalid or expired' });
+        .json({
+          error: 'invalid_token',
+          error_description: 'The access token is invalid or expired',
+        });
       return;
     }
     const scopes = info.scope.split(' ').filter(Boolean);
     if (!scopes.includes(opts.requiredScope)) {
       res
         .status(403)
-        .set('WWW-Authenticate', `Bearer error="insufficient_scope", scope="${opts.requiredScope}", resource_metadata="${opts.resourceMetadataUrl}"`)
+        .set(
+          'WWW-Authenticate',
+          `Bearer error="insufficient_scope", scope="${opts.requiredScope}", resource_metadata="${opts.resourceMetadataUrl}"`,
+        )
         .json({ error: 'insufficient_scope' });
       return;
     }

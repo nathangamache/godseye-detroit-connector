@@ -8,7 +8,12 @@ import type { ToolImage } from './types.js';
 
 type SharpFn = (input: Buffer) => {
   rotate(): ReturnType<SharpFn>;
-  resize(o: { width: number; height: number; fit: 'inside'; withoutEnlargement: boolean }): ReturnType<SharpFn>;
+  resize(o: {
+    width: number;
+    height: number;
+    fit: 'inside';
+    withoutEnlargement: boolean;
+  }): ReturnType<SharpFn>;
   jpeg(o: { quality: number; mozjpeg?: boolean }): ReturnType<SharpFn>;
   toBuffer(): Promise<Buffer>;
 };
@@ -33,7 +38,9 @@ export async function shrinkImage(img: ToolImage, opts: ShrinkOptions): Promise<
   const sharp = await (opts.loader ?? loadSharp)();
   if (!sharp) {
     if (img.data.length <= opts.maxBase64Chars) return { image: img, resized: false };
-    return { dropped: `image omitted: ${Math.round(img.data.length / 1024)} KB base64 exceeds the limit and no image library is available` };
+    return {
+      dropped: `image omitted: ${Math.round(img.data.length / 1024)} KB base64 exceeds the limit and no image library is available`,
+    };
   }
   let input: Buffer;
   try {

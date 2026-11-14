@@ -2,7 +2,7 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { REPO_ROOT, loadConfig } from '../src/config.js';
 import { RailIndex } from '../src/rail/index.js';
-import { railTools } from '../src/rail/tools.js';
+import { railTools, titleCase } from '../src/rail/tools.js';
 import { ToolPolicy } from '../src/tools/policy.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import type { ToolDef } from '../src/tools/types.js';
@@ -16,6 +16,13 @@ const sig = () => ({ signal: new AbortController().signal });
 beforeAll(() => {
   index = RailIndex.load(path.join(REPO_ROOT, 'data', 'rail'));
   tools = Object.fromEntries(railTools(index).map((t) => [t.name, t]));
+});
+
+describe('formatting', () => {
+  it('keeps railroad marks upper case when title-casing', () => {
+    expect(titleCase('MICHIGAN LINE (NS)')).toBe('Michigan Line (NS)');
+    expect(titleCase('PLYMOUTH')).toBe('Plymouth');
+  });
 });
 
 describe('geo helpers', () => {
@@ -42,7 +49,11 @@ describe('rail index (public fixture points)', () => {
 
   it('Plymouth city center: CSX Plymouth Sub, Main St crossing', async () => {
     const r = await tools.nearest_rail!.run({ lat: PLYMOUTH.lat, lon: PLYMOUTH.lon }, sig());
-    const data = r.data as { line: { railroad: string; distance_m: number }; main_line: unknown; crossing: Record<string, unknown> };
+    const data = r.data as {
+      line: { railroad: string; distance_m: number };
+      main_line: unknown;
+      crossing: Record<string, unknown>;
+    };
     expect(data.line.railroad).toMatch(/CSX/);
     expect(data.line.distance_m).toBeLessThan(2000);
     expect(data.crossing).toMatchObject({
@@ -60,10 +71,17 @@ describe('rail index (public fixture points)', () => {
   });
 
   it('Ann Arbor: Ann Arbor Railroad crossings downtown, NS/Amtrak Michigan Line nearby', async () => {
-    const r = await tools.crossings_near!.run({ lat: ANN_ARBOR.lat, lon: ANN_ARBOR.lon, radius_km: 1, at_grade_only: true }, sig());
+    const r = await tools.crossings_near!.run(
+      { lat: ANN_ARBOR.lat, lon: ANN_ARBOR.lon, radius_km: 1, at_grade_only: true },
+      sig(),
+    );
     const hits = (r.data as { crossings: Array<Record<string, unknown>> }).crossings;
     const liberty = hits.find((c) => c.fra_crossing_id === '000223R');
-    expect(liberty).toMatchObject({ street: 'WEST LIBERTY STREET', railroad: 'Ann Arbor Railroad', position: 'At Grade' });
+    expect(liberty).toMatchObject({
+      street: 'WEST LIBERTY STREET',
+      railroad: 'Ann Arbor Railroad',
+      position: 'At Grade',
+    });
     expect(hits.every((c) => (c.distance_m as number) <= 1000)).toBe(true);
     const sorted = hits.map((c) => c.distance_m as number);
     expect([...sorted].sort((a, b) => a - b)).toEqual(sorted);

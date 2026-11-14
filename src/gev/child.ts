@@ -128,14 +128,19 @@ export class GevChild extends EventEmitter {
     }
     if (this.state === 'backoff') return;
     // A child that stayed up for a minute resets the backoff.
-    if (this.readyAt && Date.now() - this.readyAt > 60_000) this.backoffMs = this.opts.minBackoffMs ?? 1000;
+    if (this.readyAt && Date.now() - this.readyAt > 60_000)
+      this.backoffMs = this.opts.minBackoffMs ?? 1000;
     this.state = 'backoff';
     this.client = undefined;
     this.transport = undefined;
     this.restarts++;
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, this.opts.maxBackoffMs ?? 60_000);
-    this.opts.logger.warn('gev_child_exit', { reason, restart_in_ms: delay, restarts: this.restarts });
+    this.opts.logger.warn('gev_child_exit', {
+      reason,
+      restart_in_ms: delay,
+      restarts: this.restarts,
+    });
     this.emit('down');
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;

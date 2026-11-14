@@ -19,7 +19,17 @@ import { page } from './html.js';
 import { createProxy } from './proxy.js';
 
 /** Gateway-owned path prefixes that must never fall through to GEV. */
-export const RESERVED_PREFIXES = ['/oauth', '/auth/', '/api/location', '/locate', '/gw/', '/.well-known', '/mcp', '/healthz', '/pulse'];
+export const RESERVED_PREFIXES = [
+  '/oauth',
+  '/auth/',
+  '/api/location',
+  '/locate',
+  '/gw/',
+  '/.well-known',
+  '/mcp',
+  '/healthz',
+  '/pulse',
+];
 
 export interface UiDeps {
   config: Config;
@@ -27,32 +37,48 @@ export interface UiDeps {
   logger: Logger;
 }
 
-export function installUi(app: Express, _ctx: AppContext, d: UiDeps): void {
+export function installUi(app: Express, ctx: AppContext, d: UiDeps): void {
   const { config, login } = d;
   const owner = login.require();
 
   // ---- /pulse ----
-  app.use((req, res, next) => (req.method === 'GET' && req.originalUrl.split('?')[0] === '/pulse' ? res.redirect(301, '/pulse/') : next()));
+  app.use((req, res, next) =>
+    req.method === 'GET' && req.originalUrl.split('?')[0] === '/pulse'
+      ? res.redirect(301, '/pulse/')
+      : next(),
+  );
   if (config.PULSE_API_PROXY) {
     app.use(
       '/pulse/api',
       owner,
       createProxy({
         target: config.PULSE_URL,
-        publicOrigin: config.PUBLIC_ORIGIN,
+        publicOrigin: ctx.sec.publicOrigin,
         stripPrefix: '/pulse/api',
         blockedPrefixes: ['/admin', '/audio', '/docs', '/openapi.json', '/redoc'],
-        extraHeaders: config.PULSE_API_TOKEN ? { authorization: `Bearer ${config.PULSE_API_TOKEN}` } : {},
+        extraHeaders: config.PULSE_API_TOKEN
+          ? { authorization: `Bearer ${config.PULSE_API_TOKEN}` }
+          : {},
         logger: d.logger,
         unavailableHtml: page('Pulse unavailable', '<h1>Pulse is not running</h1>'),
       }) as unknown as express.RequestHandler,
     );
   }
   const staticDir = config.PULSE_STATIC_DIR;
-  const hasPulseBuild = Boolean(staticDir && existsSync(path.join(staticDir, 'index.html')) && statSync(staticDir).isDirectory());
+  const hasPulseBuild = Boolean(
+    staticDir &&
+    existsSync(path.join(staticDir, 'index.html')) &&
+    statSync(staticDir).isDirectory(),
+  );
   if (hasPulseBuild) {
-    app.use('/pulse/', owner, express.static(staticDir!, { index: 'index.html', dotfiles: 'deny', fallthrough: true }));
-    app.get(/^\/pulse\/.*/, owner, (_req, res) => res.sendFile(path.join(staticDir!, 'index.html')));
+    app.use(
+      '/pulse/',
+      owner,
+      express.static(staticDir!, { index: 'index.html', dotfiles: 'deny', fallthrough: true }),
+    );
+    app.get(/^\/pulse\/.*/, owner, (_req, res) =>
+      res.sendFile(path.join(staticDir!, 'index.html')),
+    );
   } else {
     app.get(/^\/pulse\/.*/, owner, (_req, res) => {
       pageHeaders(res);
@@ -82,10 +108,14 @@ export function installUi(app: Express, _ctx: AppContext, d: UiDeps): void {
   if (config.GEV_PROXY_ENABLED) {
     const gev = createProxy({
       target: config.GEV_URL,
-      publicOrigin: config.PUBLIC_ORIGIN,
+      publicOrigin: ctx.sec.publicOrigin,
       blockedPrefixes: config.GEV_BLOCKED_PATHS,
       logger: d.logger,
-      unavailableHtml: page("God's Eye View unavailable", "<h1>God's Eye View is not running</h1><p>Start the GEV service and reload.</p>", { nav: true }),
+      unavailableHtml: page(
+        "God's Eye View unavailable",
+        "<h1>God's Eye View is not running</h1><p>Start the GEV service and reload.</p>",
+        { nav: true },
+      ),
     });
     app.use(owner, (req, res) => gev(req, res));
   }

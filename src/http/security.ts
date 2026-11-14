@@ -5,8 +5,11 @@ import type { RateLimiter } from '../util/ratelimit.js';
 
 export interface SecurityConfig {
   allowedHosts: string[];
+  /** The origin browsers use for this listener (public or tailnet). */
   publicOrigin: string;
   trustedProxies: string[];
+  /** Forwarding header the trusted proxy sets with the client IP. */
+  clientIpHeader: string;
   hsts: boolean;
 }
 
@@ -66,7 +69,10 @@ export function hostCheck(cfg: SecurityConfig): RequestHandler {
 export function isLoopbackOrigin(origin: string): boolean {
   try {
     const u = new URL(origin);
-    return u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]');
+    return (
+      u.protocol === 'http:' &&
+      (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]')
+    );
   } catch {
     return false;
   }
@@ -97,7 +103,7 @@ export function sameOriginPost(cfg: SecurityConfig, req: Request): boolean {
 }
 
 export function ipOf(req: Request, cfg: SecurityConfig): string {
-  return clientIp(req, cfg.trustedProxies);
+  return clientIp(req, cfg.trustedProxies, cfg.clientIpHeader);
 }
 
 export function rateLimit(

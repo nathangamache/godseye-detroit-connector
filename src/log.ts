@@ -24,7 +24,8 @@ export function sanitize(value: unknown, depth = 0): unknown {
   if (depth > 6) return '[deep]';
   if (typeof value === 'string') return value.replace(TOKEN_PATTERN, '[redacted-token]');
   if (Array.isArray(value)) return value.slice(0, 50).map((v) => sanitize(v, depth + 1));
-  if (value instanceof Error) return { name: value.name, message: sanitize(value.message, depth + 1) };
+  if (value instanceof Error)
+    return { name: value.name, message: sanitize(value.message, depth + 1) };
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {

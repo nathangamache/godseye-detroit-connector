@@ -17,7 +17,12 @@ export function getCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
-export function setCookie(res: Response, name: string, value: string, opts: { secure: boolean; maxAgeS?: number }): void {
+export function setCookie(
+  res: Response,
+  name: string,
+  value: string,
+  opts: { secure: boolean; maxAgeS?: number },
+): void {
   const parts = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict'];
   if (opts.secure) parts.push('Secure');
   if (opts.maxAgeS !== undefined) parts.push(`Max-Age=${opts.maxAgeS}`);

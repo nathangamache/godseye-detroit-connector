@@ -12,11 +12,15 @@ try {
   process.exit(0);
 }
 if (report.error) {
-  console.warn(`[audit] npm audit unavailable: ${report.error.summary ?? 'unknown error'}; skipping`);
+  console.warn(
+    `[audit] npm audit unavailable: ${report.error.summary ?? 'unknown error'}; skipping`,
+  );
   process.exit(0);
 }
 const v = report.metadata?.vulnerabilities ?? {};
-const summary = ['info', 'low', 'moderate', 'high', 'critical'].map((k) => `${k}=${v[k] ?? 0}`).join(' ');
+const summary = ['info', 'low', 'moderate', 'high', 'critical']
+  .map((k) => `${k}=${v[k] ?? 0}`)
+  .join(' ');
 console.log(`[audit] production dependencies: ${summary}`);
 for (const [name, adv] of Object.entries(report.vulnerabilities ?? {})) {
   console.log(`[audit]   ${adv.severity.padEnd(8)} ${name} (${adv.range ?? ''})`);

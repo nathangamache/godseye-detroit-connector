@@ -1,7 +1,8 @@
 /**
- * Owner login. Providers:
- *   cf-access  (default/production): identity = verified Cf-Access-Jwt-Assertion for OWNER_EMAIL
- *   password   (local/dev fallback):  password + TOTP -> server-side session cookie
+ * Owner login, per listener. Providers:
+ *   tailscale  (private listener, default/production): identity = Tailscale-User-Login from the
+ *              trusted tailscale serve proxy, must equal OWNER_TAILSCALE_LOGIN
+ *   password   (dev/test, or the opt-in public authorize fallback): password + TOTP -> session cookie
  *   none       nothing configured: every owner-only route refuses
  * Anyone may register an OAuth client; only the owner can approve one.
  */
@@ -10,18 +11,24 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { Audit } from '../audit.js';
 import type { Config } from '../config.js';
 import type { DB } from '../db.js';
-import { ipOf, pageHeaders, rateLimit, sameOriginPost, type SecurityConfig } from '../http/security.js';
+import {
+  ipOf,
+  pageHeaders,
+  rateLimit,
+  sameOriginPost,
+  type SecurityConfig,
+} from '../http/security.js';
 import { esc, page } from '../ui/html.js';
 import type { RateLimiter } from '../util/ratelimit.js';
 import { sha256hex } from '../util/crypto.js';
-import type { CfAccessVerifier } from './cfAccess.js';
+import { tailscaleIdentity } from './tailscale.js';
 import { clearCookie, getCookie, setCookie } from './cookies.js';
 import type { Csrf } from './csrf.js';
 import { checkPasswordLogin, Lockout } from './password.js';
 
 export interface Owner {
   subject: string;
-  via: 'cf-access' | 'password';
+  via: 'tailscale' | 'password';
 }
 
 declare module 'express-serve-static-core' {
@@ -37,29 +44,35 @@ export interface LoginDeps {
   csrf: Csrf;
   sec: SecurityConfig;
   limiter: RateLimiter;
-  cf?: CfAccessVerifier;
+  /** Which provider this listener uses. */
+  kind: 'tailscale' | 'password' | 'none';
+  /** Origin the browser sees for this listener (cookies are Secure when https). */
+  origin: string;
   now: () => number;
 }
 
 export class Login {
-  readonly kind: Config['loginProvider'];
+  readonly kind: LoginDeps['kind'];
   readonly sessionCookie: string;
   private readonly secure: boolean;
   private readonly lockout: Lockout;
 
   constructor(private readonly d: LoginDeps) {
-    this.kind = d.config.loginProvider;
-    this.secure = d.config.PUBLIC_ORIGIN.startsWith('https://');
+    this.kind = d.kind;
+    this.secure = d.origin.startsWith('https://');
     this.sessionCookie = this.secure ? '__Host-gw_session' : 'gw_session';
     this.lockout = new Lockout(d.db, undefined, d.now);
-    if (this.kind === 'cf-access' && !d.cf) throw new Error('cf-access login needs a CfAccessVerifier');
+    if (this.kind === 'tailscale' && !d.config.ownerTailscaleLogin)
+      throw new Error('tailscale login needs OWNER_TAILSCALE_LOGIN');
   }
 
   async identify(req: Request): Promise<Owner | null> {
-    if (this.kind === 'cf-access') {
-      const h = req.headers['cf-access-jwt-assertion'];
-      const id = await this.d.cf!.verify(Array.isArray(h) ? h[0] : h, this.d.now());
-      return id ? { subject: id.email, via: 'cf-access' } : null;
+    if (this.kind === 'tailscale') {
+      const id = tailscaleIdentity(req, {
+        trustedProxies: this.d.config.TAILSCALE_TRUSTED_PROXY_IPS,
+        ownerLogin: this.d.config.ownerTailscaleLogin!,
+      });
+      return id ? { subject: id.login, via: 'tailscale' } : null;
     }
     if (this.kind === 'password') {
       const sid = getCookie(req, this.sessionCookie);
@@ -95,16 +108,32 @@ export class Login {
       return;
     }
     if (this.kind === 'none') {
-      res.status(503).send(page('Login not configured', '<h1>Login not configured</h1><p>This gateway has no owner login configured, so this page is unavailable.</p>'));
+      res
+        .status(503)
+        .send(
+          page(
+            'Login not configured',
+            '<h1>Login not configured</h1><p>This gateway has no owner login configured, so this page is unavailable.</p>',
+          ),
+        );
       return;
     }
-    res.status(403).send(page('Sign in required', '<h1>Sign in required</h1><p>Open this page through the protected site address and sign in.</p>'));
+    res
+      .status(403)
+      .send(
+        page(
+          'Tailscale required',
+          '<h1>Not available here</h1><p>Open this page on a device signed in to your tailnet, at its tailnet address.</p>',
+        ),
+      );
   }
 
   install(app: Express): void {
     if (this.kind !== 'password') return;
     const urlencoded = express.urlencoded({ extended: false, limit: '4kb', parameterLimit: 10 });
-    const limit = rateLimit(this.d.limiter, 'login', 10, 15 * 60_000, (req) => ipOf(req, this.d.sec));
+    const limit = rateLimit(this.d.limiter, 'login', 10, 15 * 60_000, (req) =>
+      ipOf(req, this.d.sec),
+    );
 
     app.get('/auth/login', (req, res) => {
       pageHeaders(res);
@@ -129,16 +158,30 @@ export class Login {
       pageHeaders(res);
       const ip = ipOf(req, this.d.sec);
       const fail = (status: number) => {
-        res.status(status).send(page('Sign in failed', '<h1>Sign in failed</h1><p>Invalid credentials, or too many attempts. Wait and <a href="/auth/login">try again</a>.</p>'));
+        res
+          .status(status)
+          .send(
+            page(
+              'Sign in failed',
+              '<h1>Sign in failed</h1><p>Invalid credentials, or too many attempts. Wait and <a href="/auth/login">try again</a>.</p>',
+            ),
+          );
       };
-      if (!sameOriginPost(this.d.sec, req) || !this.d.csrf.verify(req, 'login', 'anon', req.body?.csrf)) return fail(403);
+      if (
+        !sameOriginPost(this.d.sec, req) ||
+        !this.d.csrf.verify(req, 'login', 'anon', req.body?.csrf)
+      )
+        return fail(403);
       if (this.lockout.isLocked(ip)) {
         this.d.audit.record('login_locked', { ip });
         return fail(429);
       }
       const ok = await checkPasswordLogin(
         this.d.db,
-        { passwordHash: this.d.config.GATEWAY_PASSWORD_HASH!, totpSecret: this.d.config.GATEWAY_TOTP_SECRET! },
+        {
+          passwordHash: this.d.config.GATEWAY_PASSWORD_HASH!,
+          totpSecret: this.d.config.GATEWAY_TOTP_SECRET!,
+        },
         String(req.body?.password ?? ''),
         String(req.body?.totp ?? ''),
         this.d.now(),
@@ -152,9 +195,20 @@ export class Login {
       this.lockout.succeed(ip);
       const sid = randomBytes(32).toString('base64url');
       this.d.db
-        .prepare('INSERT INTO sessions(id_hash, subject, provider, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
-        .run(sha256hex(sid), 'owner', 'password', this.d.now(), this.d.now() + this.d.config.SESSION_TTL_S * 1000);
-      setCookie(res, this.sessionCookie, sid, { secure: this.secure, maxAgeS: this.d.config.SESSION_TTL_S });
+        .prepare(
+          'INSERT INTO sessions(id_hash, subject, provider, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(
+          sha256hex(sid),
+          'owner',
+          'password',
+          this.d.now(),
+          this.d.now() + this.d.config.SESSION_TTL_S * 1000,
+        );
+      setCookie(res, this.sessionCookie, sid, {
+        secure: this.secure,
+        maxAgeS: this.d.config.SESSION_TTL_S,
+      });
       this.d.audit.record('login_success', { ip, subject: 'owner' });
       res.redirect(303, safeNext(String(req.body?.next ?? '/')));
     });
@@ -172,6 +226,13 @@ export class Login {
 
 /** Only same-site relative paths (no //host, no backslashes, no scheme). */
 export function safeNext(p: string): string {
-  if (typeof p !== 'string' || !p.startsWith('/') || p.startsWith('//') || p.includes('\\') || /[\r\n]/.test(p)) return '/';
+  if (
+    typeof p !== 'string' ||
+    !p.startsWith('/') ||
+    p.startsWith('//') ||
+    p.includes('\\') ||
+    /[\r\n]/.test(p)
+  )
+    return '/';
   return p.slice(0, 2000);
 }

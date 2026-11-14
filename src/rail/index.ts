@@ -105,7 +105,11 @@ const NET_LABEL: Record<string, string> = {
   S: 'siding or spur',
 };
 
-const PASSENGER_LABEL: Record<string, string> = { A: 'Amtrak', T: 'tourist/transit', C: 'commuter' };
+const PASSENGER_LABEL: Record<string, string> = {
+  A: 'Amtrak',
+  T: 'tourist/transit',
+  C: 'commuter',
+};
 
 export function railroadName(code?: string): string | undefined {
   if (!code) return undefined;
@@ -168,7 +172,10 @@ export class RailIndex {
   ) {
     this.lineIdx = new Flatbush(Math.max(1, lines.length));
     for (const l of lines) {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
       for (const [x, y] of l.c) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -186,16 +193,26 @@ export class RailIndex {
   }
 
   static load(dir: string): RailIndex {
-    const read = (f: string) => JSON.parse(gunzipSync(readFileSync(path.join(dir, f))).toString('utf8'));
+    const read = (f: string) =>
+      JSON.parse(gunzipSync(readFileSync(path.join(dir, f))).toString('utf8'));
     const meta = JSON.parse(readFileSync(path.join(dir, 'meta.json'), 'utf8')) as RailMeta;
-    return new RailIndex(read('lines.json.gz') as LineSeg[], read('crossings.json.gz') as Crossing[], meta);
+    return new RailIndex(
+      read('lines.json.gz') as LineSeg[],
+      read('crossings.json.gz') as Crossing[],
+      meta,
+    );
   }
 
   datasetAsOf(): string | undefined {
     return this.meta.sources.crossings.latest_revision;
   }
 
-  nearestLine(lat: number, lon: number, maxM = 50_000, filter?: (s: LineSeg) => boolean): NearestLine | undefined {
+  nearestLine(
+    lat: number,
+    lon: number,
+    maxM = 50_000,
+    filter?: (s: LineSeg) => boolean,
+  ): NearestLine | undefined {
     for (const r of [1000, 5000, 20_000, maxM]) {
       if (r > maxM) break;
       const { dLat, dLon } = degreeBox(lat, r);
@@ -208,7 +225,8 @@ export class RailIndex {
           const [ax, ay] = seg.c[k - 1]!;
           const [bx, by] = seg.c[k]!;
           const res = pointToSegmentM(lat, lon, ay, ax, by, bx);
-          if (!best || res.distM < best.d) best = { seg, d: res.distM, p: { lat: res.lat, lon: res.lon } };
+          if (!best || res.distM < best.d)
+            best = { seg, d: res.distM, p: { lat: res.lat, lon: res.lon } };
         }
       }
       if (best && best.d <= r) {
@@ -277,9 +295,16 @@ function round5(v: number): number {
 }
 
 function toHit(c: Crossing, lat: number, lon: number, d: number): CrossingHit {
-  const counts = { day_thru: c.day, night_thru: c.night, switching: c.switching, transit: c.transit };
+  const counts = {
+    day_thru: c.day,
+    night_thru: c.night,
+    switching: c.switching,
+    transit: c.transit,
+  };
   const anyCount = Object.values(counts).some((v) => typeof v === 'number');
-  const perDay = anyCount ? (c.day ?? 0) + (c.night ?? 0) + (c.switching ?? 0) + (c.transit ?? 0) : undefined;
+  const perDay = anyCount
+    ? (c.day ?? 0) + (c.night ?? 0) + (c.switching ?? 0) + (c.transit ?? 0)
+    : undefined;
   const brg = bearingDeg(lat, lon, c.lat, c.lon);
   return {
     fra_crossing_id: c.id,

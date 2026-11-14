@@ -58,13 +58,15 @@ export class ToolPolicy {
 
   evaluate(tool: Pick<ToolDef, 'name' | 'source'>): PolicyVerdict {
     const n = tool.name;
-    if (NEVER_TOOLS.has(n)) return { allowed: false, reason: `${n} is never exposed by this connector` };
+    if (NEVER_TOOLS.has(n))
+      return { allowed: false, reason: `${n} is never exposed by this connector` };
     if (GOOGLE_TOOLS.has(n))
       return {
         allowed: false,
         reason: `${n} returns Google Maps Platform content, which may not be passed to an AI assistant under Google's terms`,
       };
-    if (METERED_TOOLS.has(n)) return { allowed: false, reason: `${n} depends on a metered paid API` };
+    if (METERED_TOOLS.has(n))
+      return { allowed: false, reason: `${n} depends on a metered paid API` };
     if (OPENSKY_TOOLS.has(n) && !this.config.ALLOW_OPENSKY_TOOLS)
       return {
         allowed: false,
@@ -72,7 +74,8 @@ export class ToolPolicy {
       };
     if (ALPR_TOOLS.has(n) && !this.config.ALLOW_ALPR_TOOLS)
       return { allowed: false, reason: `${n} is disabled by policy (ALLOW_ALPR_TOOLS=false)` };
-    if (this.config.TOOL_DENYLIST.includes(n)) return { allowed: false, reason: `${n} is on TOOL_DENYLIST` };
+    if (this.config.TOOL_DENYLIST.includes(n))
+      return { allowed: false, reason: `${n} is on TOOL_DENYLIST` };
     if (tool.source === 'gev' && !this.config.GEV_TOOL_ALLOWLIST.includes(n))
       return { allowed: false, reason: `${n} is not on the vetted GEV tool allowlist` };
     return { allowed: true };
@@ -83,13 +86,16 @@ export class ToolPolicy {
    * Place-name lookups go through Nominatim inside GEV; without a configured
    * geocoder they fail with an opaque error, so reject them with guidance.
    */
-  checkArguments(tool: Pick<ToolDef, 'name' | 'source'>, args: Record<string, unknown>): string | null {
+  checkArguments(
+    tool: Pick<ToolDef, 'name' | 'source'>,
+    args: Record<string, unknown>,
+  ): string | null {
     if (tool.source !== 'gev') return null;
     if (hasPlaceArgument(args) && !this.config.GEV_PLACE_NAMES) {
       return (
         'Place names are not supported by this deployment (no geocoder is configured). ' +
         'Pass coordinates instead, e.g. {"lat": 42.33, "lon": -83.05, "radius_km": 5}; ' +
-        'use where_am_i for the user\'s own position.'
+        "use where_am_i for the user's own position."
       );
     }
     return null;
@@ -103,11 +109,14 @@ export class ToolPolicy {
   }
 
   /** Checks all applicable limits; records a hit in every bucket only if all pass. */
-  consumeRate(buckets: string[]): { ok: true } | { ok: false; bucket: string; retryAfterS: number } {
+  consumeRate(
+    buckets: string[],
+  ): { ok: true } | { ok: false; bucket: string; retryAfterS: number } {
     const specs = this.limits.filter((l) => buckets.includes(l.bucket));
     for (const s of specs) {
       const r = this.limiter.peek(key(s), s.limit, s.windowMs);
-      if (!r.ok) return { ok: false, bucket: s.bucket, retryAfterS: Math.ceil(r.retryAfterMs / 1000) };
+      if (!r.ok)
+        return { ok: false, bucket: s.bucket, retryAfterS: Math.ceil(r.retryAfterMs / 1000) };
     }
     for (const s of specs) this.limiter.record(key(s));
     return { ok: true };

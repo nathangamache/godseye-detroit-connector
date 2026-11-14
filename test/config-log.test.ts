@@ -11,28 +11,20 @@ describe('config', () => {
     expect(c.mode).toBe('development');
     expect(c.loginProvider).toBe('none');
     expect(c.allowedHosts).toContain('godseye.gamachecloud.com');
+    expect(c.privateOrigin).toBe('http://127.0.0.1:7702');
+    expect(c.authorizationEndpoint).toBe('http://127.0.0.1:7702/oauth/authorize');
     expect(c.ALLOW_OPENSKY_TOOLS).toBe(false);
   });
 
-  it('fails closed in production without Cloudflare Access', () => {
+  it('fails closed in production without the Tailscale owner login', () => {
     expect(() => loadConfig({ GATEWAY_MODE: 'production' })).toThrow(ConfigError);
-    expect(() =>
-      loadConfig({
-        GATEWAY_MODE: 'production',
-        CF_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com',
-        CF_ACCESS_AUD: 'aud',
-        OWNER_EMAIL: 'owner@example.com',
-        LOGIN_PROVIDER: 'password',
-      }),
-    ).toThrow(/not allowed in production/);
     const ok = loadConfig({
       GATEWAY_MODE: 'production',
-      CF_ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com/',
-      CF_ACCESS_AUD: 'aud',
-      OWNER_EMAIL: 'Owner@Example.com',
+      PRIVATE_ORIGIN: 'https://godseye.t.ts.net',
+      OWNER_TAILSCALE_LOGIN: 'Owner@Example.com',
     });
-    expect(ok.loginProvider).toBe('cf-access');
-    expect(ok.cfAccess).toEqual({ teamDomain: 'team.cloudflareaccess.com', aud: 'aud', ownerEmail: 'owner@example.com' });
+    expect(ok.loginProvider).toBe('tailscale');
+    expect(ok.ownerTailscaleLogin).toBe('owner@example.com');
   });
 
   it('rejects http public origins in production', () => {
@@ -40,9 +32,8 @@ describe('config', () => {
       loadConfig({
         GATEWAY_MODE: 'production',
         PUBLIC_ORIGIN: 'http://example.com',
-        CF_ACCESS_TEAM_DOMAIN: 't',
-        CF_ACCESS_AUD: 'a',
-        OWNER_EMAIL: 'o@e.com',
+        PRIVATE_ORIGIN: 'https://godseye.t.ts.net',
+        OWNER_TAILSCALE_LOGIN: 'o@e.com',
       }),
     ).toThrow(/https/);
   });
@@ -64,7 +55,13 @@ describe('log sanitizer', () => {
       nested: { latitude: 42.28081, access_token: 'gat_abcdefghijklmnop', ok: 1 },
       authorization: 'Bearer xyz',
       note: 'used token gat_ABCDEFGH12345678 here',
-    }) as Record<string, any>;
+    }) as {
+      lat: number;
+      lon: number;
+      nested: Record<string, unknown>;
+      authorization: string;
+      note: string;
+    };
     expect(out.lat).toBe(42.37);
     expect(out.lon).toBe(-83.47);
     expect(out.nested.latitude).toBe(42.28);
