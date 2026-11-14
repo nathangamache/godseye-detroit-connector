@@ -30,6 +30,21 @@ then build it in the sandbox with `scripts/build-gev.sh` (never `npm ci`/`npm ru
 host), run `scripts/tighten-permissions.sh`, and restart GEV, gev-mcp and the gateway. The gateway re-lists GEV's tools on child start; tools that are new upstream
 stay hidden until added to `GEV_TOOL_ALLOWLIST` (see README "Tool policy").
 
+Detroit Pulse is its own compose project (`detroit-pulse/deploy`, project `pulse`) and comes up
+first, since this stack mounts its UI volume and joins its network:
+
+```sh
+docker network create --driver bridge --internal --subnet 172.30.80.0/24 --gateway 172.30.80.1 \
+  --label org.detroit-pulse.shared=true godseye_backend      # once, pinned (docs/host-firewall.md)
+cd ~/projects/godseye/detroit-pulse/deploy && ./setup.sh     # see Pulse's docs/godseye-integration.md
+docker-compose -p pulse up -d && docker-compose -p pulse --profile frontend up -d pulse-frontend
+```
+
+Then put the `PULSE_API_TOKEN` from Pulse's `deploy/secrets/api.env` into `deploy/secrets/gateway.env`.
+The gateway serves the UI at `/pulse` (UI listener) from the read-only `pulse_frontend` volume and
+proxies `/pulse/api` to `pulse-api:7710` with that token. The proxy doesn't pass WebSocket
+upgrades, so the UI polls the REST API instead.
+
 Production image (classic builder; there's no buildx on this box):
 
 ```sh

@@ -28,7 +28,13 @@
 #   edge        172.30.77.0/24  cloudflared .10, tailscale+gateway .20     internet (tunnel, tailnet)
 #   backend     172.30.78.0/24  tailscale+gateway .20, gev .11, gev-mcp .12  INTERNAL: no egress
 #   gev-egress  172.30.79.0/24  gev .11                                     internet (GEV's providers)
+#   pulse       172.30.80.0/24  tailscale+gateway .20, pulse-api             INTERNAL: no egress
+#               (external: Detroit Pulse's godseye_backend; see docs/host-firewall.md for how it
+#               must be created. Nothing else in this file joins it.)
 # cloudflared cannot reach GEV or gev-mcp at all; gev-mcp has no route anywhere but GEV.
+# Only the sidecar's namespace (the gateway) reaches Pulse: cloudflared and GEV have no route to it.
+# Detroit Pulse (detroit-pulse/deploy) must be set up first: this stack refuses to start while
+# the godseye_backend network or the pulse_frontend volume is missing.
 # Every container resolves names through public DNS (no LAN resolver, no MagicDNS, no tailnet
 # search domain: a tailnet device named like a service can't capture its traffic).
 version: "2.4"
@@ -169,6 +175,10 @@ services:
         # cloudflared reaches the gateway's PUBLIC listener as http://gateway:7700.
         aliases: [gateway]
       backend: { ipv4_address: 172.30.78.20 }
+      # Detroit Pulse: the gateway reaches http://pulse-api:7710 here. Internal (no egress);
+      # only pulse-api and this sidecar are on it. The fixed address also makes `up` fail if
+      # the network was created without the pinned subnet the host firewall covers.
+      pulse: { ipv4_address: 172.30.80.20 }
 
   gateway:
     <<: *hardening
@@ -200,11 +210,16 @@ services:
       # Only cloudflared's fixed address may set CF-Connecting-IP.
       TRUSTED_PROXY_IPS: 172.30.77.10
       PULSE_URL: ${PULSE_URL:-http://pulse-api:7710}
+      # Pulse UI at /pulse (UI listener only): the static build Pulse's pulse-frontend service
+      # copies into the pulse_frontend volume, and /pulse/api proxied to PULSE_URL with the token.
+      PULSE_STATIC_DIR: /pulse-ui
+      PULSE_API_PROXY: "true"
       HOME: /tmp
       UV_THREADPOOL_SIZE: "4"
     env_file: [./secrets/gateway.env]
     volumes:
       - gateway-data:/data
+      - pulse-ui:/pulse-ui:ro
     tmpfs: ["/tmp:size=64m,mode=1777"]
     mem_limit: 768m
     memswap_limit: 768m
@@ -238,6 +253,10 @@ volumes:
   gev-cache:
   gev-logs:
   gev-dotcache:
+  # Created by detroit-pulse/deploy/setup.sh, filled by Pulse's pulse-frontend service; read-only here.
+  pulse-ui:
+    external: true
+    name: pulse_frontend
 
 networks:
   edge:
@@ -262,3 +281,10 @@ networks:
       config:
         - subnet: 172.30.79.0/24
           gateway: 172.30.79.1
+  # Detroit Pulse's network (pulse-api), created outside this file with a pinned subnet:
+  #   docker network create --driver bridge --internal --subnet 172.30.80.0/24 \
+  #     --gateway 172.30.80.1 --label org.detroit-pulse.shared=true godseye_backend
+  # (before Pulse's setup.sh, which keeps an existing network). Not the same as `backend` above.
+  pulse:
+    external: true
+    name: godseye_backend

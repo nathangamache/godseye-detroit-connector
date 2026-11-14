@@ -73,6 +73,10 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
   const counter = (st: object, k: '__gaps' | '__calls') =>
     (st as Record<string, number | undefined>)[k];
   const SUBNETS = ['172.30.77.0/24', '172.30.78.0/24', '172.30.79.0/24', '172.30.76.0/24'];
+  /** Detroit Pulse's godseye_backend (pulse-api + the tailscale sidecar). */
+  const PULSE = '172.30.80.0/24';
+  /** Every source subnet that jumps into the godseye chains. */
+  const SOURCES = [...SUBNETS, PULSE];
   const dockerOnly = () =>
     JSON.stringify({
       FORWARD: { policy: 'DROP', rules: ['-j DOCKER-USER', '-j DOCKER-FORWARD'] },
@@ -98,8 +102,8 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
   const noGaps = {
     FAKE_IPT_REQUIRE: JSON.stringify([
       ['FORWARD', '-j DOCKER-USER'],
-      ...SUBNETS.map((s) => ['INPUT', `-s ${s} -j GODSEYE-HOST`]),
-      ...SUBNETS.map((s) => ['DOCKER-USER', `-s ${s} -j GODSEYE-EGRESS`]),
+      ...SOURCES.map((s) => ['INPUT', `-s ${s} -j GODSEYE-HOST`]),
+      ...SOURCES.map((s) => ['DOCKER-USER', `-s ${s} -j GODSEYE-EGRESS`]),
     ]),
   };
 
@@ -118,7 +122,7 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(counter(e, '__gaps')).toBeUndefined();
     expect(e.FORWARD!.rules).toEqual(['-j DOCKER-USER', '-j ts-forward', '-j DOCKER-FORWARD']);
     expect(e.INPUT!.rules).toEqual([
-      ...SUBNETS.map((s) => `-s ${s} -j GODSEYE-HOST`),
+      ...SOURCES.map((s) => `-s ${s} -j GODSEYE-HOST`),
       '-j ts-input',
     ]);
     expect(e['GODSEYE-EGRESS']).toEqual(applied['GODSEYE-EGRESS']);
@@ -150,7 +154,7 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(counter(e, '__gaps')).toBeUndefined();
     expect(e.FORWARD!.rules).toEqual(['-j DOCKER-USER', '-j ts-forward', '-j DOCKER-FORWARD']);
     expect(e.INPUT!.rules).toEqual([
-      ...SUBNETS.map((s) => `-s ${s} -j GODSEYE-HOST`),
+      ...SOURCES.map((s) => `-s ${s} -j GODSEYE-HOST`),
       '-j ts-input',
     ]);
     expect(e['GODSEYE-EGRESS']).toEqual(applied['GODSEYE-EGRESS']);
@@ -225,7 +229,7 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(run(state, 'apply').status).toBe(0);
     const a = load(state);
     expect(a.FORWARD!.rules[0]).toBe('-j DOCKER-USER'); // ahead of ts-forward again
-    for (const s of ['172.30.77.0/24', '172.30.78.0/24', '172.30.79.0/24', '172.30.76.0/24']) {
+    for (const s of [...SUBNETS, '172.30.80.0/24']) {
       expect(a['DOCKER-USER']!.rules).toContain(`-s ${s} -j GODSEYE-EGRESS`);
       expect(a.INPUT!.rules).toContain(`-s ${s} -j GODSEYE-HOST`);
     }
@@ -258,6 +262,28 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(r['GODSEYE-HOST']).toBeUndefined();
     expect(r['DOCKER-USER']!.rules).toEqual(['-j RETURN']);
     expect(r.INPUT!.rules).toEqual(['-j ts-input']);
+  });
+
+  it("keeps Pulse's subnet to its own members: no host, and no route in from the godseye subnets", () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    expect(run(state, 'apply').status).toBe(0);
+    const a = load(state);
+    // The internal bridge still holds a host address (172.30.80.1): INPUT drops it like the rest.
+    expect(a.INPUT!.rules).toContain(`-s ${PULSE} -j GODSEYE-HOST`);
+    expect(a['DOCKER-USER']!.rules).toContain(`-s ${PULSE} -j GODSEYE-EGRESS`);
+    const eg = a['GODSEYE-EGRESS']!.rules;
+    // Inside the subnet (sidecar <-> pulse-api) only, ahead of the RFC 1918 drop...
+    expect(eg.indexOf(`-s ${PULSE} -d ${PULSE} -j RETURN`)).toBeGreaterThan(0);
+    expect(eg.indexOf(`-s ${PULSE} -d ${PULSE} -j RETURN`)).toBeLessThan(
+      eg.indexOf('-d 172.16.0.0/12 -j DROP'),
+    );
+    // ...and never as a destination for everyone (GEV, cloudflared, the build network).
+    expect(eg).not.toContain(`-d ${PULSE} -j RETURN`);
+    expect(run(state, 'remove').status).toBe(0);
+    const r = load(state);
+    expect(r.INPUT!.rules).toEqual([]);
+    expect(r['DOCKER-USER']!.rules).toEqual(['-j RETURN']);
   });
 
   it('refuses to run before Docker created DOCKER-USER', () => {
@@ -338,6 +364,26 @@ describe('compose: listeners, networks and DNS', () => {
       expect(service(compose, name), name).toMatch(/<<: \[\*hardening, \*dns\]/);
     expect(compose).toMatch(/dns_search: \["\."\]/);
     expect(compose).not.toMatch(/docker\.sock|\/home\//);
+  });
+
+  it("reaches Detroit Pulse only from the sidecar's namespace, and serves its UI read-only", () => {
+    // Pulse's external, internal network, under its own key (not the godseye `backend`).
+    expect(compose).toMatch(/\n {2}pulse:\n {4}external: true\n {4}name: godseye_backend\n/);
+    expect(compose).toMatch(/\n {2}pulse-ui:\n {4}external: true\n {4}name: pulse_frontend\n/);
+    const ts = service(compose, 'tailscale');
+    expect(ts).toMatch(/\n {6}pulse: \{ ipv4_address: 172\.30\.80\.20 \}\n/);
+    // Nobody else joins it: the gateway through the sidecar's namespace, nothing directly.
+    for (const name of ['gev', 'gev-mcp', 'cloudflared', 'gateway'])
+      expect(service(compose, name), name).not.toMatch(/\n {6}pulse:|godseye_backend/);
+    expect(compose.match(/\n {6}pulse: /g)).toHaveLength(1);
+    const gw = service(compose, 'gateway');
+    expect(gw).toMatch(/network_mode: "service:tailscale"/);
+    expect(gw).toMatch(/PULSE_URL: \$\{PULSE_URL:-http:\/\/pulse-api:7710\}/);
+    expect(gw).toMatch(/PULSE_STATIC_DIR: \/pulse-ui\n/);
+    expect(gw).toMatch(/PULSE_API_PROXY: "true"\n/);
+    expect(gw).toMatch(/\n {6}- pulse-ui:\/pulse-ui:ro\n/);
+    // The UI volume is mounted nowhere else, and never writable.
+    expect(compose.match(/pulse-ui:\/pulse-ui/g)).toHaveLength(1);
   });
 });
 

@@ -26,7 +26,7 @@ your devices ──Tailscale──▶ tailscale serve godseye.<tailnet>.ts.net
                               :443  ──▶ gateway PRIVATE 127.0.0.2:7702  /oauth/authorize  consent  /oauth/admin  /locate
                               :8443 ──▶ gateway UI      127.0.0.2:7703  /  (GEV globe)  /pulse
 gateway ──tcp──▶ gev-mcp relay ──stdio──▶ gev/stdio-all-surfaces.mjs ──HTTP──▶ GEV vite preview :7701 ──▶ providers
-gateway ──HTTP──▶ Detroit Pulse API :7710 (contract only, not running yet)
+gateway ──HTTP──▶ Detroit Pulse pulse-api:7710 (Pulse's internal godseye_backend network)
 gateway ──▶ SQLite (OAuth clients, hashed tokens, devices, ≤24 h of fixes, audit log)
 ```
 

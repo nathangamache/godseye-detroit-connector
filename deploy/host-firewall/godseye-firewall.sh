@@ -15,6 +15,8 @@
 #     100.100.100.100), no link-local, multicast or reserved space.
 #   * INPUT: no new connection to the host itself on ANY of its addresses (bridge gateways,
 #     LAN, tailnet, docker0), which DOCKER-USER cannot see.
+# Detroit Pulse's godseye_backend (PULSE_SUBNETS, internal) gets the same INPUT drop; inside
+# it only traffic between its own members (pulse-api, the tailscale sidecar) is allowed.
 # DNS needs no exception: the compose file points the containers' DNS at public resolvers.
 #
 # Order matters. tailscaled inserts `-j ts-forward` at the top of FORWARD (it ACCEPTs
@@ -28,6 +30,10 @@ set -eu
 
 # edge, backend, gev-egress and build networks (deploy/docker-compose.yml, scripts/build-gev.sh)
 SUBNETS="${GODSEYE_SUBNETS:-172.30.77.0/24 172.30.78.0/24 172.30.79.0/24 172.30.76.0/24}"
+# Detroit Pulse's godseye_backend (internal): pulse-api and the tailscale sidecar, whose namespace
+# the gateway shares. Its members may reach each other and nothing else: no host (an internal
+# bridge still holds a host address), and the godseye subnets above get no route into it.
+PULSE_SUBNETS="${GODSEYE_PULSE_SUBNETS:-172.30.80.0/24}"
 BLOCK="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4"
 # -w: wait for the xtables lock (dockerd and tailscaled take it too) instead of failing.
 IPT="${IPTABLES:-iptables -w 5}"
@@ -36,6 +42,7 @@ IPT="${IPTABLES:-iptables -w 5}"
 egress_rules() {
   echo "-m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
   for s in $SUBNETS; do echo "-d $s -j RETURN"; done
+  for s in $PULSE_SUBNETS; do echo "-s $s -d $s -j RETURN"; done
   for b in $BLOCK; do echo "-d $b -j DROP"; done
   echo "-j RETURN"
 }
@@ -44,7 +51,7 @@ host_rules() {
   echo "-j DROP"
 }
 # Our jumps into chain $1, one per subnet.
-jumps() { for s in $SUBNETS; do echo "-s $s -j $1"; done; }
+jumps() { for s in $SUBNETS $PULSE_SUBNETS; do echo "-s $s -j $1"; done; }
 
 # (Re)creates chain $1 holding exactly the rules printed by $2.
 fill() {
@@ -109,7 +116,7 @@ in_order() {
 }
 
 remove() {
-  for s in $SUBNETS; do
+  for s in $SUBNETS $PULSE_SUBNETS; do
     while $IPT -C DOCKER-USER -s "$s" -j GODSEYE-EGRESS 2>/dev/null; do $IPT -D DOCKER-USER -s "$s" -j GODSEYE-EGRESS; done
     while $IPT -C INPUT -s "$s" -j GODSEYE-HOST 2>/dev/null; do $IPT -D INPUT -s "$s" -j GODSEYE-HOST; done
   done

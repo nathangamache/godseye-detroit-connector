@@ -25,6 +25,23 @@ The compose networks have pinned subnets (`deploy/docker-compose.yml`):
 | `godseye-backend` | `172.30.78.0/24` | tailscale + gateway `.20`, gev `.11`, gev-mcp `.12` | none (`internal: true`) |
 | `godseye-gev-egress` | `172.30.79.0/24` | gev `.11` | internet (GEV's data providers) |
 | `godseye-build` | `172.30.76.0/24` | `scripts/build-gev.sh` | internet (npm registry) |
+| `godseye_backend` (Detroit Pulse) | `172.30.80.0/24` | tailscale + gateway `.20`, `pulse-api` | none (`--internal`); members only reach each other |
+
+`godseye_backend` belongs to Detroit Pulse (`detroit-pulse/deploy`) and is `external` in the
+connector's compose file, so its subnet is pinned where it is created. Create it **before**
+Pulse's `setup.sh` (which keeps an existing network):
+
+```sh
+docker network create --driver bridge --internal --subnet 172.30.80.0/24 --gateway 172.30.80.1 \
+  --label org.detroit-pulse.shared=true godseye_backend
+docker network inspect godseye_backend --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'   # 172.30.80.0/24
+```
+
+The sidecar's fixed address there (`172.30.80.20`) makes `docker-compose up` fail on a network
+created without that subnet, so the rules below can't silently miss it. An internal bridge still
+gives the host an address on it (`172.30.80.1`): without the `INPUT` rule, the gateway's
+namespace (through the sidecar) and `pulse-api` could open connections to every host service
+listening on `0.0.0.0` that way.
 
 For traffic **from** any of those subnets, `deploy/host-firewall/godseye-firewall.sh`:
 
@@ -32,6 +49,9 @@ For traffic **from** any of those subnets, `deploy/host-firewall/godseye-firewal
    `GODSEYE-EGRESS`, which
    * returns replies (`ESTABLISHED,RELATED`) and traffic to the godseye subnets themselves
      (Docker's network isolation still applies between them);
+   * returns traffic **within** Pulse's `godseye_backend` (`-s 172.30.80.0/24 -d 172.30.80.0/24`:
+     the sidecar and `pulse-api`) but not traffic into it from the godseye subnets, which hits
+     the RFC 1918 drop: only the sidecar's namespace, which sits on that network, reaches Pulse;
    * **drops** `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918: the LAN and other
      docker networks), `100.64.0.0/10` (CGNAT: the tailnet, including `100.100.100.100`),
      `169.254.0.0/16`, `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4`, `240.0.0.0/4`;
@@ -65,7 +85,8 @@ networks; if you ever enable it, add the equivalent `ip6tables` rules (drop `fc0
 
 ### The exact rules
 
-`godseye-firewall.sh apply` is equivalent to (for each `$S` in the four subnets):
+`godseye-firewall.sh apply` is equivalent to (for each `$S` in the four godseye subnets and
+Pulse's `172.30.80.0/24`; override with `GODSEYE_SUBNETS` / `GODSEYE_PULSE_SUBNETS`):
 
 ```sh
 iptables -N GODSEYE-EGRESS
@@ -74,6 +95,7 @@ iptables -A GODSEYE-EGRESS -d 172.30.77.0/24 -j RETURN
 iptables -A GODSEYE-EGRESS -d 172.30.78.0/24 -j RETURN
 iptables -A GODSEYE-EGRESS -d 172.30.79.0/24 -j RETURN
 iptables -A GODSEYE-EGRESS -d 172.30.76.0/24 -j RETURN
+iptables -A GODSEYE-EGRESS -s 172.30.80.0/24 -d 172.30.80.0/24 -j RETURN
 for b in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 \
          192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
   iptables -A GODSEYE-EGRESS -d "$b" -j DROP
@@ -157,10 +179,16 @@ docker exec godseye-gev node /app/dist/scripts/egress-probe.js \
             100.100.100.100:53 <peer-100.x>:22 172.30.77.20:7700 \
   --open 1.1.1.1:443
 
-# Gateway (and so the tailscale sidecar and, by network, cloudflared's edge subnet).
+# Gateway (and so the tailscale sidecar and, by network, cloudflared's edge subnet). 172.30.80.1
+# is the host's address on Pulse's internal bridge.
 docker exec godseye-gateway node dist/scripts/egress-probe.js \
-  --blocked 172.30.77.1:22 192.168.1.20:22 192.168.1.1:53 100.100.100.100:53 <peer-100.x>:22 \
-  --open 1.1.1.1:443 gev:7701
+  --blocked 172.30.77.1:22 172.30.80.1:22 192.168.1.20:22 192.168.1.1:53 100.100.100.100:53 <peer-100.x>:22 \
+  --open 1.1.1.1:443 gev:7701 pulse-api:7710
+
+# Pulse is reachable from the sidecar's namespace only (not from GEV or gev-mcp).
+PULSE_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "godseye_backend").IPAddress}}' pulse-api)
+docker exec godseye-gev node /app/dist/scripts/egress-probe.js --blocked "$PULSE_IP:7710" 172.30.80.1:22
+docker exec godseye-gev-mcp node /app/dist/scripts/egress-probe.js --blocked "$PULSE_IP:7710"
 
 # gev-mcp: nothing but GEV.
 docker exec godseye-gev-mcp node /app/dist/scripts/egress-probe.js \
