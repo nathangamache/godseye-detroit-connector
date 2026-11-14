@@ -36,10 +36,11 @@
           it prints on this phone, or paste the link or its code below. A Home Screen app keeps its
           own storage and can't open links, so paste the code there.
         </p>
-        <form id="setup-form" class="row">
+        <form id="setup-form" class="row" method="get" action="/locate/">
           <label for="setup-code">Setup code or link</label>
           <input
             id="setup-code"
+            name="setup"
             type="text"
             autocomplete="off"
             autocapitalize="off"

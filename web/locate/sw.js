@@ -1,5 +1,6 @@
 // Service worker for the /locate shell and icons only. Never caches API calls.
-const CACHE = 'locate-shell-v1';
+// Bump on every shell change: a new name makes browsers install this worker and drop the old cache.
+const CACHE = 'locate-shell-v2';
 const SHELL = [
   '/locate/',
   '/locate/app.js',
@@ -35,6 +36,19 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(fetch(e.request).catch(() => caches.match('/locate/')));
     return;
   }
-  if (SHELL.includes(url.pathname))
-    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request)));
+  if (SHELL.includes(url.pathname)) {
+    // Network first for the script and styles too (a cache-first app.js once outlived a page
+    // update), refreshing the cached copy; the cached copy is only for offline use.
+    e.respondWith(
+      fetch(e.request)
+        .then((r) => {
+          if (r.ok) {
+            const copy = r.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy));
+          }
+          return r;
+        })
+        .catch(() => caches.match(e.request)),
+    );
+  }
 });

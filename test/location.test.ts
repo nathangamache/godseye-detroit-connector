@@ -241,12 +241,21 @@ describe('HTTP ingest and /locate', () => {
     ).text();
     expect(js).toMatch(/getElementById\('setup-form'\)/);
     expect(js).toMatch(/gsc_\[A-Za-z0-9_-\]\+/);
+    // The form must still carry the code if the script is stale: GET ?setup=..., read on load.
+    expect(html).toMatch(/<form id="setup-form"[^>]*method="get"[^>]*action="\/locate\/"/);
+    expect(html).toMatch(/id="setup-code"\s+name="setup"/);
+    expect(js).toMatch(/location\.search/);
+    expect(r.headers.get('cache-control')).toBe('no-cache');
     expect(r.headers.get('content-security-policy')).toMatch(/script-src 'self'/);
     expect(r.headers.get('permissions-policy')).toMatch(/geolocation=\(self\)/);
     const sw = await fetch(`${t.privateOrigin}/locate/sw.js`, {
       headers: { cookie: jar.header() },
     });
     expect(sw.status).toBe(200);
+    const swText = await sw.text();
+    // Shell files are network-first, and the cache name moved on from v1 (cache-first app.js).
+    expect(swText).not.toMatch(/locate-shell-v1/);
+    expect(swText).toMatch(/fetch\(e\.request\)\s*\.then/);
   });
 
   it('one-time setup code claim', async () => {

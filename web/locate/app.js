@@ -50,8 +50,10 @@
     return m ? m[1] : null;
   }
 
+  // The link carries the code in the fragment (#setup=...). The setup form falls back to a
+  // plain GET (?setup=...) if this script was stale or failed, so accept both.
   function claimFromHash() {
-    var m = /[#&]setup=(gsc_[A-Za-z0-9_-]+)/.exec(location.hash);
+    var m = /[#&?]setup=(gsc_[A-Za-z0-9_-]+)/.exec(location.hash + '&' + location.search);
     if (!m) return Promise.resolve();
     history.replaceState(null, '', location.pathname);
     return claim(m[1]);

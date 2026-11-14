@@ -206,6 +206,8 @@ export function installLocate(app: Express, ctx: AppContext, d: LocationDeps, lo
       pageHeaders(res);
       res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
       res.setHeader('Service-Worker-Allowed', '/locate/');
+      // Always revalidate (ETag) so a phone never runs a stale page, script or service worker.
+      res.setHeader('Cache-Control', 'no-cache');
       next();
     },
     express.static(locateDir, {
