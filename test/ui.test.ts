@@ -3,6 +3,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateTotpSecret } from '../src/auth/totp.js';
 import { loadConfig } from '../src/config.js';
 import { startGateway, type Gateway } from '../src/gateway.js';
 import { nullLogger } from '../src/log.js';
@@ -407,6 +408,52 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
       (await fetch(gw.privateUrl + '/locate/', { headers: { 'tailscale-user-login': OWNER } }))
         .status,
     ).toBe(200);
+  });
+
+  it('heavy use of the UI origin cannot rate-limit consent or admin (separate limiters)', async () => {
+    const d3 = mkdtempSync(path.join(tmpdir(), 'gw-ui-prod3-'));
+    const config = loadConfig({
+      ...PROD_ENV,
+      PORT: String(await freePort()),
+      PRIVATE_PORT: String(await freePort()),
+      UI_PORT: String(await freePort()),
+      OWNER_TAILSCALE_LOGIN: OWNER,
+      DATA_DIR: d3,
+      GEV_URL: gev.url,
+      GEV_MCP_ENABLED: 'false',
+    });
+    const g3 = await startGateway(config, {
+      logger: nullLogger,
+      gevChild: false,
+      routes: installAllRoutes({ cimdFetch: fakeCimdFetch }),
+    });
+    try {
+      g3.stepup.enroll(generateTotpSecret());
+      // Everything behind tailscale serve arrives from 127.0.0.1: one client address for both
+      // origins. Spend the UI listener's whole per-client budget (1200/min).
+      let limited = 0;
+      for (let i = 0; i < 1250; i += 50) {
+        const batch = await Promise.all(
+          Array.from({ length: 50 }, () => fetch(g3.uiUrl + '/healthz')),
+        );
+        for (const r of batch) {
+          if (r.status === 429) limited++;
+          await r.arrayBuffer();
+        }
+      }
+      expect(limited).toBeGreaterThan(0);
+      const admin = await fetch(g3.privateUrl + '/oauth/admin', {
+        headers: { 'tailscale-user-login': OWNER },
+      });
+      expect(admin.status).toBe(401); // the step-up code form, not 429
+      const consent = await fetch(g3.privateUrl + '/oauth/authorize?client_id=x', {
+        headers: { 'tailscale-user-login': OWNER },
+      });
+      expect(consent.status).not.toBe(429);
+    } finally {
+      await g3.close();
+      rmSync(d3, { recursive: true, force: true });
+    }
   });
 
   it('distrusts identity headers from peers that are not the configured proxy', async () => {

@@ -46,7 +46,15 @@ export interface GatewayCore {
   locations: LocationStore;
   registry: ToolRegistry;
   runner: ToolRunner;
+  /** HTTP limits of the public listener (including the global OAuth budgets). */
   limiter: RateLimiter;
+  /**
+   * The private (consent, admin) and UI listeners get their own limiters. Behind tailscale
+   * serve every request comes from 127.0.0.1, so with one shared limiter heavy globe use (or
+   * a script on the UI origin) would 429 consent and admin.
+   */
+  privateLimiter: RateLimiter;
+  uiLimiter: RateLimiter;
   sessionSecret: string;
   stepup: StepUp;
   gev?: GevChild;
@@ -98,6 +106,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   );
   const locations = new LocationStore(db, { retentionHours: config.LOCATION_RETENTION_HOURS }, now);
   const limiter = new RateLimiter();
+  const privateLimiter = new RateLimiter();
+  const uiLimiter = new RateLimiter();
   const policy = new ToolPolicy(config);
   const registry = new ToolRegistry(policy);
   const runner = new ToolRunner(registry, {
@@ -158,6 +168,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     registry,
     runner,
     limiter,
+    privateLimiter,
+    uiLimiter,
     sessionSecret,
     stepup,
     rail,
@@ -202,10 +214,19 @@ export async function startGateway(
     void child.start();
   }
 
-  const deps = { ...core };
-  const app = createPublicApp(deps, bind(overrides.routes?.public ?? [], core));
-  const privateApp = createPrivateApp(deps, bind(overrides.routes?.private ?? [], core));
-  const uiApp = createUiApp(deps, bind(overrides.routes?.ui ?? [], core));
+  // One limiter per listener: no listener's traffic can spend another's rate budget.
+  const app = createPublicApp(
+    { ...core, limiter: core.limiter },
+    bind(overrides.routes?.public ?? [], core),
+  );
+  const privateApp = createPrivateApp(
+    { ...core, limiter: core.privateLimiter },
+    bind(overrides.routes?.private ?? [], core),
+  );
+  const uiApp = createUiApp(
+    { ...core, limiter: core.uiLimiter },
+    bind(overrides.routes?.ui ?? [], core),
+  );
   const listen = (a: Express, port: number, host: string) =>
     new Promise<Server>((resolve, reject) => {
       const s = a.listen(port, host, () => resolve(s));
