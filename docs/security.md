@@ -139,7 +139,8 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 ### Process and network isolation (production)
 
 * Public-facing processes run in containers, never as the owner's user: gateway, GEV and gev-mcp
-  as uid 10001, the Tailscale sidecar as uid 10002, cloudflared as uid 65532.
+  as uid 10001, the Tailscale sidecar as uid 10002, cloudflared as uid 65532, the self-hosted
+  Overpass (`docs/overpass.md`) as uid 10003.
 * `read_only: true` root filesystems, tmpfs `/tmp`, `cap_drop: [ALL]`, `no-new-privileges:true`,
   `init: true`, memory/pids/CPU limits. Tailscale uses userspace networking (no TUN device, no
   NET_ADMIN).
@@ -153,7 +154,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   gev-mcp, GEV can't reach the gateway's public listener, gev-mcp can reach only GEV. GEV accepts
   only `Host: gev`. Detroit Pulse's `godseye_backend` (external, internal, `172.30.80.0/24`)
   holds only the sidecar and `pulse-api`, so Pulse is reachable from the gateway's namespace and
-  from nothing else in this stack; the gateway mounts Pulse's UI volume read-only. Pulse's own
+  from nothing else in this stack. The self-hosted Overpass (its own compose project) is on
+  `backend` only (`172.30.78.30`, alias `overpass`), and its build and check containers have no
+  network at all: the extract is downloaded on the host and md5-checked; the gateway mounts Pulse's UI volume read-only. Pulse's own
   networks are pinned too (`pulse_internal` `172.30.81.0/24`, `pulse_egress` `172.30.82.0/24`,
   `pulse_debug` `172.30.83.0/24`) and its containers use public DNS without a search domain.
 * **Host firewall** (`docs/host-firewall.md`, needs root): `DOCKER-USER` and `INPUT` rules drop
@@ -300,7 +303,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * `.github/dependabot.yml` covers npm, the runtime Dockerfile, the **Tailscale sidecar
   Dockerfile** and compose images; `FROM` lines name the pinned images directly.
 * Images pinned by digest: `node:24.22.3-bookworm-slim@sha256:dc26ae92…`,
-  `tailscale/tailscale:v1.104.4@sha256:ed6480b3…`, `cloudflare/cloudflared:2026.11.0@sha256:bf723075…`.
+  `tailscale/tailscale:v1.104.4@sha256:ed6480b3…`, `cloudflare/cloudflared:2026.11.0@sha256:bf723075…`,
+  `wiktorn/overpass-api:v0.7.62.11@sha256:c94f965a…` (run with its root entrypoint replaced; see
+  `docs/overpass.md`).
 * **GEV is built in a sandbox** (`scripts/build-gev.sh`): the pinned node image, the caller's uid
   with no capabilities, a read-only root, `--ignore-scripts`, only `CESIUM_ION_TOKEN` passed, on
   its own network that the host firewall keeps off the LAN and tailnet. The container gets a

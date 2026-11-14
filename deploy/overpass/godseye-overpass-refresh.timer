@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly rebuild of the self-hosted Overpass database
+
+[Timer]
+# Geofabrik publishes each day's extracts overnight (UTC).
+OnCalendar=Sun *-*-* 04:41:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
