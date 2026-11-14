@@ -9,6 +9,7 @@ Two run modes share one codebase and configuration schema:
 | Private listener (tailnet :443) | `127.0.0.1:7702` + `tailscale serve --https=443` on the host | `127.0.0.2:7702` inside the netns shared with the Tailscale sidecar |
 | UI listener (tailnet :8443) | `127.0.0.1:7703` + `tailscale serve --https=8443` | `127.0.0.2:7703`, same netns |
 | GEV listens | `127.0.0.1:7701` | `gev:7701` on the internal `godseye-backend` network only |
+| Overpass (optional) | n/a | `overpass:80` on `godseye-backend` (project `godseye-overpass`, `docs/overpass.md`) |
 | GEV MCP child | spawned by the gateway (stdio) | `gev-mcp` container behind a relay (`gev-mcp:7704`, gateway only) |
 | Login | Tailscale header (with host `tailscale serve`) or password+TOTP; step-up TOTP on consent/admin | Tailscale only (fail closed) + step-up TOTP |
 | Config | `./.env` (mode 600) | `deploy/secrets/*.env` (mode 600) + compose `environment:` |

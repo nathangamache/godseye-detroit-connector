@@ -1,0 +1,14 @@
+# systemd --user unit: rebuild the self-hosted Overpass database from a fresh OpenStreetMap
+# extract (docs/overpass.md). Installed by deploy/overpass/install.sh; run weekly by
+# godseye-overpass-refresh.timer, or by hand: systemctl --user start godseye-overpass-refresh
+[Unit]
+Description=Refresh the self-hosted Overpass database from a fresh OpenStreetMap extract
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/godseye-overpass/overpass-refresh.sh refresh
+# The download and host-side steps; the database build itself runs at nice 19 / idle I/O in its
+# container, on the same CPUs (24-31) as the rest of the stack.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=4h

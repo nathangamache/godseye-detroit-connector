@@ -19,3 +19,7 @@ updates:
   - package-ecosystem: docker-compose
     directory: /deploy
     schedule: { interval: weekly }
+  # The self-hosted Overpass image (deploy/overpass, docs/overpass.md).
+  - package-ecosystem: docker-compose
+    directory: /deploy/overpass
+    schedule: { interval: weekly }

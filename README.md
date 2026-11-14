@@ -119,7 +119,7 @@ web/            /locate PWA and shared CSS
 scripts/        devices, stepup, hash-password, backup-db, revoke-all, smoke-live, gev-relay,
                 egress-probe, build-gev.sh, tighten-permissions.sh, rail data build/fetch, audit
 deploy/         docker (image, compose, Tailscale sidecar), host-firewall (root), systemd units,
-                GEV notes, secrets README
+                GEV notes, secrets README, overpass (self-hosted Overpass + weekly refresh)
 docs/           cloudflare-setup, tailscale-setup, host-firewall, phone-setup, operations, security,
                 pulse-api-contract
 test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
@@ -134,10 +134,13 @@ test/           vitest unit + integration tests (mock GEV MCP child, mock Pulse)
 * `docs/phone-setup.md`: OwnTracks (iPhone/Android), the `/locate` PWA, iOS Shortcuts
 * `docs/operations.md`: run modes, builds, logs, backups, credential rotation, kill switches
 * `docs/pulse-api-contract.md`: what Pulse must implement on 127.0.0.1:7710
+* `docs/overpass.md`: the self-hosted Overpass (Michigan OpenStreetMap) behind `get_map_features`, and its weekly refresh
 
 ## Credits and licences
 
 God's Eye View is © 2026 Bilawal Sidhu, MIT; `gev/stdio-all-surfaces.mjs` is adapted from it (see
 `third_party/gods-eye-view/`). GEV's data sources keep their own terms; the gateway appends their
-attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. This repository is
+attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. Map features come from a
+self-hosted Overpass loaded with Geofabrik's Michigan extract: © OpenStreetMap contributors, ODbL
+1.0 (`docs/overpass.md`). This repository is
 public, for personal, non-commercial use; it holds no secrets or personal data.

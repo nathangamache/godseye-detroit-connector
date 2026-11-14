@@ -1,0 +1,145 @@
+# Self-hosted Overpass API for one OpenStreetMap extract (Geofabrik's Michigan by default).
+# Its own compose project, next to the godseye stack (see docs/overpass.md):
+#
+#   overpass        serves the current database as http://overpass/api/interpreter on the
+#                   INTERNAL godseye-backend network (172.30.78.30), for GEV (OVERPASS_UPSTREAMS)
+#                   and the gateway (OVERPASS_URL). No published port, no egress, no updates.
+#   overpass-init   (profile refresh) builds a new database from a downloaded extract; no network
+#   overpass-check  (profile refresh) serves that new database with no network, so the refresh
+#                   can query it before it replaces the live one
+#   overpass-clean  (profile refresh) empties a database directory written by uid 10003
+#
+# overpass-refresh.sh downloads the extract on the host (md5 checked), runs init and check, then
+# swaps: nothing in here ever downloads anything. Run it, not these services, by hand:
+#
+#   ./overpass-refresh.sh                 # first build, and what the weekly timer runs
+#   ./overpass-refresh.sh status
+#   docker-compose -p godseye-overpass -f docker-compose.yml up -d overpass   # after a reboot etc.
+#
+# OVERPASS_DATA is the data directory (mode 700, outside any repo): pbf/ holds the extracts,
+# db-<UTC stamp>/ the databases, `current` links to the live one. install.sh writes it to the
+# .env next to this file. Map data © OpenStreetMap contributors, ODbL 1.0
+# (https://www.openstreetmap.org/copyright); extracts by Geofabrik GmbH.
+#
+# The godseye stack (deploy/docker-compose.yml) creates godseye-backend; start it first.
+version: "2.4"
+
+x-overpass: &overpass
+  image: wiktorn/overpass-api:v0.7.62.11@sha256:c94f965a02f835abbe574109ff1a58498e5c96254a349e36ed4819467d10e027
+  # Not the image's built-in user (uid 1000) and not a host account: the image's own entrypoint
+  # (root, chown, envsubst into /etc) is replaced by the scripts in ./container.
+  user: "10003:10003"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  stop_signal: SIGTERM
+  stop_grace_period: 30s
+  cpuset: "24-31"
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+  environment:
+    HOME: /tmp
+    # No user names, uids or changesets in the database (and so none in answers).
+    OVERPASS_META: "no"
+    OVERPASS_COMPRESSION: gz
+    OVERPASS_FLUSH_SIZE: "16"
+    # The dispatcher's admission budget across all running queries: 4 GiB of declared [maxsize]
+    # (eight queries at Overpass's 512 MiB default) and 2400 s of declared [timeout].
+    OVERPASS_SPACE: "4294967296"
+    OVERPASS_TIME: "2400"
+    # GEV dedupes its own identical requests; refusing duplicates would only trip its cooldown.
+    OVERPASS_ALLOW_DUPLICATE_QUERIES: "yes"
+    OVERPASS_FASTCGI_PROCESSES: "8"
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+    - /nginx:size=1m,mode=0700,uid=10003,gid=10003
+
+services:
+  overpass:
+    <<: *overpass
+    container_name: godseye-overpass
+    restart: unless-stopped
+    entrypoint: ["/overpass/serve.sh"]
+    volumes:
+      - ./container:/overpass:ro
+      # Long syntax: a missing `current` link fails instead of Docker creating a directory.
+      - type: bind
+        source: ${OVERPASS_DATA:?set OVERPASS_DATA (install.sh writes it to .env)}/current
+        target: /db
+    healthcheck:
+      test: ["CMD", "/app/docker-healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 2.0
+    networks:
+      backend:
+        ipv4_address: 172.30.78.30
+        aliases: [overpass]
+
+  overpass-init:
+    <<: *overpass
+    profiles: [refresh]
+    container_name: godseye-overpass-init
+    restart: "no"
+    network_mode: none
+    entrypoint: ["nice", "-n", "19", "ionice", "-c", "3", "/overpass/init.sh"]
+    # The image's HEALTHCHECK queries a server this container doesn't run.
+    healthcheck: { disable: true }
+    volumes:
+      - ./container:/overpass:ro
+      - type: bind
+        source: ${OVERPASS_NEW_DB:-/nonexistent/OVERPASS_NEW_DB-is-set-by-overpass-refresh.sh}
+        target: /db
+      - type: bind
+        source: ${OVERPASS_NEW_PBF:-/nonexistent/OVERPASS_NEW_PBF-is-set-by-overpass-refresh.sh}
+        target: /import/extract.osm.pbf
+        read_only: true
+    mem_limit: 8g
+    memswap_limit: 8g
+    cpus: 4.0
+
+  overpass-check:
+    <<: *overpass
+    profiles: [refresh]
+    container_name: godseye-overpass-check
+    restart: "no"
+    network_mode: none
+    entrypoint: ["/overpass/serve.sh"]
+    volumes:
+      - ./container:/overpass:ro
+      - type: bind
+        source: ${OVERPASS_NEW_DB:-/nonexistent/OVERPASS_NEW_DB-is-set-by-overpass-refresh.sh}
+        target: /db
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 2.0
+
+  overpass-clean:
+    <<: *overpass
+    profiles: [refresh]
+    container_name: godseye-overpass-clean
+    restart: "no"
+    network_mode: none
+    entrypoint: ["find", "/db", "-mindepth", "1", "-delete"]
+    healthcheck: { disable: true }
+    volumes:
+      - type: bind
+        source: ${OVERPASS_CLEAN_DB:-/nonexistent/OVERPASS_CLEAN_DB-is-set-by-overpass-refresh.sh}
+        target: /db
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
+
+networks:
+  # GEV's internal network (no egress), created by the godseye stack with 172.30.78.0/24 pinned;
+  # the fixed address above makes `up` fail on a network created with another subnet.
+  backend:
+    external: true
+    name: godseye-backend

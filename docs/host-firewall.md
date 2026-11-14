@@ -23,7 +23,7 @@ The compose networks have pinned subnets (`deploy/docker-compose.yml`, and Detro
 | Network | Subnet | Members | Egress |
 |---|---|---|---|
 | `godseye-edge` | `172.30.77.0/24` | cloudflared `.10`, tailscale + gateway `.20` | internet (tunnel, Tailscale coordination/DERP, CIMD fetch) |
-| `godseye-backend` | `172.30.78.0/24` | tailscale + gateway `.20`, gev `.11`, gev-mcp `.12` | none (`internal: true`) |
+| `godseye-backend` | `172.30.78.0/24` | tailscale + gateway `.20`, gev `.11`, gev-mcp `.12`, overpass `.30` (`deploy/overpass`, `docs/overpass.md`) | none (`internal: true`) |
 | `godseye-gev-egress` | `172.30.79.0/24` | gev `.11` | internet (GEV's data providers) |
 | `godseye-build` | `172.30.76.0/24` | `scripts/build-gev.sh` | internet (npm registry) |
 | `godseye_backend` (Detroit Pulse) | `172.30.80.0/24` | tailscale + gateway `.20`, `pulse-api` | none (`--internal`); members only reach each other |
