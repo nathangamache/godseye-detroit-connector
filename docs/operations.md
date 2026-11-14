@@ -34,8 +34,8 @@ Detroit Pulse is its own compose project (`detroit-pulse/deploy`, project `pulse
 first, since this stack mounts its UI volume and joins its network:
 
 ```sh
-docker network create --driver bridge --internal --subnet 172.30.80.0/24 --gateway 172.30.80.1 \
-  --label org.detroit-pulse.shared=true godseye_backend      # once, pinned (docs/host-firewall.md)
+# setup.sh creates godseye_backend pinned at 172.30.80.0/24 (docs/host-firewall.md) and stops if an
+# existing one has another subnet; Pulse's own networks are pinned in its compose file.
 cd ~/projects/godseye/detroit-pulse/deploy && ./setup.sh     # see Pulse's docs/godseye-integration.md
 docker-compose -p pulse up -d && docker-compose -p pulse --profile frontend up -d pulse-frontend
 ```

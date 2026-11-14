@@ -15,8 +15,11 @@
 #     100.100.100.100), no link-local, multicast or reserved space.
 #   * INPUT: no new connection to the host itself on ANY of its addresses (bridge gateways,
 #     LAN, tailnet, docker0), which DOCKER-USER cannot see.
-# Detroit Pulse's godseye_backend (PULSE_SUBNETS, internal) gets the same INPUT drop; inside
-# it only traffic between its own members (pulse-api, the tailscale sidecar) is allowed.
+# Detroit Pulse's networks (PULSE_SUBNETS: godseye_backend and Pulse's own pulse_internal,
+# pulse_egress and pulse_debug) get the same INPUT drop and the same egress drop list; each
+# subnet's members may reach each other, no other network gets a route into them, they get none
+# into the godseye subnets, and of the rest only the public internet is left (which only
+# pulse_egress and pulse_debug can route to).
 # DNS needs no exception: the compose file points the containers' DNS at public resolvers.
 #
 # Order matters. tailscaled inserts `-j ts-forward` at the top of FORWARD (it ACCEPTs
@@ -30,10 +33,15 @@ set -eu
 
 # edge, backend, gev-egress and build networks (deploy/docker-compose.yml, scripts/build-gev.sh)
 SUBNETS="${GODSEYE_SUBNETS:-172.30.77.0/24 172.30.78.0/24 172.30.79.0/24 172.30.76.0/24}"
-# Detroit Pulse's godseye_backend (internal): pulse-api and the tailscale sidecar, whose namespace
-# the gateway shares. Its members may reach each other and nothing else: no host (an internal
-# bridge still holds a host address), and the godseye subnets above get no route into it.
-PULSE_SUBNETS="${GODSEYE_PULSE_SUBNETS:-172.30.80.0/24}"
+# Detroit Pulse (detroit-pulse/deploy, subnets pinned there):
+#   172.30.80.0/24  godseye_backend (internal): pulse-api and the tailscale sidecar, whose
+#                   namespace the gateway shares
+#   172.30.81.0/24  pulse_internal (internal): postgis, redis, api, the workers
+#   172.30.82.0/24  pulse_egress: pulse-transcribe, pulse-extract (Anthropic, geocoders, Whisper)
+#   172.30.83.0/24  pulse_debug: the opt-in pulse-debug forwarder (127.0.0.1 ports)
+# Members of each may reach each other; no host (even an internal bridge holds a host address),
+# no LAN or tailnet, no route between them and the godseye subnets above in either direction.
+PULSE_SUBNETS="${GODSEYE_PULSE_SUBNETS:-172.30.80.0/24 172.30.81.0/24 172.30.82.0/24 172.30.83.0/24}"
 BLOCK="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4"
 # -w: wait for the xtables lock (dockerd and tailscaled take it too) instead of failing.
 IPT="${IPTABLES:-iptables -w 5}"
@@ -41,8 +49,10 @@ IPT="${IPTABLES:-iptables -w 5}"
 # The rules of each chain, one per line.
 egress_rules() {
   echo "-m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-  for s in $SUBNETS; do echo "-d $s -j RETURN"; done
+  # Pulse: its own members, and never the godseye subnets (whose RETURNs below are for them).
   for s in $PULSE_SUBNETS; do echo "-s $s -d $s -j RETURN"; done
+  for s in $PULSE_SUBNETS; do for g in $SUBNETS; do echo "-s $s -d $g -j DROP"; done; done
+  for s in $SUBNETS; do echo "-d $s -j RETURN"; done
   for b in $BLOCK; do echo "-d $b -j DROP"; done
   echo "-j RETURN"
 }

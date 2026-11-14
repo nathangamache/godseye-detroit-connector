@@ -17,7 +17,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:net';
+import { BlockList, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -52,7 +52,8 @@ function service(compose: string, name: string): string {
   return next > 0 ? rest.slice(0, next + 1) : rest;
 }
 
-describe('host firewall rules (DOCKER-USER + INPUT)', () => {
+// Every fake iptables call starts a node process, and a full check makes dozens of them.
+describe('host firewall rules (DOCKER-USER + INPUT)', { timeout: 120_000 }, () => {
   const script = path.join(REPO_ROOT, 'deploy', 'host-firewall', 'godseye-firewall.sh');
   const fake = path.join(REPO_ROOT, 'test', 'fixtures', 'fake-iptables.mjs');
 
@@ -75,8 +76,32 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
   const SUBNETS = ['172.30.77.0/24', '172.30.78.0/24', '172.30.79.0/24', '172.30.76.0/24'];
   /** Detroit Pulse's godseye_backend (pulse-api + the tailscale sidecar). */
   const PULSE = '172.30.80.0/24';
+  /** Pulse's own networks: pulse_internal, pulse_egress, pulse_debug (detroit-pulse/deploy). */
+  const PULSE_OWN = ['172.30.81.0/24', '172.30.82.0/24', '172.30.83.0/24'];
+  const PULSE_ALL = [PULSE, ...PULSE_OWN];
   /** Every source subnet that jumps into the godseye chains. */
-  const SOURCES = [...SUBNETS, PULSE];
+  const SOURCES = [...SUBNETS, ...PULSE_ALL];
+  /**
+   * What GODSEYE-EGRESS decides for a new connection from `src` to `dst`: the first rule whose
+   * -s/-d match (the conntrack rule never does), 'RETURN' (Docker's own rules then apply: the
+   * internet, or the godseye subnets with Docker's network isolation) or 'DROP'.
+   */
+  function verdict(rules: string[], src: string, dst: string): 'RETURN' | 'DROP' {
+    const within = (ip: string, cidr: string | undefined) => {
+      if (!cidr) return true;
+      const [net, bits] = cidr.split('/') as [string, string];
+      const bl = new BlockList();
+      bl.addSubnet(net, Number(bits));
+      return bl.check(ip);
+    };
+    for (const r of rules) {
+      if (r.includes('--ctstate')) continue;
+      const m = /^(?:-s (\S+) )?(?:-d (\S+) )?-j (RETURN|DROP)$/.exec(r);
+      expect(m, r).not.toBeNull();
+      if (within(src, m![1]) && within(dst, m![2])) return m![3] as 'RETURN' | 'DROP';
+    }
+    throw new Error('GODSEYE-EGRESS has no final rule');
+  }
   const dockerOnly = () =>
     JSON.stringify({
       FORWARD: { policy: 'DROP', rules: ['-j DOCKER-USER', '-j DOCKER-FORWARD'] },
@@ -139,14 +164,20 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     writeFileSync(state, dockerOnly());
     expect(run(state, 'apply').status).toBe(0);
     const applied = load(state);
-    // How many iptables calls one full check makes (nothing to fix)...
+    // How many iptables calls (and how long) one full check makes (nothing to fix)...
+    const t0 = Date.now();
     expect(run(state, 'ensure', { FAKE_IPT_TS_AT: '1000000' }).status).toBe(0);
+    const passSecs = Math.ceil((Date.now() - t0) / 1000);
     const perPass = counter(load(state), '__calls')!;
     const st = load(state);
     delete st.__calls;
     writeFileSync(state, JSON.stringify(st));
-    // ...so tailscaled can re-insert its jumps on the first call after it, while the watch runs.
-    const r = run(state, ['ensure', '3'], { ...noGaps, FAKE_IPT_TS_AT: String(perPass + 1) });
+    // ...so tailscaled can re-insert its jumps on the first call after it, while the watch runs
+    // (long enough for at least one more check after the first pass, with the fake's slow calls).
+    const r = run(state, ['ensure', String(passSecs + 3)], {
+      ...noGaps,
+      FAKE_IPT_TS_AT: String(perPass + 1),
+    });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stderr).toMatch(/top of FORWARD/);
     const e = load(state);
@@ -229,7 +260,7 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(run(state, 'apply').status).toBe(0);
     const a = load(state);
     expect(a.FORWARD!.rules[0]).toBe('-j DOCKER-USER'); // ahead of ts-forward again
-    for (const s of [...SUBNETS, '172.30.80.0/24']) {
+    for (const s of SOURCES) {
       expect(a['DOCKER-USER']!.rules).toContain(`-s ${s} -j GODSEYE-EGRESS`);
       expect(a.INPUT!.rules).toContain(`-s ${s} -j GODSEYE-HOST`);
     }
@@ -264,26 +295,108 @@ describe('host firewall rules (DOCKER-USER + INPUT)', () => {
     expect(r.INPUT!.rules).toEqual(['-j ts-input']);
   });
 
-  it("keeps Pulse's subnet to its own members: no host, and no route in from the godseye subnets", () => {
+  it("keeps Pulse's subnets to their own members: no host, and no route in from the godseye subnets", () => {
     const state = path.join(tmp(), 'ipt.json');
     writeFileSync(state, dockerOnly());
     expect(run(state, 'apply').status).toBe(0);
     const a = load(state);
-    // The internal bridge still holds a host address (172.30.80.1): INPUT drops it like the rest.
-    expect(a.INPUT!.rules).toContain(`-s ${PULSE} -j GODSEYE-HOST`);
-    expect(a['DOCKER-USER']!.rules).toContain(`-s ${PULSE} -j GODSEYE-EGRESS`);
     const eg = a['GODSEYE-EGRESS']!.rules;
-    // Inside the subnet (sidecar <-> pulse-api) only, ahead of the RFC 1918 drop...
-    expect(eg.indexOf(`-s ${PULSE} -d ${PULSE} -j RETURN`)).toBeGreaterThan(0);
-    expect(eg.indexOf(`-s ${PULSE} -d ${PULSE} -j RETURN`)).toBeLessThan(
-      eg.indexOf('-d 172.16.0.0/12 -j DROP'),
-    );
-    // ...and never as a destination for everyone (GEV, cloudflared, the build network).
-    expect(eg).not.toContain(`-d ${PULSE} -j RETURN`);
+    for (const p of PULSE_ALL) {
+      // Even an internal bridge holds a host address (172.30.80.1, ...): INPUT drops it too.
+      expect(a.INPUT!.rules).toContain(`-s ${p} -j GODSEYE-HOST`);
+      expect(a['DOCKER-USER']!.rules).toContain(`-s ${p} -j GODSEYE-EGRESS`);
+      // Inside the subnet (e.g. sidecar <-> pulse-api) only, ahead of the RFC 1918 drop...
+      expect(eg.indexOf(`-s ${p} -d ${p} -j RETURN`), p).toBeGreaterThan(0);
+      expect(eg.indexOf(`-s ${p} -d ${p} -j RETURN`), p).toBeLessThan(
+        eg.indexOf('-d 172.16.0.0/12 -j DROP'),
+      );
+      // ...and never as a destination for everyone (GEV, cloudflared, the build network).
+      expect(eg, p).not.toContain(`-d ${p} -j RETURN`);
+    }
     expect(run(state, 'remove').status).toBe(0);
     const r = load(state);
     expect(r.INPUT!.rules).toEqual([]);
     expect(r['DOCKER-USER']!.rules).toEqual(['-j RETURN']);
+  });
+
+  it("gives Pulse's own networks the internet only: no LAN, tailnet, godseye or other Pulse subnet", () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    expect(run(state, 'apply').status).toBe(0);
+    const a = load(state);
+    const eg = a['GODSEYE-EGRESS']!.rules;
+    const [internal, egress, debug] = ['172.30.81.5', '172.30.82.5', '172.30.83.5'];
+    const lanTailnetHost = [
+      '192.168.1.20', // LAN
+      '10.1.2.3',
+      '172.17.0.1', // docker0 (routed; INPUT covers the host's own addresses)
+      '100.100.100.100', // Tailscale's resolver
+      '100.101.102.103', // a tailnet peer
+      '169.254.169.254', // link-local metadata
+      '224.0.0.251', // multicast
+    ];
+    for (const src of [internal, egress, debug, '172.30.80.5']) {
+      for (const dst of lanTailnetHost)
+        expect(verdict(eg, src, dst), `${src} -> ${dst}`).toBe('DROP');
+      // The godseye networks: the gateway's public listener, GEV, gev-mcp, the build network.
+      for (const dst of ['172.30.77.20', '172.30.78.11', '172.30.79.11', '172.30.76.2'])
+        expect(verdict(eg, src, dst), `${src} -> ${dst}`).toBe('DROP');
+    }
+    // Members reach each other (pulse-api <-> postgis, the two workers on pulse_egress).
+    expect(verdict(eg, internal, '172.30.81.6')).toBe('RETURN');
+    expect(verdict(eg, egress, '172.30.82.6')).toBe('RETURN');
+    expect(verdict(eg, debug, '172.30.83.6')).toBe('RETURN');
+    expect(verdict(eg, '172.30.80.20', '172.30.80.5')).toBe('RETURN'); // sidecar -> pulse-api
+    // Not across Pulse's own subnets (routed through the host)...
+    expect(verdict(eg, egress, '172.30.81.6')).toBe('DROP');
+    expect(verdict(eg, debug, '172.30.82.6')).toBe('DROP');
+    expect(verdict(eg, internal, '172.30.80.5')).toBe('DROP');
+    // ...but the public internet stays open (pulse_egress: Anthropic, geocoders, Whisper).
+    for (const dst of ['1.1.1.1', '9.9.9.9', '203.0.113.7'])
+      expect(verdict(eg, egress, dst), dst).toBe('RETURN');
+    // The godseye subnets keep their own rules: each other (Docker's isolation still applies),
+    // the internet, and no way into any Pulse subnet.
+    expect(verdict(eg, '172.30.77.20', '172.30.78.11')).toBe('RETURN');
+    expect(verdict(eg, '172.30.79.11', '1.1.1.1')).toBe('RETURN');
+    expect(verdict(eg, '172.30.79.11', '192.168.1.20')).toBe('DROP');
+    for (const p of ['172.30.80.5', '172.30.81.5', '172.30.82.5', '172.30.83.5'])
+      for (const g of ['172.30.77.20', '172.30.78.11', '172.30.79.11', '172.30.76.2'])
+        expect(verdict(eg, g, p), `${g} -> ${p}`).toBe('DROP');
+    // Every source jumps in exactly once, ahead of Docker's own rules.
+    expect(a['DOCKER-USER']!.rules).toEqual([
+      ...SOURCES.map((s) => `-s ${s} -j GODSEYE-EGRESS`),
+      '-j RETURN',
+    ]);
+    expect(a.INPUT!.rules).toEqual(SOURCES.map((s) => `-s ${s} -j GODSEYE-HOST`));
+  });
+
+  it("an upgrade from the rules without Pulse's own networks adds them without a gap", () => {
+    const state = path.join(tmp(), 'ipt.json');
+    writeFileSync(state, dockerOnly());
+    // What the previous version installed (only godseye_backend among Pulse's subnets).
+    const old = run(state, 'apply', { GODSEYE_PULSE_SUBNETS: PULSE });
+    expect(old.status, old.stderr).toBe(0);
+    expect(load(state).INPUT!.rules).toHaveLength(SUBNETS.length + 1);
+    // The new script installed over it: the timer's `ensure` notices and applies again; the
+    // jumps that were already there never go missing.
+    const keep = {
+      FAKE_IPT_REQUIRE: JSON.stringify([
+        ['FORWARD', '-j DOCKER-USER'],
+        ...[...SUBNETS, PULSE].map((s) => ['INPUT', `-s ${s} -j GODSEYE-HOST`]),
+        ...[...SUBNETS, PULSE].map((s) => ['DOCKER-USER', `-s ${s} -j GODSEYE-EGRESS`]),
+      ]),
+    };
+    const r = run(state, 'ensure', keep);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/applying them again/);
+    const up = load(state);
+    expect(counter(up, '__gaps')).toBeUndefined();
+    // Same as a fresh install of the new rules.
+    const fresh = path.join(tmp(), 'ipt.json');
+    writeFileSync(fresh, dockerOnly());
+    expect(run(fresh, 'apply').status).toBe(0);
+    expect(up).toEqual(load(fresh));
+    for (const p of PULSE_OWN) expect(up.INPUT!.rules).toContain(`-s ${p} -j GODSEYE-HOST`);
   });
 
   it('refuses to run before Docker created DOCKER-USER', () => {

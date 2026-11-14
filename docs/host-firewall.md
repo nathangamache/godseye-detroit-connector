@@ -17,7 +17,8 @@ without root, so this page gives the exact rules and a script and unit that appl
 
 ## What the rules do
 
-The compose networks have pinned subnets (`deploy/docker-compose.yml`):
+The compose networks have pinned subnets (`deploy/docker-compose.yml`, and Detroit Pulse's
+`detroit-pulse/deploy/docker-compose.yml` and `setup.sh`):
 
 | Network | Subnet | Members | Egress |
 |---|---|---|---|
@@ -26,10 +27,13 @@ The compose networks have pinned subnets (`deploy/docker-compose.yml`):
 | `godseye-gev-egress` | `172.30.79.0/24` | gev `.11` | internet (GEV's data providers) |
 | `godseye-build` | `172.30.76.0/24` | `scripts/build-gev.sh` | internet (npm registry) |
 | `godseye_backend` (Detroit Pulse) | `172.30.80.0/24` | tailscale + gateway `.20`, `pulse-api` | none (`--internal`); members only reach each other |
+| `pulse_internal` (Detroit Pulse) | `172.30.81.0/24` | pulse-postgis, pulse-redis, pulse-api, pulse-transcribe, pulse-extract (pulse-debug) | none (`internal: true`); members only reach each other |
+| `pulse_egress` (Detroit Pulse) | `172.30.82.0/24` | pulse-transcribe, pulse-extract | internet only (Anthropic, Census/Photon geocoders, the first Whisper download) |
+| `pulse_debug` (Detroit Pulse) | `172.30.83.0/24` | pulse-debug (profile `debug`, ports on `127.0.0.1`) | internet only (unused) |
 
 `godseye_backend` belongs to Detroit Pulse (`detroit-pulse/deploy`) and is `external` in the
-connector's compose file, so its subnet is pinned where it is created. Create it **before**
-Pulse's `setup.sh` (which keeps an existing network):
+connector's compose file, so its subnet is pinned where it is created. Pulse's `setup.sh`
+creates it with that subnet (and stops with an error if an existing one has another); by hand:
 
 ```sh
 docker network create --driver bridge --internal --subnet 172.30.80.0/24 --gateway 172.30.80.1 \
@@ -37,21 +41,31 @@ docker network create --driver bridge --internal --subnet 172.30.80.0/24 --gatew
 docker network inspect godseye_backend --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'   # 172.30.80.0/24
 ```
 
+Pulse's own networks (`pulse_internal`, `pulse_egress`, `pulse_debug`) are pinned in Pulse's
+compose file; one created before that keeps its old subnet until `docker-compose -p pulse down`
+and `up -d` recreate it (Pulse's `setup.sh` warns about it).
+
 The sidecar's fixed address there (`172.30.80.20`) makes `docker-compose up` fail on a network
 created without that subnet, so the rules below can't silently miss it. An internal bridge still
 gives the host an address on it (`172.30.80.1`): without the `INPUT` rule, the gateway's
 namespace (through the sidecar) and `pulse-api` could open connections to every host service
-listening on `0.0.0.0` that way.
+listening on `0.0.0.0` that way. The same holds for `pulse_internal` (`172.30.81.1`), and
+`pulse_egress` is routed through the host, so without the rules `pulse-transcribe` and
+`pulse-extract` could also reach the LAN and the tailnet.
 
 For traffic **from** any of those subnets, `deploy/host-firewall/godseye-firewall.sh`:
 
 1. `DOCKER-USER` (routed traffic, evaluated before Docker's own rules) jumps to
    `GODSEYE-EGRESS`, which
-   * returns replies (`ESTABLISHED,RELATED`) and traffic to the godseye subnets themselves
-     (Docker's network isolation still applies between them);
-   * returns traffic **within** Pulse's `godseye_backend` (`-s 172.30.80.0/24 -d 172.30.80.0/24`:
-     the sidecar and `pulse-api`) but not traffic into it from the godseye subnets, which hits
-     the RFC 1918 drop: only the sidecar's namespace, which sits on that network, reaches Pulse;
+   * returns replies (`ESTABLISHED,RELATED`);
+   * returns traffic **within** each Pulse subnet (`-s 172.30.80.0/24 -d 172.30.80.0/24`: the
+     sidecar and `pulse-api`; likewise `172.30.81.0/24` to `172.30.83.0/24`) but not traffic into
+     them from anywhere else, which hits the RFC 1918 drop: only the sidecar's namespace, which
+     sits on `godseye_backend`, reaches Pulse;
+   * **drops** traffic from the Pulse subnets to the godseye subnets (`-s P -d G -j DROP`), so
+     no Pulse container gets near the gateway's public listener, GEV or gev-mcp;
+   * returns traffic to the godseye subnets themselves (Docker's network isolation still
+     applies between them);
    * **drops** `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918: the LAN and other
      docker networks), `100.64.0.0/10` (CGNAT: the tailnet, including `100.100.100.100`),
      `169.254.0.0/16`, `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4`, `240.0.0.0/4`;
@@ -86,16 +100,17 @@ networks; if you ever enable it, add the equivalent `ip6tables` rules (drop `fc0
 ### The exact rules
 
 `godseye-firewall.sh apply` is equivalent to (for each `$S` in the four godseye subnets and
-Pulse's `172.30.80.0/24`; override with `GODSEYE_SUBNETS` / `GODSEYE_PULSE_SUBNETS`):
+Pulse's four, `172.30.80.0/24` to `172.30.83.0/24`; override with `GODSEYE_SUBNETS` /
+`GODSEYE_PULSE_SUBNETS`):
 
 ```sh
+G="172.30.77.0/24 172.30.78.0/24 172.30.79.0/24 172.30.76.0/24"
+P="172.30.80.0/24 172.30.81.0/24 172.30.82.0/24 172.30.83.0/24"
 iptables -N GODSEYE-EGRESS
 iptables -A GODSEYE-EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A GODSEYE-EGRESS -d 172.30.77.0/24 -j RETURN
-iptables -A GODSEYE-EGRESS -d 172.30.78.0/24 -j RETURN
-iptables -A GODSEYE-EGRESS -d 172.30.79.0/24 -j RETURN
-iptables -A GODSEYE-EGRESS -d 172.30.76.0/24 -j RETURN
-iptables -A GODSEYE-EGRESS -s 172.30.80.0/24 -d 172.30.80.0/24 -j RETURN
+for p in $P; do iptables -A GODSEYE-EGRESS -s "$p" -d "$p" -j RETURN; done
+for p in $P; do for g in $G; do iptables -A GODSEYE-EGRESS -s "$p" -d "$g" -j DROP; done; done
+for g in $G; do iptables -A GODSEYE-EGRESS -d "$g" -j RETURN; done
 for b in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 \
          192.0.0.0/24 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4; do
   iptables -A GODSEYE-EGRESS -d "$b" -j DROP
@@ -116,7 +131,10 @@ The script is idempotent (re-running rebuilds the two chains and never duplicate
 is out of place (then it moves it), and `remove` takes everything out again. All iptables
 calls wait for the xtables lock (`-w 5`), which dockerd and tailscaled also take.
 `test/deploy.test.ts` runs it against a fake `iptables` to check exactly this, including a
-simulated `tailscaled` restart and that no reorder ever leaves a chain without our jump.
+simulated `tailscaled` restart, that no reorder ever leaves a chain without our jump, an
+upgrade from the rules without Pulse's own networks, and what `GODSEYE-EGRESS` decides for
+traffic from each Pulse subnet (internet yes; host, LAN, tailnet, godseye subnets and the other
+Pulse subnets no).
 
 ## Install and persist
 
@@ -147,6 +165,18 @@ sudo /usr/local/sbin/godseye-firewall.sh show
 
 Install the copies under `/usr/local/sbin` and `/etc/systemd/system` (root-owned) rather than
 running the script from the repo, so nobody who can write the repo can change what root runs.
+
+**Updating the script** (for example when subnets are added): install the new copy and apply it
+at once. `reload` runs `apply`, which rebuilds both chains and adds any new jumps (each inserted
+before an old copy is deleted); without it, the check timer notices the changed rules within
+about 30 s and applies them itself.
+
+```sh
+cd ~/projects/godseye/godseye-detroit-connector
+sudo install -o root -g root -m 0755 deploy/host-firewall/godseye-firewall.sh /usr/local/sbin/ \
+  && sudo systemctl reload godseye-firewall.service \
+  && sudo /usr/local/sbin/godseye-firewall.sh show
+```
 
 After a host reboot or a Docker restart, `systemctl status godseye-firewall` should be
 `active (exited)` and `systemctl list-timers godseye-firewall-check.timer` should show the next
@@ -195,8 +225,26 @@ docker exec godseye-gev-mcp node /app/dist/scripts/egress-probe.js \
   --blocked 1.1.1.1:443 172.30.78.1:22 192.168.1.20:22 172.30.77.20:7700 \
   --open gev:7701
 
+# Detroit Pulse (its image has Python, not this probe). "blocked" = dropped or no route;
+# "refused" for a blocked target means the packet got through to a closed port.
+pprobe() { c=$1; shift; docker exec "$c" python -c '
+import socket, sys
+for t in sys.argv[1:]:
+    want, h, p = t.split(":")
+    try: socket.create_connection((h, int(p)), timeout=4).close(); got = "open"
+    except (socket.timeout, OSError) as e: got = "refused" if isinstance(e, ConnectionRefusedError) else "blocked"
+    print("PASS" if got == want else "FAIL", want, h, p, got)' "$@"; }
+# pulse-api (pulse_internal + godseye_backend): the host's address on either bridge, the LAN.
+pprobe pulse-api blocked:172.30.81.1:22 blocked:172.30.80.1:22 blocked:192.168.1.20:22
+# The workers on pulse_egress: internet yes; host, LAN, router, tailnet, godseye subnets no.
+pprobe pulse-transcribe blocked:172.30.82.1:22 blocked:172.30.81.1:22 blocked:192.168.1.20:22 \
+  blocked:192.168.1.1:53 blocked:100.100.100.100:53 blocked:<peer-100.x>:22 \
+  blocked:172.30.77.20:7700 open:1.1.1.1:443
+pprobe pulse-extract blocked:172.30.82.1:22 blocked:192.168.1.20:22 open:api.anthropic.com:443
+
 # No tailnet search domain or LAN resolver inside the containers.
 docker exec godseye-gev cat /etc/resolv.conf     # nameserver 127.0.0.11, no "search ...ts.net"
+docker exec pulse-api cat /etc/resolv.conf       # the same (Pulse sets dns and dns_search too)
 ```
 
 Also check the host itself: `sudo iptables -S FORWARD | sed -n 2p` must print

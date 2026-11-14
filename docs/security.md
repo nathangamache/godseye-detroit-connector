@@ -153,9 +153,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   gev-mcp, GEV can't reach the gateway's public listener, gev-mcp can reach only GEV. GEV accepts
   only `Host: gev`. Detroit Pulse's `godseye_backend` (external, internal, `172.30.80.0/24`)
   holds only the sidecar and `pulse-api`, so Pulse is reachable from the gateway's namespace and
-  from nothing else in this stack; the gateway mounts Pulse's UI volume read-only.
+  from nothing else in this stack; the gateway mounts Pulse's UI volume read-only. Pulse's own
+  networks are pinned too (`pulse_internal` `172.30.81.0/24`, `pulse_egress` `172.30.82.0/24`,
+  `pulse_debug` `172.30.83.0/24`) and its containers use public DNS without a search domain.
 * **Host firewall** (`docs/host-firewall.md`, needs root): `DOCKER-USER` and `INPUT` rules drop
-  traffic from the godseye subnets (and Pulse's `godseye_backend`) to RFC 1918, the CGNAT
+  traffic from the godseye subnets (and Pulse's four: `godseye_backend` and its own) to RFC 1918, the CGNAT
   tailnet range (`100.64.0.0/10`), and every address of the host itself, so a compromised container can't reach host services, the
   LAN or the tailnet (as the host's node). `tailscaled` puts its own `ts-forward` jump (which
   accepts everything out of `tailscale0`) back above `DOCKER-USER` whenever it starts, so
@@ -411,8 +413,9 @@ Tailnet (`docs/tailscale-setup.md`)
 Host firewall (`docs/host-firewall.md`, sudo)
 
 - [ ] `godseye-firewall.service`, `godseye-firewall-check.service` and `godseye-firewall-check.timer` installed from root-owned copies and enabled; the first is `active (exited)` and `systemctl list-timers godseye-firewall-check.timer` shows a next run; `sudo iptables -S FORWARD | sed -n 2p` is `-A FORWARD -j DOCKER-USER`.
-- [ ] `sudo systemctl restart tailscaled`, wait 15 s: `sudo iptables -S FORWARD | sed -n 2p` is still `-A FORWARD -j DOCKER-USER`, and `sudo iptables -S INPUT` lists the five `GODSEYE-HOST` jumps (the four godseye subnets and Pulse's `172.30.80.0/24`) before `-j ts-input`.
+- [ ] `sudo systemctl restart tailscaled`, wait 15 s: `sudo iptables -S FORWARD | sed -n 2p` is still `-A FORWARD -j DOCKER-USER`, and `sudo iptables -S INPUT` lists the eight `GODSEYE-HOST` jumps (the four godseye subnets and Pulse's `172.30.80.0/24` to `172.30.83.0/24`) before `-j ts-input`.
 - [ ] The `egress-probe.js` runs from that page print only `PASS` (gev, gateway, gev-mcp, and the two Pulse checks): no host, LAN, tailnet or `100.100.100.100`; internet yes (except gev-mcp); `pulse-api:7710` only from the gateway.
+- [ ] The `pprobe` runs for `pulse-api`, `pulse-transcribe` and `pulse-extract` print only `PASS`: no host address on any Pulse bridge, no LAN, router, tailnet or godseye subnet; internet only from the two workers. `docker network inspect pulse_internal pulse_egress pulse_debug` shows `172.30.81.0/24`, `172.30.82.0/24`, `172.30.83.0/24`.
 - [ ] `docker exec godseye-gev cat /etc/resolv.conf` shows no `search …ts.net` line.
 
 Stack
