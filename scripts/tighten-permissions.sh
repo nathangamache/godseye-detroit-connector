@@ -32,11 +32,14 @@ done
 chmod 644 "$repo/deploy/tailscale/serve.json"
 
 if [ -d "$clone" ]; then
-  chmod -R u+rwX,go-w,go+rX "$clone"
+  # (chmod -R does not follow symlinks below its arguments.) No setuid/setgid files either:
+  # an earlier, unconfined build could have left one that runs as you for anyone who can
+  # reach the clone.
+  chmod -R u+rwX,go-w,go+rX,ug-s "$clone"
   # A mode-600 .env inside the clone would be unreadable by the GEV container anyway; keep
-  # keys in deploy/secrets/gev.env instead.
+  # keys in deploy/secrets/gev.env instead. Never chmod through a symlink planted here.
   for f in "$clone/.env" "$clone"/.env.*; do
-    if [ -f "$f" ] && [ "$(basename "$f")" != ".env.example" ]; then chmod 600 "$f"; fi
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(basename "$f")" != ".env.example" ]; then chmod 600 "$f"; fi
   done
 fi
 

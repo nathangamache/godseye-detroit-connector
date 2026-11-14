@@ -13,13 +13,21 @@ reach). Use the containerized build from the connector repo:
 ```sh
 cd ~/projects/godseye/godseye-detroit-connector
 BUILD_CPUSET=24-31 scripts/build-gev.sh        # npm ci --ignore-scripts, build, build:panel
-git -C ../gods-eye-view status --short         # should print nothing
+# then run the hardened `git ... status --short` it prints last: it should print nothing
 ```
 
-It runs in the pinned `node:24` image as your uid with no capabilities, a read-only root, only
-the clone mounted and only `CESIUM_ION_TOKEN` passed (from your environment, or that one line of
-`deploy/secrets/gev.env`). Measured on the deployment host (2026-11-14): about 80 s in total,
-peak RSS ~1.9 GB.
+It runs in the pinned `node:24` image as your uid with no capabilities, a read-only root and
+only `CESIUM_ION_TOKEN` passed (from your environment, or that one line of
+`deploy/secrets/gev.env`). The container gets a throwaway **copy** of the clone's working tree
+without `.git`, `.env*` files, logs or caches, so build code can't plant a `core.fsmonitor`,
+hook or filter that a later `git` command would run on the host. Only `dist/` and
+`node_modules/` come back, and only as real directories (a symlink in their place is refused);
+their modes are set without following links (readable by uid 10001, no setuid/setgid bits).
+If an older version of this script built the clone, it warns about suspicious `.git/config`
+keys or hooks; inspect or re-clone before running other git commands there, and use
+`git -c core.fsmonitor= -c core.hooksPath=/dev/null --no-pager ...` meanwhile. Measured on the
+deployment host (2026-11-14) with the earlier in-place build: about 80 s in total, peak RSS
+~1.9 GB (the copy adds a few seconds).
 
 ## Run (dev mode)
 
