@@ -6,6 +6,9 @@ import { createInterface } from 'node:readline';
 import sharp from 'sharp';
 
 const apiBase = process.argv[process.argv.indexOf('--api-base') + 1] || 'http://127.0.0.1:7701';
+// Like the real wrapper: --allow limits the catalog (absent: everything, for supervisor tests).
+const allowAt = process.argv.indexOf('--allow');
+const allow = allowAt > 0 ? new Set(process.argv[allowAt + 1].split(',')) : null;
 const AREA = {
   type: 'object',
   properties: {
@@ -48,7 +51,9 @@ const TOOLS = [
   tool('crash_child', 'Test-only: exits the process.', {}),
   tool('slow_tool', 'Test-only: sleeps.', { ms: { type: 'integer' } }),
   tool('brand_new_tool', 'Not on any allowlist.', {}),
+  tool('env_keys', 'Test-only: the environment variable names this process received.', {}),
 ];
+const VISIBLE = allow ? TOOLS.filter((t) => allow.has(t.name)) : TOOLS;
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -128,6 +133,8 @@ async function call(name, args) {
     case 'slow_tool':
       await sleep(args.ms ?? 1000);
       return result('slow done', {});
+    case 'env_keys':
+      return result('env', { keys: Object.keys(process.env).sort(), argv: process.argv.slice(2) });
     default:
       return result(`${name} ok`, { tool: name, args });
   }
@@ -152,10 +159,10 @@ rl.on('line', async (line) => {
       } });
     }
     if (msg.method === 'ping') return send({ jsonrpc: '2.0', id: msg.id, result: {} });
-    if (msg.method === 'tools/list') return send({ jsonrpc: '2.0', id: msg.id, result: { tools: TOOLS } });
+    if (msg.method === 'tools/list') return send({ jsonrpc: '2.0', id: msg.id, result: { tools: VISIBLE } });
     if (msg.method === 'tools/call') {
       const name = msg.params?.name;
-      if (!TOOLS.some((t) => t.name === name)) {
+      if (!VISIBLE.some((t) => t.name === name)) {
         return send({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: `Unknown tool: ${name}` } });
       }
       const res = await call(name, msg.params?.arguments ?? {});

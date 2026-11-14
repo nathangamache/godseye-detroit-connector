@@ -43,6 +43,8 @@ export class ToolRunner {
   async run(name: string, args: unknown, ctx: ToolContext): Promise<McpToolResult> {
     const t0 = Date.now();
     const def = this.registry.get(name);
+    const denied = def ? null : this.registry.policy.deniedReason(name);
+    if (denied) return ToolRunner.error(`Tool "${name}" is not available: ${denied}.`);
     if (!def) {
       const hits = this.registry.find(name.replace(/_/g, ' '), 3).map((h) => h.tool.name);
       const gevNote = this.registry.hasGev() ? '' : " God's Eye View tools are offline right now.";

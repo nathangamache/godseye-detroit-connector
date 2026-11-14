@@ -13,8 +13,12 @@
 //    therefore cannot be used even if a caller learns the tool exists; the
 //    gateway never exposes it anyway.
 //  * Reads no environment except GEV_ROOT (where the GEV clone lives).
+//  * --allow <names> (required) builds the catalog from those core tools only. The gateway
+//    passes the tools its policy allows, so a composite tool can never call a denied one
+//    inside GEV (show_in_gods_eye_view following an aircraft would otherwise run
+//    find_aircraft, i.e. OpenSky, with ALLOW_OPENSKY_TOOLS=false).
 //
-// Usage: GEV_ROOT=/abs/path/to/gods-eye-view node stdio-all-surfaces.mjs --api-base http://127.0.0.1:7701
+// Usage: GEV_ROOT=/abs/path/to/gods-eye-view node stdio-all-surfaces.mjs --api-base http://127.0.0.1:7701 --allow get_weather,find_cctv_cameras
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -31,9 +35,22 @@ const { createMcpServer } = await mod('src/tools/mcp/index.js');
 const { createLocalToolServices, DEFAULT_API_BASE } = await mod('server/mcp/services.js');
 const { serveStdio, parseArgs } = await mod('server/mcp/stdio.js');
 
+const argv = process.argv.slice(2);
+const allowAt = argv.indexOf('--allow');
+if (allowAt < 0 || !argv[allowAt + 1]) {
+  console.error('[gev-wrapper] --allow <comma-separated tool names> is required (fail closed)');
+  process.exit(2);
+}
+const allow = new Set(
+  argv[allowAt + 1]
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => /^[a-z0-9_]{1,64}$/.test(s)),
+);
+argv.splice(allowAt, 2);
 let options;
 try {
-  options = parseArgs(process.argv.slice(2));
+  options = parseArgs(argv);
 } catch (error) {
   console.error(`[gev-wrapper] ${error.message}`);
   process.exit(2);
@@ -43,9 +60,10 @@ console.error(`[gev-wrapper] God's Eye View MCP server (all surfaces) reading ${
 
 const panelKey = `unused-${randomBytes(24).toString('hex')}`;
 const catalog = composeCatalog({
-  tools: coreTools,
+  tools: coreTools.filter((tool) => allow.has(tool.name)),
   services: createLocalToolServices({ apiBase, panelKey }),
 });
+console.error(`[gev-wrapper] ${catalog.list().length} of ${coreTools.length} tools allowed`);
 const overrides = Object.fromEntries(catalog.list().map((tool) => [tool.name, { mcp: true }]));
 const { version } = JSON.parse(readFileSync(`${root}/package.json`, 'utf8'));
 const server = createMcpServer({

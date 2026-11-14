@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { REPO_ROOT } from '../src/config.js';
+import { REPO_ROOT, loadConfig } from '../src/config.js';
+import { ToolPolicy } from '../src/tools/policy.js';
 import { GevChild, childSpawnSpec } from '../src/gev/child.js';
 import { nullLogger } from '../src/log.js';
 import { HAVE_REAL_GEV, MOCK_GEV, REAL_GEV_ROOT, waitFor } from './helpers.js';
@@ -71,17 +72,37 @@ describe('GEV child supervisor', () => {
     await expect(child.callTool('nope', {}, { timeoutMs: 5000 })).rejects.toThrow();
   });
 
-  it.runIf(HAVE_REAL_GEV)('real wrapper lists all 40 GEV tools', async () => {
+  it.runIf(HAVE_REAL_GEV)(
+    'real wrapper refuses to start without --allow (fail closed)',
+    async () => {
+      const spec = childSpawnSpec({
+        gevRoot: REAL_GEV_ROOT,
+        gevUrl: 'http://127.0.0.1:7701',
+        wrapper: path.join(REPO_ROOT, 'gev', 'stdio-all-surfaces.mjs'),
+      });
+      child = new GevChild({ ...spec, logger: nullLogger, minBackoffMs: 10_000 });
+      await child.start();
+      expect(child.isReady()).toBe(false);
+      expect(child.tools).toHaveLength(0);
+    },
+  );
+
+  it.runIf(HAVE_REAL_GEV)('real wrapper lists only the tools the policy allows', async () => {
+    const policy = new ToolPolicy(loadConfig({}));
+    const allow = policy.allowedGevTools();
     const spec = childSpawnSpec({
       gevRoot: REAL_GEV_ROOT,
       gevUrl: 'http://127.0.0.1:7701',
       wrapper: path.join(REPO_ROOT, 'gev', 'stdio-all-surfaces.mjs'),
+      allow,
     });
     child = new GevChild({ ...spec, logger: nullLogger });
     await child.start();
-    expect(child.tools).toHaveLength(40);
-    expect(child.tools.map((t) => t.name)).toEqual(
-      expect.arrayContaining(['get_weather', 'plan_route', 'panel_request']),
-    );
+    const names = child.tools.map((t) => t.name);
+    expect(names.length).toBeGreaterThan(20);
+    expect(names.every((n) => allow.includes(n))).toBe(true);
+    expect(names).toEqual(expect.arrayContaining(['get_weather', 'show_in_gods_eye_view']));
+    for (const denied of ['panel_request', 'find_aircraft', 'aircraft_in_area', 'search_places'])
+      expect(names).not.toContain(denied);
   });
 });

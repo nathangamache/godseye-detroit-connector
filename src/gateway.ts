@@ -8,9 +8,9 @@ import type { Express } from 'express';
 import { createPrivateApp, createPublicApp, createUiApp, hardenServer } from './app.js';
 import { Audit } from './audit.js';
 import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
-import type { Config } from './config.js';
+import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
-import { GevChild, childSpawnSpec } from './gev/child.js';
+import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
 import { makeGevCaller } from './gev/tools.js';
 import { LocationStore } from './location/store.js';
 import { createLogger, type Logger } from './log.js';
@@ -172,17 +172,29 @@ export async function startGateway(
   const core = buildCore(config, overrides);
   const { logger } = core;
 
-  if (config.GEV_MCP_ENABLED && overrides.gevChild !== false) {
-    const spec =
-      overrides.gevChild ??
-      childSpawnSpec({
-        gevRoot: config.GEV_ROOT,
-        gevUrl: config.GEV_URL,
-        wrapper: config.GEV_WRAPPER,
-        command: config.GEV_CHILD_COMMAND,
-        extraArgs: config.GEV_CHILD_ARGS,
-      });
-    const child = new GevChild({ ...spec, logger: logger.child({ component: 'gev' }) });
+  // The child only ever gets the tools the policy allows (it builds its catalog from them),
+  // so a composite GEV tool can't call a denied one internally.
+  const allow = core.registry.policy.allowedGevTools();
+  if (config.GEV_MCP_ENABLED && overrides.gevChild !== false && allow.length) {
+    const relay = config.GEV_CHILD_URL ? parseRelayUrl(config.GEV_CHILD_URL) : null;
+    let opts: Omit<GevChildOptions, 'logger'>;
+    if (relay && !overrides.gevChild) opts = { connect: { ...relay, allow } };
+    else {
+      const spec =
+        overrides.gevChild ??
+        childSpawnSpec({
+          gevRoot: config.GEV_ROOT,
+          gevUrl: config.GEV_URL,
+          wrapper: config.GEV_WRAPPER,
+          command: config.GEV_CHILD_COMMAND,
+          extraArgs: config.GEV_CHILD_ARGS,
+        });
+      const args = spec.args.includes('--allow')
+        ? spec.args
+        : [...spec.args, '--allow', allow.join(',')];
+      opts = { ...spec, args };
+    }
+    const child = new GevChild({ ...opts, logger: logger.child({ component: 'gev' }) });
     child.on('catalog', (tools) =>
       core.registry.setGevTools(tools, makeGevCaller(child), config.TOOL_TIMEOUT_MS),
     );

@@ -232,7 +232,10 @@ describe('schema validation', () => {
     ).toMatch(/Google/);
     expect(
       (await runner.run('panel_request', { key: 'x' }, { signal: sig })).content[0]!.text,
-    ).toMatch(/Unknown tool/);
+    ).toMatch(/never exposed/);
+    expect((await runner.run('no_such_tool', {}, { signal: sig })).content[0]!.text).toMatch(
+      /Unknown tool/,
+    );
     expect(
       (await runner.run('get_weather', { location: { place: 'Detroit' } }, { signal: sig }))
         .content[0]!.text,

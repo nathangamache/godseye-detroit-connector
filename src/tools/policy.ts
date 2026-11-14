@@ -8,6 +8,9 @@
  *  4. TOOL_DENYLIST from config.
  *  5. GEV tools must be on GEV_TOOL_ALLOWLIST (deny by default, so a tool that
  *     appears after an upstream pull stays hidden until it is vetted).
+ * The GEV child is started with only the allowed tools (allowedGevTools), so composite GEV
+ * tools can't reach a denied one internally; argument rules (checkArguments) add a second
+ * layer, e.g. no aircraft "follow" while OpenSky is off.
  */
 import type { Config, RateLimitSpec } from '../config.js';
 import { RateLimiter } from '../util/ratelimit.js';
@@ -82,6 +85,30 @@ export class ToolPolicy {
   }
 
   /**
+   * Why a tool name is explicitly denied (never exposed, licensing, a switch or the deny
+   * list), or null. Used to explain a refusal for a tool the child no longer even lists.
+   */
+  deniedReason(name: string): string | null {
+    const explicit =
+      NEVER_TOOLS.has(name) ||
+      GOOGLE_TOOLS.has(name) ||
+      METERED_TOOLS.has(name) ||
+      OPENSKY_TOOLS.has(name) ||
+      ALPR_TOOLS.has(name) ||
+      this.config.TOOL_DENYLIST.includes(name);
+    if (!explicit) return null;
+    const v = this.evaluate({ name, source: 'gev' });
+    return v.allowed ? null : v.reason;
+  }
+
+  /** The GEV tools this policy lets through: the child is started with exactly these. */
+  allowedGevTools(): string[] {
+    return this.config.GEV_TOOL_ALLOWLIST.filter(
+      (name) => this.evaluate({ name, source: 'gev' }).allowed,
+    );
+  }
+
+  /**
    * Argument rules that apply across tools. Returns an error message, or null.
    * Place-name lookups go through Nominatim inside GEV; without a configured
    * geocoder they fail with an opaque error, so reject them with guidance.
@@ -91,6 +118,12 @@ export class ToolPolicy {
     args: Record<string, unknown>,
   ): string | null {
     if (tool.source !== 'gev') return null;
+    if (!this.config.ALLOW_OPENSKY_TOOLS && followsAircraft(args)) {
+      return (
+        'Following an aircraft uses OpenSky Network data, which this deployment has turned off ' +
+        '(ALLOW_OPENSKY_TOOLS=false). Give a camera (lat/lon) or an area without "follow".'
+      );
+    }
     if (hasPlaceArgument(args) && !this.config.GEV_PLACE_NAMES) {
       return (
         'Place names are not supported by this deployment (no geocoder is configured). ' +
@@ -131,6 +164,26 @@ export function hasPlaceArgument(value: unknown, depth = 0): boolean {
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     if (k === 'place' && typeof v === 'string' && v.trim()) return true;
     if (hasPlaceArgument(v, depth + 1)) return true;
+  }
+  return false;
+}
+
+/** Aircraft kinds GEV can follow; following one makes GEV call find_aircraft (OpenSky). */
+export const AIRCRAFT_FOLLOW_KINDS = new Set(['aircraft', 'military_aircraft']);
+
+/** True if any `follow` object (e.g. follow or view.follow) names an aircraft kind. */
+export function followsAircraft(value: unknown, depth = 0): boolean {
+  if (depth > 5 || !value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((v) => followsAircraft(v, depth + 1));
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      k === 'follow' &&
+      v &&
+      typeof v === 'object' &&
+      AIRCRAFT_FOLLOW_KINDS.has(String((v as { kind?: unknown }).kind ?? '').toLowerCase())
+    )
+      return true;
+    if (followsAircraft(v, depth + 1)) return true;
   }
   return false;
 }

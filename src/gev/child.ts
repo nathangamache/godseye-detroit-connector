@@ -1,17 +1,23 @@
 /**
- * Supervises the GEV stdio MCP child (gev/stdio-all-surfaces.mjs) through the
- * MCP v2 client. Restarts it with exponential backoff when it dies and
- * re-indexes the tool catalog after every (re)start.
+ * Supervises the GEV MCP child (gev/stdio-all-surfaces.mjs) through the MCP v2
+ * client. Restarts it with exponential backoff when it dies and re-indexes the
+ * tool catalog after every (re)start.
  *
- * The child gets an explicit, minimal environment: StdioClientTransport would
- * otherwise pass only HOME/PATH/etc., and the gateway's own secrets must never
- * reach it.
+ * Two modes:
+ *  - spawn (dev/test): a local child over stdio, with an explicit minimal
+ *    environment (StdioClientTransport would otherwise pass HOME/PATH/etc., and
+ *    the gateway's own secrets must never reach it).
+ *  - connect (production, GEV_CHILD_URL=tcp://gev-mcp:7704): the child runs in
+ *    its own container behind src/gev/relay.ts, so upstream GEV code never shares
+ *    the gateway's uid, network namespace (private listener) or /data.
+ * Either way the child gets `--allow` with the tools the gateway's policy allows.
  */
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { Logger } from '../log.js';
+import { SocketClientTransport } from './socket-transport.js';
 
 export interface UpstreamTool {
   name: string;
@@ -36,10 +42,13 @@ export interface UpstreamResult {
 }
 
 export interface GevChildOptions {
-  command: string;
-  args: string[];
-  cwd: string;
-  env: Record<string, string>;
+  /** spawn mode */
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  /** connect mode: the GEV relay in its own container */
+  connect?: { host: string; port: number; allow: string[]; localAddress?: string };
   logger: Logger;
   /** Backoff bounds in ms. */
   minBackoffMs?: number;
@@ -50,7 +59,7 @@ export type ChildState = 'stopped' | 'starting' | 'ready' | 'backoff';
 
 export class GevChild extends EventEmitter {
   private client?: Client;
-  private transport?: StdioClientTransport;
+  private transport?: StdioClientTransport | SocketClientTransport;
   private stopping = false;
   private backoffMs: number;
   private restartTimer?: NodeJS.Timeout;
@@ -73,21 +82,25 @@ export class GevChild extends EventEmitter {
   private async spawn(): Promise<void> {
     if (this.stopping) return;
     this.state = 'starting';
-    const transport = new StdioClientTransport({
-      command: this.opts.command,
-      args: this.opts.args,
-      cwd: this.opts.cwd,
-      env: this.opts.env,
-      stderr: 'pipe',
-    });
+    const transport = this.opts.connect
+      ? new SocketClientTransport(this.opts.connect)
+      : new StdioClientTransport({
+          command: this.opts.command!,
+          args: this.opts.args,
+          cwd: this.opts.cwd,
+          env: this.opts.env,
+          stderr: 'pipe',
+        });
     const client = new Client({ name: 'godseye-detroit-connector', version: '0.1.0' });
     this.transport = transport;
     this.client = client;
-    transport.stderr?.on('data', (chunk: Buffer) => {
-      for (const line of chunk.toString('utf8').split('\n')) {
-        if (line.trim()) this.opts.logger.debug('gev_child_stderr', { line: line.slice(0, 300) });
-      }
-    });
+    if (transport instanceof StdioClientTransport) {
+      transport.stderr?.on('data', (chunk: Buffer) => {
+        for (const line of chunk.toString('utf8').split('\n')) {
+          if (line.trim()) this.opts.logger.debug('gev_child_stderr', { line: line.slice(0, 300) });
+        }
+      });
+    }
     let closedEarly = false;
     transport.onclose = () => {
       closedEarly = true;
@@ -111,7 +124,12 @@ export class GevChild extends EventEmitter {
       this.state = 'ready';
       this.readyAt = Date.now();
       this.lastError = undefined;
-      this.opts.logger.info('gev_child_ready', { tools: this.tools.length, pid: transport.pid });
+      this.opts.logger.info('gev_child_ready', {
+        tools: this.tools.length,
+        ...(transport instanceof StdioClientTransport
+          ? { pid: transport.pid }
+          : { relay: `${this.opts.connect!.host}:${this.opts.connect!.port}` }),
+      });
       this.emit('catalog', this.tools);
     } catch (err) {
       this.lastError = (err as Error).message;
@@ -197,11 +215,18 @@ export function childSpawnSpec(opts: {
   wrapper: string;
   command?: string;
   extraArgs?: string;
+  /** Tools the gateway's policy allows (passed as --allow). */
+  allow?: string[];
 }): { command: string; args: string[]; cwd: string; env: Record<string, string> } {
   const command = opts.command ?? process.execPath;
   const args = opts.extraArgs
     ? opts.extraArgs.split(' ').filter(Boolean)
-    : [opts.wrapper, '--api-base', opts.gevUrl];
+    : [
+        opts.wrapper,
+        '--api-base',
+        opts.gevUrl,
+        ...(opts.allow ? ['--allow', opts.allow.join(',')] : []),
+      ];
   return {
     command,
     args,

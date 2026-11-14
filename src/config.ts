@@ -136,6 +136,11 @@ const schema = z.object({
     .transform((s) => s.replace(/\/+$/, '')),
   GEV_MCP_ENABLED: bool(true),
   GEV_WRAPPER: z.string().default(path.join(REPO_ROOT, 'gev', 'stdio-all-surfaces.mjs')),
+  /**
+   * Production: tcp://gev-mcp:7704, the GEV MCP child in its own container behind the relay
+   * (src/gev/relay.ts). Unset: spawn the child locally (dev/test).
+   */
+  GEV_CHILD_URL: optionalString,
   GEV_CHILD_COMMAND: optionalString,
   GEV_CHILD_ARGS: optionalString,
   GEV_PROXY_ENABLED: bool(true),
@@ -304,6 +309,15 @@ function originOf(name: string, value: string): URL {
 
 export class ConfigError extends Error {}
 
+/** tcp://host:port -> {host, port}, or null. */
+export function parseRelayUrl(u: string): { host: string; port: number } | null {
+  const m = /^tcp:\/\/([A-Za-z0-9.-]+|\[[0-9a-fA-F:]+\]):(\d{1,5})$/.exec(u.trim());
+  if (!m) return null;
+  const port = Number(m[2]);
+  if (port < 1 || port > 65535) return null;
+  return { host: m[1]!.replace(/^\[|\]$/g, ''), port };
+}
+
 /**
  * Addresses a listener must never use in production. Tailscale's userspace netstack
  * (the sidecar runs with TS_USERSPACE=true) re-dials any tailnet connection on a port
@@ -446,6 +460,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       );
     }
   }
+  if (raw.GEV_CHILD_URL && !parseRelayUrl(raw.GEV_CHILD_URL))
+    throw new ConfigError('GEV_CHILD_URL must look like tcp://host:port');
   if (raw.STEPUP_KEY) {
     try {
       parseStepUpKey(raw.STEPUP_KEY);

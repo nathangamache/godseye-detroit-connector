@@ -1,6 +1,7 @@
 # Production stack: hardened containers, no published host ports.
 #
 #   gev          GEV preview (read-only clone)                        gev:7701 on the network
+#   gev-mcp      GEV MCP child behind a relay (read-only clone)       gev-mcp:7704 (gateway only)
 #   tailscale    sidecar; the gateway joins its network namespace.    tailnet https://godseye.<tailnet>.ts.net
 #                `tailscale serve` https :443  -> 127.0.0.2:7702 (PRIVATE listener: authorize, consent,
 #                                                  admin, /locate)
@@ -67,7 +68,7 @@ services:
       start_period: 20s
       retries: 3
     volumes:
-      - ${GEV_CLONE:-/home/nathangamache/projects/godseye/gods-eye-view}:/gev:ro
+      - ${GEV_CLONE:-../../gods-eye-view}:/gev:ro
       - gev-cache:/gev/.gev-cache
       - gev-logs:/gev/.gev-logs
       - gev-dotcache:/gev/.cache
@@ -79,6 +80,44 @@ services:
     cpuset: "24-31"
     networks:
       godseye: { ipv4_address: 172.30.77.11 }
+
+  # The GEV MCP child (upstream GEV code) runs here, not in the gateway: it never shares the
+  # gateway's uid, network namespace (private listener) or /data. The gateway connects over
+  # TCP and names the tools its policy allows; the relay spawns the child with exactly those.
+  gev-mcp:
+    <<: *hardening
+    image: godseye-runtime:0.1.0
+    container_name: godseye-gev-mcp
+    user: "10001:10001"
+    working_dir: /app
+    command: ["node", "dist/scripts/gev-relay.js"]
+    depends_on: [gev]
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      GEV_ROOT: /gev
+      GEV_URL: http://gev:7701
+      GEV_WRAPPER: /app/gev/stdio-all-surfaces.mjs
+      GEV_RELAY_PORT: "7704"
+      # Only the gateway (the sidecar's address) may open a session.
+      GEV_RELAY_ALLOWED_PEERS: 172.30.77.20
+      UV_THREADPOOL_SIZE: "2"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(7704,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    volumes:
+      - ${GEV_CLONE:-../../gods-eye-view}:/gev:ro
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 64
+    cpus: 1.0
+    cpuset: "24-31"
+    networks:
+      godseye: { ipv4_address: 172.30.77.12 }
 
   tailscale:
     <<: *hardening
@@ -122,7 +161,7 @@ services:
     # reachable only by tailscaled (tailscale serve), never by cloudflared, GEV or the
     # netstack's raw forwarding (which dials 127.0.0.1).
     network_mode: "service:tailscale"
-    depends_on: [gev, tailscale]
+    depends_on: [gev, gev-mcp, tailscale]
     environment:
       GATEWAY_MODE: production
       GATEWAY_ENV_FILE: none
@@ -136,9 +175,9 @@ services:
       # tailscale serve connects from 127.0.0.1; only it may assert Tailscale-User-Login.
       TAILSCALE_TRUSTED_PROXY_IPS: 127.0.0.1
       DATA_DIR: /data
-      GEV_ROOT: /gev
       GEV_URL: http://gev:7701
-      GEV_WRAPPER: /app/gev/stdio-all-surfaces.mjs
+      # The GEV MCP child lives in the gev-mcp container (no GEV code in this one).
+      GEV_CHILD_URL: tcp://gev-mcp:7704
       # Only cloudflared's fixed address may set CF-Connecting-IP.
       TRUSTED_PROXY_IPS: 172.30.77.10
       PULSE_URL: ${PULSE_URL:-http://pulse-api:7710}
@@ -147,7 +186,6 @@ services:
     env_file: [./secrets/gateway.env]
     volumes:
       - gateway-data:/data
-      - ${GEV_CLONE:-/home/nathangamache/projects/godseye/gods-eye-view}:/gev:ro
     tmpfs: ["/tmp:size=64m,mode=1777"]
     mem_limit: 768m
     memswap_limit: 768m
