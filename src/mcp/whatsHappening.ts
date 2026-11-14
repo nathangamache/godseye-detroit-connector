@@ -429,8 +429,9 @@ function usesCaller(a: WhatsHappeningArgs): boolean {
 
 function oneLine(s: string): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  // Room for the counts plus Pulse's rail voice and EOT/HOT verdicts (window, reasons, channels).
-  return t.length > 1600 ? t.slice(0, 1597) + '…' : t;
+  // Room for the counts plus Pulse's rail voice and EOT/HOT verdicts (window, channels and up to
+  // 600 characters of reasons each, src/pulse/coverage.ts reasonText).
+  return t.length > 2000 ? t.slice(0, 1997) + '…' : t;
 }
 
 function compact(v: unknown, keys: string[]): unknown {

@@ -968,6 +968,149 @@ describe("Pulse v1.2 verdicts: quiet only on Pulse's proof, relayed in plain wor
     }
   });
 
+  it("restarts the heartbeat can't show, a receiver with no start marker and a dead recorder (Pulse 3fec976): can't confirm, with Pulse's reasons whole", async () => {
+    // The live layout: 11 rail voice channels on one rtl_airband receiver, all covering the point,
+    // and the traintap EOT/HOT channel. The reasons are Pulse's own strings (api/rail_verdicts.py
+    // and the squelch check in api/routes/v1.py), the note Pulse's for a point it can't vouch for.
+    const ids = Array.from({ length: 11 }, (_, i) => `line_rd${String(i + 1).padStart(2, '0')}`);
+    const roads = ids.map((id, i) => lineRoad({ feed_id: id, name: `Line road ${i + 1}` }));
+    const all = ids.join(', ');
+    const OFF =
+      "(rtl_airband may have turned that channel's recordings off after a failed write: check its log)";
+    const squelch = (id: string, n: number, dropped = 0) =>
+      `the receiver opened squelch ${n} times on ${id} in the window${dropped ? ` (not counting ${dropped} times it dropped as too short)` : ''} but no recording reached Pulse ${OFF}`;
+    const noMarker = (rx: string) =>
+      `the receiver writes no start marker (${rx}.started), so a restart in the window can't be ruled out`;
+    const restartVoice = iso(585_000);
+    const restartEot = iso(510_000);
+    const upSince = iso(2 * 3600_000);
+    const eotEnd = iso(60_000);
+    type Case = { reasons: string[]; ids: string[]; since?: string; quiet?: boolean };
+    const answer = (c: Case) =>
+      c.quiet
+        ? verdict('eot_hot', c.reasons[0]!, { window_end: eotEnd, listening_since: c.since })
+        : verdict('x', 'x', {
+            state: 'unknown',
+            reasons: c.reasons,
+            listening_since: c.since,
+            channels: c.ids.map((feed_id) => ({
+              feed_id,
+              receiver_state: 'online',
+              ...(c.since ? { listening_since: c.since } : {}),
+              covers_point: true,
+            })),
+          });
+    const scenarios: Record<string, { voice: Case; eot: Case }> = {
+      // Pulse 3fec976 before the SDR containers are recreated: neither receiver writes a marker.
+      no_marker: {
+        voice: { reasons: [`${all}: ${noMarker('rail-airband')}`], ids },
+        eot: { reasons: [`eot_hot: ${noMarker('traintap-eot')}`], ids: ['eot_hot'] },
+      },
+      // rtl_airband restarted with every counter at 0, traintap inside its 105 s gap: the start
+      // markers show both restarts.
+      restart: {
+        voice: {
+          reasons: [
+            `${all}: receiver listening only since ${restartVoice}, after the window start`,
+          ],
+          ids,
+          since: restartVoice,
+        },
+        eot: {
+          reasons: [`eot_hot: receiver listening only since ${restartEot}, after the window start`],
+          ids: ['eot_hot'],
+          since: restartEot,
+        },
+      },
+      // rtl_airband turned its file outputs off after a failed write and kept demodulating.
+      recorder_dead: {
+        voice: {
+          reasons: [
+            squelch('line_rd01', 5),
+            squelch('line_rd02', 9, 3),
+            squelch('line_rd03', 2),
+            squelch('line_rd05', 6, 2),
+          ],
+          ids,
+          since: upSince,
+        },
+        eot: {
+          reasons: [
+            `every EOT/HOT channel that covers this point was listened to for the whole window, up to ${eotEnd} (60 s before this answer: Pulse's newest receiver and ingest heartbeats), and nothing was heard`,
+          ],
+          ids: ['eot_hot'],
+          since: upSince,
+          quiet: true,
+        },
+      },
+    };
+    let now = scenarios.no_marker!;
+    const h = await harness({
+      feeds: feedsOf([...roads, eotFeed]),
+      rail: (q) => ({
+        ...v12(answer(now.voice), answer(now.eot))(q),
+        coverage: {
+          covered: true,
+          channels: [
+            ...roads.map((r) => ({ channel: r.name, kind: 'road', receiver_state: 'online' })),
+            EOT_CH,
+          ],
+          note: "The rail voice receiver is online now, but Pulse can't vouch for these channels across the whole window (see `verdicts.rail_voice.reasons`): no transcripts here means no proof, not a quiet line.",
+        },
+      }),
+      incidents: noIncidents,
+    });
+    /** coverage_check.<kind>.reasons in run_tool's JSON. */
+    const reasonsOf = (t: string, kind: 'rail_radio' | 'eot') => {
+      const m = new RegExp(
+        `"${kind}":\\{"kind":"${kind}","basis":"pulse_verdict",[^{]*?"reasons":(\\[.*?\\]),"feeds"`,
+      ).exec(t);
+      return m ? (JSON.parse(m[1]!) as string[]) : undefined;
+    };
+    const NO_PROOF = 'Hearing nothing here means no proof, not a quiet line.';
+    try {
+      for (const name of ['no_marker', 'restart', 'recorder_dead'] as const) {
+        now = scenarios[name]!;
+        const [v, e] = [now.voice.reasons, now.eot.reasons];
+        const t = await h.run('rail_activity_near', point());
+        const w = await whats(h);
+        for (const x of [t, w]) {
+          expect(x, name).not.toMatch(/Rail radio: Listening and quiet/);
+          if (name === 'recorder_dead') {
+            // As many whole reasons as fit (the second is longer than the gateway's old cut at
+            // 220 characters), the rest counted; EOT/HOT has its own proof and stays quiet.
+            expect(x, name).toMatch(
+              new RegExp(
+                `Rail radio: Can't confirm quiet on this line \\(.*\\), per Pulse's verdict: ${esc(v[0]!)}; ${esc(v[1]!)}; and 2 more \\(see coverage_check\\)\\. ${esc(NO_PROOF)}`,
+              ),
+            );
+            expect(x, name).toMatch(
+              new RegExp(
+                `EOT/HOT: Listening and quiet near this point, per Pulse's verdict for \\S+ to ${esc(eotEnd.replace(/\.\d+Z$/, 'Z'))}: ${esc(e[0]!)}; listening since \\S+ \\(${esc(EOT_NAME)}\\)\\. So it really is quiet\\.`,
+              ),
+            );
+          } else {
+            // One reason, longer than the old cut for the 11 channels: whole.
+            expect(x, name).toMatch(
+              new RegExp(
+                `Rail radio: Can't confirm quiet on this line \\(.*\\), per Pulse's verdict: ${esc(v[0]!)}\\. ${esc(NO_PROOF)}`,
+              ),
+            );
+            expect(x, name).toContain(
+              `EOT/HOT: Can't confirm quiet near this point, per Pulse's verdict: ${e[0]}. ${NO_PROOF}`,
+            );
+            expect(x, name).not.toMatch(/Listening and quiet|really is quiet/);
+          }
+        }
+        // Every reason is in coverage_check, verbatim.
+        expect(reasonsOf(t, 'rail_radio'), name).toEqual(v);
+        expect(reasonsOf(t, 'eot'), name).toEqual(e);
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
   it("downgrades Pulse's quiet when the covering channels hear another line, or feeds/status shows the receiver down", async () => {
     let feeds: unknown[] = [
       lineRoad({
@@ -1134,6 +1277,42 @@ describe('a Pulse without verdicts never says quiet', () => {
         /Rail radio: Can't confirm quiet: rail radio receiver online now \(Line road\)/,
       );
       expect(w).not.toMatch(/Listening and quiet|really is quiet/);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('the live layout (11 voice channels on one receiver, and EOT/HOT): a restart or a dead recorder such a Pulse cannot show is never quiet', async () => {
+    // Without verdicts nothing shows a restart inside the window or squelch openings that never
+    // became recordings: receivers online now, nothing heard, and Pulse's note says quiet.
+    const roads = Array.from({ length: 11 }, (_, i) => ({
+      ...lineRoad(),
+      feed_id: `line_rd${String(i + 1).padStart(2, '0')}`,
+      name: `Line road ${i + 1}`,
+    }));
+    const base = feeds();
+    const h = await harness({
+      feeds: () => ({ ...base, feeds: [...roads, base.feeds[1]] }),
+      rail: old({
+        channels: [
+          ...roads.map((r) => ({ channel: r.name, kind: 'road', receiver_state: 'online' })),
+          { channel: EOT_NAME, kind: 'eot', receiver_state: 'online' },
+        ],
+      }),
+      incidents: noIncidents,
+    });
+    try {
+      const t = await h.run('rail_activity_near', point());
+      const w = text(await h.client.callTool({ name: 'whats_happening_here', arguments: point() }));
+      for (const x of [t, w]) {
+        expect(x).toMatch(
+          /Rail radio: Can't confirm quiet: rail radio receiver online now \(Line road 1, Line road 2, Line road 3 and 8 more\) and 0 rail messages on this line \(.*\) in the last 30 min, but this Pulse sends no verdicts \(contract v1\.2\), so nothing shows the receiver and the ingest stage were up for the whole window\. 0 rail messages means no proof, not a quiet line\./,
+        );
+        expect(x).toMatch(
+          /EOT\/HOT: Can't confirm quiet: EOT\/HOT receiver online now \(EOT\/HOT telemetry \(traintap\)\) and 0 EOT\/HOT packets near this point in the last 30 min, but this Pulse sends no verdicts/,
+        );
+        expect(x).not.toMatch(/Listening and quiet|really is quiet|they were quiet/);
+      }
     } finally {
       await h.close();
     }

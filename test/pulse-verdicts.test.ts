@@ -105,10 +105,11 @@ describe('parsing verdicts', () => {
     expect(v.eot).toBeUndefined();
     const r = v.rail_radio!;
     expect(r.state).toBe('quiet');
-    // At most 20 entries are read; non-strings and blanks among them are dropped.
+    // At most 20 entries are read; non-strings and blanks among them are dropped, and a reason
+    // over 1000 characters is cut, visibly.
     expect(r.reasons[0]).toBe('a');
     expect(r.reasons.length).toBe(18);
-    expect(r.reasons[1]!.length).toBe(400);
+    expect(r.reasons[1]).toBe(`${'x'.repeat(999)}…`);
     expect(r.channels).toEqual([
       { feed_id: 'ok', covers_point: false },
       { feed_id: 'ok2', receiver_state: 'online', covers_point: true },
@@ -226,6 +227,112 @@ describe("Pulse's verdict is relayed", () => {
     expect(v.pulse_state).toBeUndefined();
     expect(railVerdictSentence(v)).toMatch(
       /^Can't confirm quiet on this point: Pulse sent no usable verdict for rail voice\./,
+    );
+  });
+});
+
+describe("Pulse's reasons for restarts and a dead recorder (Pulse 3fec976) are relayed whole", () => {
+  // Pulse's own strings (api/rail_verdicts.py _channel_gap and _grouped, api/routes/v1.py's
+  // squelch check), for the live layout: 11 rail voice channels on one receiver, all covering
+  // the point, and one EOT/HOT channel.
+  const ids = (n: number) =>
+    Array.from({ length: n }, (_, i) => `line_rd${String(i + 1).padStart(2, '0')}`);
+  const NO_MARKER = (rx: string) =>
+    `the receiver writes no start marker (${rx}.started), so a restart in the window can't be ruled out`;
+  const OFF =
+    "(rtl_airband may have turned that channel's recordings off after a failed write: check its log)";
+  const squelch = (id: string, n: number, dropped = 0) =>
+    `the receiver opened squelch ${n} time${n === 1 ? '' : 's'} on ${id} in the window${dropped ? ` (not counting ${dropped} time${dropped === 1 ? '' : 's'} it dropped as too short)` : ''} but no recording reached Pulse ${OFF}`;
+  const unknown = (reasons: string[], channelIds: string[], since?: string) => ({
+    state: 'unknown',
+    reasons,
+    ...(since ? { listening_since: since } : { listening_since: undefined }),
+    channels: channelIds.map((feed_id) => ({
+      feed_id,
+      receiver_state: 'online',
+      ...(since ? { listening_since: since } : {}),
+      covers_point: true,
+    })),
+  });
+  const relayed = (
+    kind: 'rail_radio' | 'eot',
+    over: Record<string, unknown>,
+    place = kind === 'eot' ? 'this point' : 'this line',
+  ) => {
+    const v = checkVerdict(
+      kind,
+      parseVerdicts({ [kind === 'eot' ? 'eot' : 'rail_voice']: raw(over) })![kind],
+      { status: STATUS, tracks: TRACK, window_min: 30, listed: 0 },
+    );
+    return { v, t: railVerdictSentence(v, place) };
+  };
+  const cantConfirm = (prep: string, why: string) =>
+    `Can't confirm quiet ${prep}, per Pulse's verdict: ${why}. Hearing nothing here means no proof, not a quiet line.`;
+
+  it('a receiver that writes no start marker (Pulse before the SDR containers are recreated)', () => {
+    const voiceWhy = `${ids(11).join(', ')}: ${NO_MARKER('rail-airband')}`;
+    expect(voiceWhy.length).toBeGreaterThan(220);
+    const voice = relayed('rail_radio', unknown([voiceWhy], ids(11)));
+    expect(voice.v).toMatchObject({
+      state: 'unknown',
+      pulse_state: 'unknown',
+      reasons: [voiceWhy],
+    });
+    expect(voice.v.listening_since).toBeUndefined();
+    expect(voice.t).toBe(cantConfirm('on this line', voiceWhy));
+    const eotWhy = `eot_hot: ${NO_MARKER('traintap-eot')}`;
+    const eot = relayed('eot', unknown([eotWhy], ['eot_hot']));
+    expect(eot.t).toBe(cantConfirm('near this point', eotWhy));
+  });
+
+  it("a restart the heartbeat can't show, caught by the start marker", () => {
+    const since = '2026-11-14T11:50:15Z';
+    const why = `${ids(11).join(', ')}: receiver listening only since ${since}, after the window start`;
+    const voice = relayed('rail_radio', unknown([why], ids(11), since));
+    expect(voice.t).toBe(cantConfirm('on this line', why));
+    const eotWhy =
+      'eot_hot: receiver listening only since 2026-11-14T11:51:30Z, after the window start';
+    expect(relayed('eot', unknown([eotWhy], ['eot_hot'], '2026-11-14T11:51:30Z')).t).toBe(
+      cantConfirm('near this point', eotWhy),
+    );
+  });
+
+  it('squelch openings that never became recordings: as many whole reasons as fit, the rest counted', () => {
+    const reasons = [
+      squelch('line_rd01', 5),
+      squelch('line_rd02', 9, 3),
+      squelch('line_rd03', 2),
+      squelch('line_rd04', 1),
+      squelch('line_rd05', 6, 1),
+      `the receiver's squelch was open on line_rd06 in the window (a transmission that began before it) but no recording reached Pulse ${OFF}`,
+    ];
+    expect(reasons[1]!.length).toBeGreaterThan(220);
+    const voice = relayed('rail_radio', unknown(reasons, ids(11), at(120)));
+    // Every reason is kept for coverage_check, verbatim.
+    expect(voice.v.reasons).toEqual(reasons);
+    expect(voice.t).toBe(
+      cantConfirm('on this line', `${reasons[0]}; ${reasons[1]}; and 4 more (see coverage_check)`),
+    );
+  });
+
+  it('a cause shared by many channels keeps its words; only the channel list is shortened', () => {
+    const why = `${ids(30).join(', ')}: ${NO_MARKER('rail-airband')}`;
+    expect(why.length).toBeGreaterThan(400);
+    const voice = relayed('rail_radio', unknown([why], ids(30)));
+    expect(voice.v.reasons).toEqual([why]);
+    expect(voice.t).toBe(
+      cantConfirm(
+        'on this line',
+        `line_rd01, line_rd02, line_rd03 and 27 more: ${NO_MARKER('rail-airband')}`,
+      ),
+    );
+    // A single cause longer than a sentence allows is cut at a word, visibly.
+    const long = relayed(
+      'rail_radio',
+      unknown([`ingest (sdr_files) can't see its input (${'disk '.repeat(80)})`], ids(1)),
+    );
+    expect(long.t).toMatch(
+      /^Can't confirm quiet on this line, per Pulse's verdict: ingest \(sdr_files\) can't see its input \((disk )+disk…\. Hearing/,
     );
   });
 });

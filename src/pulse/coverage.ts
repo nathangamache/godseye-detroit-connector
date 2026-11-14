@@ -269,6 +269,18 @@ export interface PulseVerdicts {
 
 const MAX_REASONS = 20;
 const MAX_VERDICT_CHANNELS = 200;
+/**
+ * One reason as Pulse sent it. Pulse groups the channels one cause applies to into one reason
+ * ("a, b, c: why"), so a reason grows with the channels that cover the point: room for that,
+ * and a reason longer still is cut visibly ("…"), never silently.
+ */
+const MAX_REASON_CHARS = 1000;
+
+function reasonOf(v: unknown): string | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const s = v.trim();
+  return s.length > MAX_REASON_CHARS ? `${s.slice(0, MAX_REASON_CHARS - 1)}…` : s;
+}
 
 function parseVerdict(raw: unknown): PulseVerdict | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -277,7 +289,7 @@ function parseVerdict(raw: unknown): PulseVerdict | undefined {
   const out: PulseVerdict = {
     state: v.state as PulseState,
     reasons: (Array.isArray(v.reasons) ? v.reasons.slice(0, MAX_REASONS) : [])
-      .map((r) => str(r, 400))
+      .map(reasonOf)
       .filter((r): r is string => Boolean(r)),
     channels: [],
   };
@@ -515,14 +527,46 @@ const shortIso = (t: string) => t.replace(/\.\d+Z$/, 'Z');
 const idList = (ids: string[]) =>
   ids.slice(0, 5).join(', ') + (ids.length > 5 ? ` and ${ids.length - 5} more` : '');
 
-/** Up to four reasons as one clause, each trimmed; the rest are in coverage_check. */
+/** Characters of reasons one verdict sentence carries, and of one reason in it. */
+const SENTENCE_REASONS = 600;
+const SENTENCE_REASON = 300;
+
+/**
+ * Pulse's reasons as one clause, verbatim and in Pulse's order: up to four, as many as fit
+ * SENTENCE_REASONS (at least one); the rest are counted, and all of them are in coverage_check.
+ */
 function reasonText(reasons: string[]): string {
-  const shown = reasons
-    .slice(0, 4)
-    .map((r) => r.replace(/[.\s]+$/, ''))
-    .map((r) => (r.length > 220 ? `${r.slice(0, 219)}…` : r));
+  const shown: string[] = [];
+  let used = 0;
+  for (const r of reasons.slice(0, 4)) {
+    const t = sentenceReason(r);
+    if (shown.length && used + t.length > SENTENCE_REASONS) break;
+    shown.push(t);
+    used += t.length + 2;
+  }
   const more = reasons.length - shown.length;
   return shown.join('; ') + (more > 0 ? `; and ${more} more (see coverage_check)` : '');
+}
+
+/** "a, b, c, d, …: why": the channels Pulse grouped under one cause. */
+const GROUPED = /^([\w.-]+(?:, [\w.-]+){3,}): (?=\S)/;
+
+/**
+ * One reason for the sentence. One too long for it that groups channels names the first three
+ * and how many more, so the cause itself is kept whole; only a cause longer than the sentence
+ * allows is cut, at a word, marked "…".
+ */
+function sentenceReason(r: string): string {
+  let t = r.replace(/[.\s]+$/, '');
+  if (t.length <= SENTENCE_REASON) return t;
+  const g = GROUPED.exec(t);
+  if (g?.[1]) {
+    const ids = g[1].split(', ');
+    t = `${ids.slice(0, 3).join(', ')} and ${ids.length - 3} more: ${t.slice(g[0].length)}`;
+  }
+  if (t.length <= SENTENCE_REASON) return t;
+  const cut = t.lastIndexOf(' ', SENTENCE_REASON - 1);
+  return `${t.slice(0, cut > SENTENCE_REASON / 2 ? cut : SENTENCE_REASON - 1)}…`;
 }
 
 /**

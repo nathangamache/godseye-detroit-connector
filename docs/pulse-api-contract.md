@@ -140,7 +140,8 @@ Per kind, may the point be called quiet? Pulse builds this in `api/rail_verdicts
 ```ts
 type Verdict = {
   state: "activity" | "quiet" | "not_covered" | "unknown";
-  reasons: string[];             // short plain sentences, e.g. "line_road: no receiver has ever reported"
+  reasons: string[];             // plain sentences, the channels one cause applies to grouped:
+                                 // "line_road, line_yard: no receiver has ever reported"
   window_start: string;          // ISO 8601 UTC: now - since_minutes
   window_end: string;            // now; for quiet, where Pulse's proof ends (below)
   listening_since?: string;      // since when every covering channel and the ingest stage are proven
@@ -160,19 +161,43 @@ type Verdict = {
 * `quiet`, only on positive proof for the **whole** window: every covering channel's receiver was
   listening since before `window_start` (heartbeat history, not "online now"; a run breaks at a
   gap longer than a missed beat or two of that receiver, 45 s for rtl_airband's stats file and
-  105 s for traintap's minute heartbeat, and at an rtl_airband counter that went down, a
-  restart), on the channel's configured frequency and filed under a channel that covers the
-  point (a label on another frequency, or the frequency filed under a disabled channel after a
-  rename that wasn't re-rendered, is not listening to it); the ingest stage (`sdr_files` for
-  voice, `traintap` for EOT) beat since before `window_start`, within the last 35 s, and could
-  see its input; nothing was heard on the covering channels and nothing in the window is left
-  unattributed (recordings of a disabled channel that the ingest stage dropped included).
+  105 s for traintap's minute heartbeat, at an rtl_airband counter that went down, and at
+  **every restart**, however quickly it came back: from Pulse 3fec976 each SDR container's
+  entrypoint writes a start marker, `<name>.started` with a new boot id, before every start, and
+  a new one ends the run), on the channel's configured frequency and filed under a channel that
+  covers the point (a label on another frequency, or the frequency filed under a disabled channel
+  after a rename that wasn't re-rendered, is not listening to it); for rail voice, everything the
+  receiver heard reached Pulse (below); the ingest stage (`sdr_files` for voice, `traintap` for
+  EOT) beat since before `window_start`, within the last 35 s, and could see its input; nothing
+  was heard on the covering channels and nothing in the window is left unattributed (recordings
+  of a disabled channel that the ingest stage dropped included).
+  * A receiver that writes no start marker never proves a window: traintap's heartbeat is a bare
+    touch and rtl_airband's counters may all still be 0, so a restart may not show in them
+    ("<channels>: the receiver writes no start marker (rail-airband.started), so a restart in the
+    window can't be ruled out", with no `listening_since`). After deploying 3fec976, nothing is
+    quiet until the SDR containers are recreated and write their markers.
+  * Rail voice, what was heard became recordings: rtl_airband turns a channel's file output off
+    for good after one failed open or short write (a full disk, the recordings volume's
+    permissions) and keeps demodulating and rewriting its stats file. Pulse records how each
+    channel's squelch-open, dropped-as-too-short and activity counters grew, and a covering
+    channel with no recording at all in the window is `unknown` when its squelch opened more often
+    than it dropped transmissions ("the receiver opened squelch 5 times on line_road in the window
+    but no recording reached Pulse (rtl_airband may have turned that channel's recordings off
+    after a failed write: check its log)"), or was open with no opening (a transmission that began
+    before the window). A receiver whose stats file has no squelch counter for a covering channel,
+    or a plain heartbeat, proves nothing about its recordings, and the channel isn't proven.
+  * What no heartbeat shows: a receiver that stalls without restarting for less than its max
+    gap, counted from its last write (up to about 45 s for rtl_airband, 105 s for traintap).
 * A quiet window ends where Pulse's proof ends, not at its answer: `window_end` is the earliest
   of the ingest stage's newest beat (stamped with when its poll began) and the covering
   receivers' newest heartbeats. That is normally under 20 s before `generated_at` for rail
   voice and up to about a minute for EOT/HOT (at most a receiver's max gap: 45 s, 105 s), and
   the quiet reason says how far ("up to <window_end> (N s before this answer ...)").
 * `unknown`: nothing was heard, but one of those isn't shown; `reasons` says which.
+* The shape is the same before and after 3fec976, so the gateway can't tell a Pulse with
+  verdicts from before it (which can call a window quiet across a restart its heartbeat didn't
+  show, or while rtl_airband had stopped writing recordings) from a later one: run Pulse 3fec976
+  or later, with its SDR containers recreated.
 
 ## `GET /v1/feeds/status` (tool: `feeds_status`)
 
@@ -265,10 +290,15 @@ location, a placeholder scanner feed):
   one (legacy marks such as GTW/CN or ATK/AMTK count as the same railroad). The matched line's
   `name` is sent as the `subdivision` hint; `railroad` only when the caller gives one.
 * **With `verdicts` (v1.2), Pulse's verdict decides** rail voice and EOT/HOT. The gateway relays
-  `state`, `reasons` (verbatim, up to four in the sentence, all in `coverage_check`) and `counts`
-  in plain words: **activity found**, **listening and quiet** (from `window_start` to
-  `window_end`, with the listening-since time and the covering channels), **no coverage**, or
-  **can't confirm quiet**.
+  `state`, `reasons` and `counts` in plain words: **activity found**, **listening and quiet**
+  (from `window_start` to `window_end`, with the listening-since time and the covering channels),
+  **no coverage**, or **can't confirm quiet**. Reasons are relayed verbatim, in Pulse's order:
+  `coverage_check.<kind>.reasons` has every one (up to 20, each up to 1000 characters, a longer
+  one cut with "…"), and the sentence carries up to four, as many whole as fit in 600
+  characters (at least one), counting the rest ("and 2 more (see coverage_check)"). A reason
+  over 300 characters that groups channels ("a, b, c, d: why") names the first three and how many
+  more, so the cause itself is never cut; only a single cause over 300 characters is cut, at a
+  word, with "…".
   The counts line uses Pulse's counts for the covering channels, recordings without text
   included. The gateway never upgrades anything to quiet or activity. It downgrades a `quiet` to
   "can't confirm" (`coverage_check.<kind>.state: "unknown"`, `pulse_state: "quiet"`,
