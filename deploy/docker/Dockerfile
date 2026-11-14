@@ -32,6 +32,7 @@ COPY web ./web
 COPY third_party ./third_party
 USER 10001:10001
 EXPOSE 7700
+# The gateway's public listener binds HOST (the compose-network address in production).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:7700/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+  CMD ["node", "-e", "const h=process.env.HOST||'127.0.0.1';fetch('http://'+(h==='0.0.0.0'?'127.0.0.1':h)+':'+(process.env.PORT||'7700')+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "dist/src/index.js"]

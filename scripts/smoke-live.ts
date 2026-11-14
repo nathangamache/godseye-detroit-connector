@@ -16,7 +16,12 @@ const ANN_ARBOR = { lat: 42.2808, lon: -83.743 };
 const argUrl = process.argv.indexOf('--url');
 if (process.env.GATEWAY_ENV_FILE !== 'none') loadEnvFile(process.env.GATEWAY_ENV_FILE || undefined);
 const config = loadConfig();
-const url = argUrl > 0 ? process.argv[argUrl + 1]! : `http://127.0.0.1:${config.PORT}`;
+// The public listener binds HOST (the compose-network address in docker, 127.0.0.1 in dev).
+const bind = config.HOST === '0.0.0.0' || config.HOST === '::' ? '127.0.0.1' : config.HOST;
+const url =
+  argUrl > 0
+    ? process.argv[argUrl + 1]!
+    : `http://${bind.includes(':') ? `[${bind}]` : bind}:${config.PORT}`;
 
 const db = openDb(config.dbPath);
 const store = new TokenStore(db, {

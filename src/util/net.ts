@@ -2,10 +2,10 @@ import { isIP } from 'node:net';
 import type { IncomingMessage } from 'node:http';
 
 /**
- * The client IP for rate limiting and audit. The forwarding header
- * (CF-Connecting-IP from cloudflared on the public listener, X-Forwarded-For from
- * tailscale serve on the private one) is trusted only when the TCP peer is a
- * configured proxy. Otherwise the socket address is used.
+ * The client IP for rate limiting and audit. The forwarding header (CF-Connecting-IP
+ * from cloudflared on the public listener) is trusted only when the TCP peer is a
+ * configured proxy; the private listener configures none. Otherwise the socket
+ * address is used.
  */
 export function clientIp(
   req: IncomingMessage,
@@ -13,7 +13,10 @@ export function clientIp(
   header = 'cf-connecting-ip',
 ): string {
   const peer = normalizeIp(req.socket.remoteAddress ?? '');
-  if (trustedProxies.includes(peer) || trustedProxies.includes(req.socket.remoteAddress ?? '')) {
+  if (
+    trustedProxies.length &&
+    (trustedProxies.includes(peer) || trustedProxies.includes(req.socket.remoteAddress ?? ''))
+  ) {
     const raw = req.headers[header];
     const v = (Array.isArray(raw) ? raw[0] : raw)?.split(',')[0]?.trim();
     if (v && isIP(v)) return normalizeIp(v);

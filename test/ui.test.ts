@@ -16,6 +16,7 @@ import {
   type Jar,
   type TestGateway,
 } from './oauth-helpers.js';
+import { PROD_ENV } from './helpers.js';
 
 const OWNER = 'owner@example.com';
 
@@ -275,10 +276,9 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
     gev = await fakeGev();
     dir = mkdtempSync(path.join(tmpdir(), 'gw-ui-prod-'));
     const config = loadConfig({
-      GATEWAY_MODE: 'production',
+      ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
-      PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
       OWNER_TAILSCALE_LOGIN: OWNER,
       DATA_DIR: dir,
       GEV_URL: gev.url,
@@ -344,12 +344,12 @@ describe('UI routes in production mode (Tailscale identity required)', () => {
   it('distrusts identity headers from peers that are not the configured proxy', async () => {
     const d2 = mkdtempSync(path.join(tmpdir(), 'gw-ui-prod2-'));
     const config = loadConfig({
-      GATEWAY_MODE: 'production',
+      ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
-      PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
       OWNER_TAILSCALE_LOGIN: OWNER,
-      TAILSCALE_TRUSTED_PROXY_IPS: '10.9.9.9',
+      // A loopback alias nothing connects from: the real peer (127.0.0.1) is not trusted.
+      TAILSCALE_TRUSTED_PROXY_IPS: '127.0.0.9',
       DATA_DIR: d2,
       GEV_URL: gev.url,
       GEV_MCP_ENABLED: 'false',

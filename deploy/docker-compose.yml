@@ -2,8 +2,13 @@
 #
 #   gev          GEV preview (read-only clone)                        gev:7701 on the network
 #   tailscale    sidecar; the gateway joins its network namespace.    tailnet https://godseye.<tailnet>.ts.net
-#                `tailscale serve` -> 127.0.0.1:7702 (gateway PRIVATE listener: UI, authorize, admin)
-#   gateway      PUBLIC listener 0.0.0.0:7700 (tunnel only) + PRIVATE listener 127.0.0.1:7702
+#                `tailscale serve` -> 127.0.0.2:7702 (gateway PRIVATE listener: UI, authorize, admin)
+#   gateway      PUBLIC listener 172.30.77.20:7700 (tunnel only) + PRIVATE listener 127.0.0.2:7702
+#
+# Why 127.0.0.2 and the bridge address: the sidecar uses Tailscale's userspace netstack, which
+# re-dials every tailnet connection on a port serve does not own to 127.0.0.1:<same port>. A
+# listener on 127.0.0.1 or 0.0.0.0 would be reachable by any tailnet peer, with forged
+# Tailscale-User-Login headers. The gateway refuses to start in production with such a bind.
 #   cloudflared  tunnel -> http://gateway:7700 (public listener only)
 #
 #   cd deploy
@@ -110,18 +115,21 @@ services:
     build: { context: .., dockerfile: deploy/docker/Dockerfile }
     container_name: godseye-gateway
     user: "10001:10001"
-    # Share the sidecar's network namespace: the PRIVATE listener on 127.0.0.1:7702 is
-    # reachable only by tailscaled (tailscale serve), never by cloudflared or GEV.
+    # Share the sidecar's network namespace: the PRIVATE listener on 127.0.0.2:7702 is
+    # reachable only by tailscaled (tailscale serve), never by cloudflared, GEV or the
+    # netstack's raw forwarding (which dials 127.0.0.1).
     network_mode: "service:tailscale"
     depends_on: [gev, tailscale]
     environment:
       GATEWAY_MODE: production
       GATEWAY_ENV_FILE: none
-      HOST: 0.0.0.0
+      # The sidecar's address on the godseye network (cloudflared -> gateway:7700).
+      HOST: 172.30.77.20
       PORT: "7700"
-      PRIVATE_HOST: 127.0.0.1
+      PRIVATE_HOST: 127.0.0.2
       PRIVATE_PORT: "7702"
-      TAILSCALE_TRUSTED_PROXY_IPS: 127.0.0.1,::1
+      # tailscale serve connects from 127.0.0.1; only it may assert Tailscale-User-Login.
+      TAILSCALE_TRUSTED_PROXY_IPS: 127.0.0.1
       DATA_DIR: /data
       GEV_ROOT: /gev
       GEV_URL: http://gev:7701

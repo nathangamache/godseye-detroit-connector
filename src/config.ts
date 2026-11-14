@@ -3,8 +3,10 @@
  * validated with zod. Every value has a safe default except secrets.
  *
  * Production mode fails closed: the Tailscale owner login and an https tailnet
- * origin must be configured, and the public origin must be https.
+ * origin must be configured, the public origin must be https, and no listener
+ * may accept connections addressed to 127.0.0.1 (see checkProductionBinds).
  */
+import { isIP } from 'node:net';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,6 +120,7 @@ const schema = z.object({
     .default('https://godseye.gamachecloud.com')
     .transform((s) => s.replace(/\/+$/, '')),
   EXTRA_ALLOWED_HOSTS: list([]),
+  /** Peers whose CF-Connecting-IP is trusted on the PUBLIC listener (cloudflared only). */
   TRUSTED_PROXY_IPS: list(['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   DATA_DIR: z.string().default(path.join(REPO_ROOT, 'data')),
   DB_PATH: optionalString,
@@ -205,7 +208,10 @@ const schema = z.object({
   LOGIN_PROVIDER: z.enum(['auto', 'tailscale', 'password']).default('auto'),
   /** Tailscale login name (Tailscale-User-Login) of the only person who may log in. */
   OWNER_TAILSCALE_LOGIN: optionalString,
-  /** Peers allowed to assert Tailscale-User-Login on the private listener (tailscale serve). */
+  /**
+   * Peers allowed to assert Tailscale-User-Login on the private listener (tailscale serve
+   * connects from 127.0.0.1). Forwarding headers (X-Forwarded-For) are never trusted there.
+   */
   TAILSCALE_TRUSTED_PROXY_IPS: list(['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   GATEWAY_PASSWORD_HASH: optionalString,
   GATEWAY_TOTP_SECRET: optionalString,
@@ -276,6 +282,78 @@ function originOf(name: string, value: string): URL {
 
 export class ConfigError extends Error {}
 
+/**
+ * Addresses a listener must never use in production. Tailscale's userspace netstack
+ * (the sidecar runs with TS_USERSPACE=true) re-dials any tailnet connection on a port
+ * that `tailscale serve` does not own to 127.0.0.1:<same port> (::1 for IPv6), with the
+ * client's own headers intact. A listener on loopback 127.0.0.1, ::1 or a wildcard
+ * address is therefore reachable by any tailnet peer the policy admits, and its peer
+ * address (127.0.0.1) is indistinguishable from tailscale serve's.
+ */
+const NETSTACK_REACHABLE = new Set([
+  '',
+  '0.0.0.0',
+  '::',
+  '127.0.0.1',
+  '::1',
+  '::ffff:127.0.0.1',
+  '::ffff:0.0.0.0',
+  'localhost',
+]);
+
+export function isNetstackReachable(host: string): boolean {
+  return NETSTACK_REACHABLE.has(
+    host
+      .trim()
+      .toLowerCase()
+      .replace(/^\[|\]$/g, ''),
+  );
+}
+
+function isLoopbackV4(ip: string): boolean {
+  return isIP(ip) === 4 && ip.startsWith('127.');
+}
+
+/** Production listener and proxy-trust rules (fail closed). */
+export function checkProductionBinds(raw: {
+  HOST: string;
+  PRIVATE_HOST: string;
+  TRUSTED_PROXY_IPS: string[];
+  TAILSCALE_TRUSTED_PROXY_IPS: string[];
+}): void {
+  if (isNetstackReachable(raw.PRIVATE_HOST) || !isLoopbackV4(raw.PRIVATE_HOST)) {
+    throw new ConfigError(
+      `production requires PRIVATE_HOST to be a loopback alias other than 127.0.0.1 (use 127.0.0.2), not "${raw.PRIVATE_HOST}": ` +
+        "Tailscale's userspace netstack forwards raw tailnet connections to 127.0.0.1:<port>, bypassing tailscale serve",
+    );
+  }
+  if (isNetstackReachable(raw.HOST) || isIP(raw.HOST) === 0) {
+    throw new ConfigError(
+      `production requires HOST to be the gateway's compose-network address (e.g. 172.30.77.20), not "${raw.HOST}": ` +
+        'a wildcard or 127.0.0.1 bind is reachable from the tailnet through the netstack and skips the Cloudflare WAF',
+    );
+  }
+  if (!raw.TRUSTED_PROXY_IPS.length) {
+    throw new ConfigError("production requires TRUSTED_PROXY_IPS = cloudflared's fixed address");
+  }
+  for (const ip of raw.TRUSTED_PROXY_IPS) {
+    if (isIP(ip) === 0 || isNetstackReachable(ip)) {
+      throw new ConfigError(
+        `TRUSTED_PROXY_IPS must list only cloudflared's fixed address in production, not "${ip}" ` +
+          '(127.0.0.1 is where netstack-forwarded tailnet connections come from)',
+      );
+    }
+  }
+  for (const ip of raw.TAILSCALE_TRUSTED_PROXY_IPS) {
+    const n = ip.replace(/^::ffff:/i, '');
+    if (!(isLoopbackV4(n) || n === '::1')) {
+      throw new ConfigError(
+        `TAILSCALE_TRUSTED_PROXY_IPS must be loopback (tailscale serve in the shared netns), not "${ip}"`,
+      );
+    }
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(env);
   if (!parsed.success) {
@@ -315,6 +393,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (raw.LOGIN_PROVIDER === 'password') {
       throw new ConfigError('LOGIN_PROVIDER=password is not allowed in production; use tailscale');
     }
+    checkProductionBinds(raw);
   }
   if (publicAuthorize && !passwordConfigured) {
     throw new ConfigError(
@@ -346,10 +425,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const gevApiOrigins = new Set<string>([gevUrl.origin]);
   if (gevUrl.hostname === '127.0.0.1') gevApiOrigins.add(`http://localhost:${gevUrl.port || '80'}`);
 
+  // A specific bind address is also an acceptable Host (health checks and the in-container
+  // smoke test reach the listener by IP); wildcard binds are not.
+  const bindHost = (h: string) => (isIP(h) && !['0.0.0.0', '::'].includes(h) ? [h] : []);
   const allowedHosts = Array.from(
-    new Set([publicUrl.hostname, '127.0.0.1', 'localhost', ...raw.EXTRA_ALLOWED_HOSTS]),
+    new Set([
+      publicUrl.hostname,
+      '127.0.0.1',
+      'localhost',
+      ...bindHost(raw.HOST),
+      ...raw.EXTRA_ALLOWED_HOSTS,
+    ]),
   );
-  const privateAllowedHosts = Array.from(new Set([privateUrl.hostname, '127.0.0.1', 'localhost']));
+  const privateAllowedHosts = Array.from(
+    new Set([privateUrl.hostname, '127.0.0.1', 'localhost', ...bindHost(raw.PRIVATE_HOST)]),
+  );
 
   return {
     ...raw,

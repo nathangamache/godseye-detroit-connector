@@ -11,9 +11,14 @@
  *   (+ /oauth/authorize and /auth/login only in the opt-in PUBLIC_AUTHORIZE_FALLBACK mode)
  * Everything else: 404.
  *
- * PRIVATE listener (PRIVATE_PORT on 127.0.0.1, reached only through tailscale serve):
+ * PRIVATE listener (PRIVATE_PORT on PRIVATE_HOST: 127.0.0.2 in production, reached only
+ * through tailscale serve, which connects from 127.0.0.1):
  *   /, /pulse, /locate, /oauth/authorize, consent, /oauth/admin, /api/location (for the PWA),
  *   login pages in dev. Identity: Tailscale-User-Login from the trusted proxy.
+ *
+ * Client IPs: CF-Connecting-IP is honoured only on the public listener and only from
+ * TRUSTED_PROXY_IPS (cloudflared's fixed address). The private listener never trusts a
+ * forwarding header; its client address is the TCP peer.
  */
 import type { Server } from 'node:http';
 import express, { type Express, type Request, type Response } from 'express';
@@ -72,7 +77,9 @@ export function securityConfig(config: Config, listener: Listener): SecurityConf
   return {
     allowedHosts: config.privateAllowedHosts,
     publicOrigin: config.privateOrigin,
-    trustedProxies: config.TAILSCALE_TRUSTED_PROXY_IPS,
+    // No forwarding header is trusted on the private side: anything that reaches it arrives
+    // from 127.0.0.1, which is also where netstack-forwarded tailnet connections come from.
+    trustedProxies: [],
     clientIpHeader: 'x-forwarded-for',
     hsts: config.privateOrigin.startsWith('https://'),
   };

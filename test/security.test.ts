@@ -13,6 +13,7 @@ import { CimdFetchError, checkCimdUrl, makeCimdFetcher } from '../src/oauth/cimd
 import { redirectMatches, validateCimd } from '../src/oauth/clients.js';
 import { installAllRoutes } from '../src/routes.js';
 import { isPrivateIp } from '../src/util/net.js';
+import { PROD_ENV } from './helpers.js';
 import { fakeCimdFetch, freePort } from './oauth-helpers.js';
 
 describe('SSRF guards for CIMD fetches', () => {
@@ -214,11 +215,43 @@ describe('Tailscale identity (private listener)', () => {
 });
 
 describe('production configuration', () => {
+  /** The values deploy/docker-compose.yml sets. */
+  const binds = {
+    HOST: '172.30.77.20',
+    PRIVATE_HOST: '127.0.0.2',
+    TRUSTED_PROXY_IPS: '172.30.77.10',
+    TAILSCALE_TRUSTED_PROXY_IPS: '127.0.0.1',
+  };
   const prod = {
     GATEWAY_MODE: 'production',
     PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
     OWNER_TAILSCALE_LOGIN: 'owner@example.com',
+    ...binds,
   };
+  it('refuses listeners the userspace netstack can reach, and loopback proxy trust', () => {
+    expect(loadConfig(prod).PRIVATE_HOST).toBe('127.0.0.2');
+    for (const PRIVATE_HOST of ['127.0.0.1', '0.0.0.0', '::', '::1', 'localhost', '172.30.77.20'])
+      expect(() => loadConfig({ ...prod, PRIVATE_HOST }), PRIVATE_HOST).toThrow(/PRIVATE_HOST/);
+    for (const HOST of ['0.0.0.0', '::', '127.0.0.1', '::1', 'localhost', 'gateway'])
+      expect(() => loadConfig({ ...prod, HOST }), HOST).toThrow(/HOST to be/);
+    for (const TRUSTED_PROXY_IPS of ['127.0.0.1', '172.30.77.10,::1', '', 'cloudflared'])
+      expect(() => loadConfig({ ...prod, TRUSTED_PROXY_IPS }), TRUSTED_PROXY_IPS).toThrow(
+        /TRUSTED_PROXY_IPS/,
+      );
+    expect(() => loadConfig({ ...prod, TAILSCALE_TRUSTED_PROXY_IPS: '172.30.77.10' })).toThrow(
+      /TAILSCALE_TRUSTED_PROXY_IPS/,
+    );
+    // The defaults (127.0.0.1 everywhere) are refused outright in production.
+    expect(() =>
+      loadConfig({
+        GATEWAY_MODE: 'production',
+        PRIVATE_ORIGIN: prod.PRIVATE_ORIGIN,
+        OWNER_TAILSCALE_LOGIN: prod.OWNER_TAILSCALE_LOGIN,
+      }),
+    ).toThrow(ConfigError);
+    // Development keeps loopback defaults (host tailscale serve, kernel TUN).
+    expect(loadConfig({}).PRIVATE_HOST).toBe('127.0.0.1');
+  });
   it('fails closed without the Tailscale owner or an https tailnet origin', () => {
     expect(() => loadConfig({ GATEWAY_MODE: 'production' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...prod, OWNER_TAILSCALE_LOGIN: '' })).toThrow(
@@ -264,14 +297,12 @@ describe('production mode listeners', () => {
   beforeAll(async () => {
     dir = mkdtempSync(path.join(tmpdir(), 'gw-prod-'));
     const config = loadConfig({
-      GATEWAY_MODE: 'production',
+      ...PROD_ENV,
       PORT: String(await freePort()),
       PRIVATE_PORT: String(await freePort()),
-      PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
       OWNER_TAILSCALE_LOGIN: OWNER,
       DATA_DIR: dir,
       GEV_MCP_ENABLED: 'false',
-      PULSE_URL: 'http://127.0.0.1:9',
     });
     gw = await startGateway(config, {
       logger: nullLogger,
