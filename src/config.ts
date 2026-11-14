@@ -245,6 +245,11 @@ const schema = z.object({
   // Location
   LOCATION_RETENTION_HOURS: int(24, 1, 24 * 30),
   LOCATION_STALE_MINUTES: int(10, 1, 24 * 60),
+  /**
+   * A tool called for an explicit point gets a "phone check" note (distance and bearing to the
+   * latest fix, never its coordinates) when that fix is at most this old.
+   */
+  LOCATION_PROXIMITY_MINUTES: int(30, 1, 24 * 60),
 });
 
 export type RawConfig = z.infer<typeof schema>;

@@ -382,7 +382,11 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * **Prompt injection** can't be eliminated by labelling; Claude may still be swayed by crafted
   transcripts or headlines. Tools are read-only, which bounds the damage to bad answers.
 * **Location sensitivity**: Claude (and Anthropic's retention) sees the coordinates it asks for.
-  Location reads are audited per grant, not blocked; every grant can read location.
+  Location reads are audited per grant, not blocked; every grant can read location. A tool
+  called for an explicit point also gets a "phone check" (distance, bearing and age of a fix at
+  most `LOCATION_PROXIMITY_MINUTES` old, never its coordinates); distance and bearing from a known
+  place still locate the phone roughly, so each check is audited as a location read
+  (`purpose: proximity_check`).
 * **claude.ai and a cross-host `authorization_endpoint`**: untested end to end. If it fails, the
   documented fallback weakens "humans only via Tailscale" (password+TOTP on the public host).
 * **Licensing**: Broadcastify's terms block Pulse's current audio source; OpenSky needs a licence;

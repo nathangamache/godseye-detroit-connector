@@ -5,7 +5,7 @@
 import type { UpstreamTool } from '../gev/child.js';
 import { NEVER_TOOLS, type ToolPolicy } from './policy.js';
 import { ToolSearch, type SearchHit } from './search.js';
-import { metaFor } from './tags.js';
+import { CATEGORIES, categoryFor, metaFor, type CategoryId } from './tags.js';
 import type { ToolContext, ToolDef, ToolOutput } from './types.js';
 
 export type GevCaller = (
@@ -65,9 +65,37 @@ export class ToolRegistry {
     return this.policy.evaluate(def).allowed;
   }
 
-  /** Allowed tools only. */
-  find(query: string, limit: number): SearchHit[] {
-    return this.search.search(query, limit, (t) => this.isAllowed(t));
+  /** Allowed tools only (optionally one category). A query naming tools exactly lists those first. */
+  find(query: string, limit: number, category?: CategoryId): SearchHit[] {
+    const ok = (t: ToolDef) =>
+      this.isAllowed(t) && (!category || categoryFor(t.name, t.source) === category);
+    const exact = query
+      .split(/[\s,]+/)
+      .map((w) => this.tools.get(w.trim()))
+      .filter((t): t is ToolDef => Boolean(t) && ok(t!));
+    const hits = this.search.search(query, limit + exact.length, ok);
+    const seen = new Set(exact.map((t) => t.name));
+    return [
+      ...exact.map((tool) => ({ tool, score: Infinity })),
+      ...hits.filter((h) => !seen.has(h.tool.name)),
+    ].slice(0, limit);
+  }
+
+  /**
+   * Every tool the policy allows (gateway, Pulse and allowlisted GEV tools), ordered by
+   * category then name: find_tools' list mode.
+   */
+  catalog(category?: CategoryId): Array<{ tool: ToolDef; category: CategoryId }> {
+    const order = new Map<string, number>(CATEGORIES.map((c, i) => [c.id, i]));
+    return this.all()
+      .filter((t) => this.isAllowed(t))
+      .map((tool) => ({ tool, category: categoryFor(tool.name, tool.source) }))
+      .filter((e) => !category || e.category === category)
+      .sort(
+        (a, b) =>
+          (order.get(a.category) ?? 99) - (order.get(b.category) ?? 99) ||
+          a.tool.name.localeCompare(b.tool.name),
+      );
   }
 
   hasGev(): boolean {

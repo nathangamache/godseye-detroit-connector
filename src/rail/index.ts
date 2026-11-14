@@ -8,6 +8,14 @@ import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import Flatbush from 'flatbush';
 import { bearingDeg, compassPoint, degreeBox, haversineM, pointToSegmentM } from '../util/geo.js';
+import {
+  isLineName,
+  lineKeys,
+  normLineName,
+  railroadsCompatible,
+  type LineName,
+  type TrackNames,
+} from './names.js';
 
 export interface Crossing {
   id: string;
@@ -133,6 +141,11 @@ export interface NearestLine {
   direction: string;
   closest_point: { lat: number; lon: number };
   narn_arc_id: number;
+  /**
+   * Every name the datasets give this track: NARN's subdivision plus the FRA subdivision of
+   * crossings on the same track nearby (the two often differ for the same rails).
+   */
+  line_names: LineName[];
 }
 
 export interface CrossingHit {
@@ -159,7 +172,14 @@ export interface CrossingHit {
   lon: number;
   fra_record_revised?: string;
   fra_url: string;
+  /** FRA's subdivision name for this crossing plus NARN's for the segment it sits on. */
+  line_names: LineName[];
 }
+
+/** How far a crossing may sit from a NARN segment and still be "on" it (coordinates are ~1-10 m). */
+export const CROSSING_ON_LINE_M = 40;
+/** Radius for collecting FRA names of crossings on the same track around a point. */
+export const SAME_TRACK_RADIUS_M = 3000;
 
 export class RailIndex {
   private readonly lineIdx: Flatbush;
@@ -207,6 +227,115 @@ export class RailIndex {
     return this.meta.sources.crossings.latest_revision;
   }
 
+  private crossingSeg?: Int32Array;
+
+  /**
+   * For every crossing, the NARN segment it sits on (or -1): the nearest segment within
+   * CROSSING_ON_LINE_M whose owners or trackage rights share a railroad family with the
+   * crossing's FRA railroad. Built once, on first use (~7.5k crossings, well under a second).
+   */
+  private crossingSegments(): Int32Array {
+    if (this.crossingSeg) return this.crossingSeg;
+    const out = new Int32Array(this.crossings.length).fill(-1);
+    for (let i = 0; i < this.crossings.length; i++) {
+      const c = this.crossings[i]!;
+      const { dLat, dLon } = degreeBox(c.lat, CROSSING_ON_LINE_M);
+      const ids = this.lineIdx.search(c.lon - dLon, c.lat - dLat, c.lon + dLon, c.lat + dLat);
+      let best = -1;
+      let bestD = Infinity;
+      for (const id of ids) {
+        const seg = this.lines[id];
+        if (!seg) continue;
+        if (!railroadsCompatible(segRailroads(seg), c.rr ? [c.rr] : [])) continue;
+        const d = segmentDistanceM(c.lat, c.lon, seg);
+        if (d < bestD) {
+          bestD = d;
+          best = id;
+        }
+      }
+      if (best >= 0 && bestD <= CROSSING_ON_LINE_M) out[i] = best;
+    }
+    this.crossingSeg = out;
+    return out;
+  }
+
+  /** True when two segments are the same named line of the same railroad (NARN). */
+  private sameNarnLine(a: LineSeg, b: LineSeg): boolean {
+    if (a === b) return true;
+    if (!a.sub || !b.sub) return false;
+    return (
+      normLineName(a.sub) === normLineName(b.sub) &&
+      railroadsCompatible(segRailroads(a), segRailroads(b))
+    );
+  }
+
+  /**
+   * Names for NARN segment `segIdx` near a point: its NARN subdivision, then the FRA
+   * subdivisions of crossings on the same line within SAME_TRACK_RADIUS_M, nearest first.
+   */
+  lineNamesForSegment(segIdx: number, lat: number, lon: number): LineName[] {
+    const seg = this.lines[segIdx];
+    if (!seg) return [];
+    const names: LineName[] = isLineName(seg.sub) ? [{ dataset: 'NARN', name: seg.sub }] : [];
+    const match = this.crossingSegments();
+    const { dLat, dLon } = degreeBox(lat, SAME_TRACK_RADIUS_M);
+    const fra: Array<{ name: string; d: number }> = [];
+    for (const i of this.xIdx.search(lon - dLon, lat - dLat, lon + dLon, lat + dLat)) {
+      const c = this.crossings[i];
+      const m = match[i] ?? -1;
+      if (!c || !isLineName(c.subdiv) || m < 0) continue;
+      const other = this.lines[m];
+      if (m !== segIdx && (!other || !this.sameNarnLine(seg, other))) continue;
+      const d = haversineM(lat, lon, c.lat, c.lon);
+      if (d <= SAME_TRACK_RADIUS_M) fra.push({ name: c.subdiv!, d });
+    }
+    fra.sort((a, b) => a.d - b.d);
+    const seen = new Set(lineKeys(names));
+    for (const f of fra) {
+      const k = normLineName(f.name);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      names.push({ dataset: 'FRA', name: f.name });
+      if (seen.size >= 4) break;
+    }
+    return names;
+  }
+
+  /** FRA's name for a crossing's line plus NARN's name for the segment it sits on. */
+  lineNamesForCrossing(crossingIdx: number): LineName[] {
+    const c = this.crossings[crossingIdx];
+    if (!c) return [];
+    const names: LineName[] = isLineName(c.subdiv) ? [{ dataset: 'FRA', name: c.subdiv }] : [];
+    const m = this.crossingSegments()[crossingIdx] ?? -1;
+    const sub = m >= 0 ? this.lines[m]?.sub : undefined;
+    if (isLineName(sub)) names.push({ dataset: 'NARN', name: sub });
+    return names;
+  }
+
+  /**
+   * The tracks around a point with every name the datasets give each: the nearest track, the
+   * nearest main line (when the nearest is a spur or yard) and the nearest at-grade crossing.
+   * Used to match Pulse's rail coverage, which may use any of those names.
+   */
+  tracksNear(lat: number, lon: number, maxM = 5000): TrackNames[] {
+    const out: TrackNames[] = [];
+    const line = this.nearestLine(lat, lon, maxM);
+    if (line) out.push(trackOf('nearest track', line));
+    if (line && line.kind !== 'main line') {
+      const main = this.nearestMainLine(lat, lon, maxM);
+      if (main) out.push(trackOf('nearest main line', main));
+    }
+    const x = this.nearestCrossing(lat, lon, maxM);
+    if (x)
+      out.push({
+        label: `crossing FRA ${x.fra_crossing_id}`,
+        names: x.line_names,
+        railroads: [x.railroad_code, x.railroad].filter((r): r is string => Boolean(r)),
+        distance_m: x.distance_m,
+      });
+    return out.filter((t) => t.names.length);
+  }
+
   nearestLine(
     lat: number,
     lon: number,
@@ -217,7 +346,8 @@ export class RailIndex {
       if (r > maxM) break;
       const { dLat, dLon } = degreeBox(lat, r);
       const ids = this.lineIdx.search(lon - dLon, lat - dLat, lon + dLon, lat + dLat);
-      let best: { seg: LineSeg; d: number; p: { lat: number; lon: number } } | undefined;
+      let best:
+        { seg: LineSeg; idx: number; d: number; p: { lat: number; lon: number } } | undefined;
       for (const i of ids) {
         const seg = this.lines[i];
         if (!seg || (filter && !filter(seg))) continue;
@@ -226,7 +356,7 @@ export class RailIndex {
           const [bx, by] = seg.c[k]!;
           const res = pointToSegmentM(lat, lon, ay, ax, by, bx);
           if (!best || res.distM < best.d)
-            best = { seg, d: res.distM, p: { lat: res.lat, lon: res.lon } };
+            best = { seg, idx: i, d: res.distM, p: { lat: res.lat, lon: res.lon } };
         }
       }
       if (best && best.d <= r) {
@@ -248,6 +378,7 @@ export class RailIndex {
           direction: compassPoint(brg),
           closest_point: { lat: round5(best.p.lat), lon: round5(best.p.lon) },
           narn_arc_id: s.arc,
+          line_names: this.lineNamesForSegment(best.idx, best.p.lat, best.p.lon),
         };
       }
     }
@@ -274,7 +405,7 @@ export class RailIndex {
       if (opts.atGradeOnly && c.pos !== 'At Grade') continue;
       const d = haversineM(lat, lon, c.lat, c.lon);
       if (d > radiusM) continue;
-      hits.push(toHit(c, lat, lon, d));
+      hits.push(toHit(c, lat, lon, d, this.lineNamesForCrossing(i)));
     }
     hits.sort((a, b) => a.distance_m - b.distance_m);
     return hits.slice(0, opts.limit ?? 25);
@@ -294,7 +425,38 @@ function round5(v: number): number {
   return Math.round(v * 1e5) / 1e5;
 }
 
-function toHit(c: Crossing, lat: number, lon: number, d: number): CrossingHit {
+/** Owners and trackage-rights holders of a NARN segment (reporting marks). */
+function segRailroads(s: LineSeg): string[] {
+  return [...(s.own ?? []), ...(s.rights ?? [])];
+}
+
+function segmentDistanceM(lat: number, lon: number, seg: LineSeg): number {
+  let best = Infinity;
+  for (let k = 1; k < seg.c.length; k++) {
+    const [ax, ay] = seg.c[k - 1]!;
+    const [bx, by] = seg.c[k]!;
+    const d = pointToSegmentM(lat, lon, ay, ax, by, bx).distM;
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function trackOf(label: string, l: NearestLine): TrackNames {
+  return {
+    label,
+    names: l.line_names,
+    railroads: [...l.owners, ...l.trackage_rights],
+    distance_m: l.distance_m,
+  };
+}
+
+function toHit(
+  c: Crossing,
+  lat: number,
+  lon: number,
+  d: number,
+  lineNames: LineName[],
+): CrossingHit {
   const counts = {
     day_thru: c.day,
     night_thru: c.night,
@@ -330,5 +492,6 @@ function toHit(c: Crossing, lat: number, lon: number, d: number): CrossingHit {
     lon: c.lon,
     fra_record_revised: c.rev,
     fra_url: `https://safetydata.fra.dot.gov/OfficeofSafety/PublicSite/Crossing/Crossing.aspx?phasetype=C&rpttype=I&txtcrossingnum=${encodeURIComponent(c.id)}`,
+    line_names: lineNames,
   };
 }

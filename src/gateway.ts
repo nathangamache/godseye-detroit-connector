@@ -140,7 +140,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     token: config.PULSE_API_TOKEN,
     timeoutMs: config.PULSE_TIMEOUT_MS,
   });
-  for (const t of pulseTools(pulse)) registry.register(t);
+  // The rail index lets the Pulse rail tool match coverage on every name a track has.
+  for (const t of pulseTools(pulse, { rail, now })) registry.register(t);
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(

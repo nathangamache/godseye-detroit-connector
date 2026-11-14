@@ -91,19 +91,24 @@ async function client(token: string): Promise<Client> {
 }
 
 describe('MCP-2: location reads are audited per grant, without coordinates', () => {
-  it('where_am_i and no-argument whats_happening_here are recorded; explicit points are not', async () => {
+  it('where_am_i, no-argument whats_happening_here and the phone check on an explicit point are recorded', async () => {
     const { tokens, familyId } = grant('dcr_some_client');
     const c = await client(tokens.access_token);
     try {
       const before = logs.length;
       await c.callTool({ name: 'where_am_i', arguments: {} });
       await c.callTool({ name: 'whats_happening_here', arguments: {} });
+      // An explicit point while the fix is recent: the result says how far the phone is from
+      // that point, which is derived from the fix, so it is a location read too.
       await c.callTool({ name: 'whats_happening_here', arguments: { lat: 42.28, lon: -83.74 } });
       const reads = gw.audit.recent(10, 'access');
       expect(reads.map((r) => JSON.parse(r.detail!).tool)).toEqual([
         'whats_happening_here',
+        'whats_happening_here',
         'where_am_i',
       ]);
+      expect(JSON.parse(reads[0]!.detail!).purpose).toBe('proximity_check');
+      expect(JSON.parse(reads[1]!.detail!).purpose).toBeUndefined();
       for (const r of reads) {
         expect(r.event).toBe('location_read');
         expect(r.client_id).toBe('dcr_some_client');
@@ -111,7 +116,7 @@ describe('MCP-2: location reads are audited per grant, without coordinates', () 
         expect(r.detail).not.toMatch(/42\.3|83\.0/);
       }
       const fam = gw.tokens.listFamilies().find((f) => f.family_id === familyId)!;
-      expect(fam.location_reads).toBe(2);
+      expect(fam.location_reads).toBe(3);
       expect(fam.last_location_read_at).toBeGreaterThan(0);
       // tool_call log lines exist for the native tools too, never with arguments or coordinates.
       const lines = logs.slice(before).filter((l) => l.includes('"tool_call"'));

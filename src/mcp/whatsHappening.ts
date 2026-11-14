@@ -2,17 +2,21 @@
  * where_am_i and whats_happening_here.
  *
  * whats_happening_here fans out in parallel with per-source timeouts:
- *   rail (native) -> nearest line + crossing
- *   Pulse        -> rail_activity_near, incidents_near
+ *   rail (native) -> nearest line + crossing, with every name FRA and NARN give the track
+ *   Pulse        -> rail_activity_near, incidents_near (each says whether a receiver covers
+ *                   this line/area, so 0 messages is never mistaken for "quiet")
  *   GEV          -> get_traffic_flow, find_cctv_cameras, get_weather
- * and returns one compact summary with each source's timestamp/age and error.
+ * and returns one compact summary with each source's timestamp/age and error. For an explicit
+ * point it also says how far Nathan's phone is from that point (src/location/proximity.ts).
  */
 import type { Config } from '../config.js';
+import type { Point, ProximityCheck } from '../location/proximity.js';
 import type { LocationStore } from '../location/store.js';
 import { postprocess, type McpToolResult } from '../tools/postprocess.js';
 import type { ToolRunner } from '../tools/runner.js';
 import type { ToolContext, ToolOutput } from '../tools/types.js';
-import { titleCase } from '../rail/tools.js';
+import { formatLineNames, titleCase, type LineName } from '../rail/names.js';
+import { humanAge } from '../util/format.js';
 
 export interface PositionInfo {
   lat: number;
@@ -85,12 +89,7 @@ export function whereAmI(store: LocationStore, config: Config, now = Date.now())
   };
 }
 
-export function humanAge(s: number): string {
-  if (s < 90) return `${s} s`;
-  if (s < 5400) return `${Math.round(s / 60)} min`;
-  if (s < 172_800) return `${Math.round(s / 3600)} h`;
-  return `${Math.round(s / 86_400)} days`;
-}
+export { humanAge };
 
 interface SourceReport {
   source: string;
@@ -133,6 +132,7 @@ interface RailData {
   line?: {
     railroad?: string;
     subdivision?: string;
+    line_names?: LineName[];
     kind?: string;
     distance_m?: number;
     direction?: string;
@@ -140,6 +140,7 @@ interface RailData {
   main_line?: {
     railroad?: string;
     subdivision?: string;
+    line_names?: LineName[];
     distance_m?: number;
     direction?: string;
   } | null;
@@ -148,6 +149,7 @@ interface RailData {
     street?: string;
     railroad?: string;
     subdivision?: string;
+    line_names?: LineName[];
     distance_m?: number;
     direction?: string;
     warning_devices?: string;
@@ -160,15 +162,17 @@ interface RailData {
 export function railLine(d: RailData): string {
   const m = (n?: number) =>
     n === undefined ? '?' : n < 1000 ? `${n} m` : `${(n / 1000).toFixed(1)} km`;
-  const sub = (s?: string) => (s ? ` ${titleCase(s)} Sub` : '');
+  // Every name the datasets give the track ("[NARN: X Sub; FRA: Y Sub]"), else the one name.
+  const sub = (s?: string, names?: LineName[]) =>
+    names?.length ? ` [${formatLineNames(names)}]` : s ? ` ${titleCase(s)} Sub` : '';
   const parts: string[] = [];
   if (d.line)
     parts.push(
-      `nearest track ${d.line.railroad ?? 'unknown railroad'}${sub(d.line.subdivision)} (${d.line.kind ?? 'track'}) ${m(d.line.distance_m)} ${d.line.direction ?? ''}`.trim(),
+      `nearest track ${d.line.railroad ?? 'unknown railroad'}${sub(d.line.subdivision, d.line.line_names)} (${d.line.kind ?? 'track'}) ${m(d.line.distance_m)} ${d.line.direction ?? ''}`.trim(),
     );
   if (d.main_line)
     parts.push(
-      `main line ${d.main_line.railroad ?? ''}${sub(d.main_line.subdivision)} ${m(d.main_line.distance_m)} ${d.main_line.direction ?? ''}`.trim(),
+      `main line ${d.main_line.railroad ?? ''}${sub(d.main_line.subdivision, d.main_line.line_names)} ${m(d.main_line.distance_m)} ${d.main_line.direction ?? ''}`.trim(),
     );
   const c = d.crossing;
   if (c) {
@@ -179,7 +183,7 @@ export function railLine(d: RailData): string {
       .filter(Boolean)
       .join(', ');
     parts.push(
-      `crossing FRA ${c.fra_crossing_id}${c.street ? ` at ${titleCase(c.street)}` : ''} (${c.railroad ?? ''}${sub(c.subdivision)}) ${m(c.distance_m)} ${c.direction ?? ''}${extras ? `; ${extras}` : ''}`,
+      `crossing FRA ${c.fra_crossing_id}${c.street ? ` at ${titleCase(c.street)}` : ''} (${c.railroad ?? ''}${sub(c.subdivision, c.line_names)}) ${m(c.distance_m)} ${c.direction ?? ''}${extras ? `; ${extras}` : ''}`,
     );
   }
   if (!parts.length) return 'no rail line or crossing in range (Michigan data only)';
@@ -191,6 +195,8 @@ export interface WhatsHappeningDeps {
   runner: ToolRunner;
   locations: LocationStore;
   now?: () => number;
+  /** Explicit point only: distance/bearing of the phone's recent fix (audited by the caller). */
+  phoneCheck?: (p: Point) => ProximityCheck | undefined;
 }
 
 export interface WhatsHappeningArgs {
@@ -236,6 +242,8 @@ export async function whatsHappeningHere(
   } else {
     positionNote = 'position supplied by caller';
   }
+  // An explicit point: is Nathan's phone actually there?
+  const phone = usesCaller(args) ? deps.phoneCheck?.({ lat, lon }) : undefined;
 
   const runner = deps.runner;
   const registry = runner.registry;
@@ -286,20 +294,16 @@ export async function whatsHappeningHere(
     if (out.isError) return { status: 'error', summary: out.summary };
     return { status: 'ok', summary: railLine((out.data ?? {}) as RailData), data: out.data };
   });
-  const railData = rail.data as { line?: { subdivision?: string; railroad?: string } } | undefined;
 
   const pulseDown = (out: ToolOutput) => out.isError && out.errorKind === 'unavailable';
   const [railRadio, incidents, traffic, cameras, weather] = await Promise.all([
+    // The rail tool works out every name the track here has and matches Pulse's coverage on
+    // all of them; it asks Pulse twice (feeds/status, then rail/activity).
     runSource(
       'rail_radio',
       'rail_activity_near',
-      {
-        lat,
-        lon,
-        since_minutes: 30,
-        ...(railData?.line?.subdivision ? { subdivision: railData.line.subdivision } : {}),
-      },
-      deps.config.PULSE_TIMEOUT_MS + 500,
+      { lat, lon, since_minutes: 30 },
+      2 * deps.config.PULSE_TIMEOUT_MS + 500,
       (out) =>
         pulseDown(out)
           ? { status: 'unavailable', summary: 'no Pulse data / no rail radio coverage yet' }
@@ -377,6 +381,7 @@ export async function whatsHappeningHere(
   const lines = [
     `What's happening within ${radius} km of ${lat.toFixed(4)}, ${lon.toFixed(4)} (${positionNote}):`,
   ];
+  if (phone) lines.push(phone.note);
   for (const s of sources) {
     const age = s.age_s !== undefined ? ` [data ${humanAge(s.age_s)} old]` : '';
     const flag = s.status === 'ok' ? '' : ` (${s.status})`;
@@ -386,7 +391,23 @@ export async function whatsHappeningHere(
 
   const output: ToolOutput = {
     summary: lines.join('\n'),
-    data: { center: { lat, lon }, radius_km: radius, position: positionNote, sources },
+    data: {
+      center: { lat, lon },
+      radius_km: radius,
+      position: positionNote,
+      ...(phone
+        ? {
+            owner_phone: {
+              distance_km: phone.distance_km,
+              bearing_from_point_deg: phone.bearing_deg,
+              compass_from_point: phone.compass,
+              fix_age_s: phone.fix_age_s,
+              at_this_place: phone.at_place,
+            },
+          }
+        : {}),
+      sources,
+    },
   };
   return postprocess(
     {
@@ -401,9 +422,14 @@ export async function whatsHappeningHere(
   );
 }
 
+function usesCaller(a: WhatsHappeningArgs): boolean {
+  return a.lat !== undefined && a.lon !== undefined;
+}
+
 function oneLine(s: string): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  return t.length > 400 ? t.slice(0, 397) + '…' : t;
+  // Room for the counts plus the rail-radio and EOT coverage verdicts.
+  return t.length > 900 ? t.slice(0, 897) + '…' : t;
 }
 
 function compact(v: unknown, keys: string[]): unknown {

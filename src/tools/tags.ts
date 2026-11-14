@@ -7,6 +7,80 @@ export interface ToolMeta {
   attribution?: string;
 }
 
+/** find_tools catalog categories, in display order. "other" holds anything uncategorised. */
+export const CATEGORIES = [
+  { id: 'rail', label: 'Rail lines, crossings and rail radio' },
+  { id: 'scanner', label: 'Scanner radio and incidents (Detroit Pulse)' },
+  { id: 'weather', label: 'Weather, radar and wind' },
+  { id: 'hazards', label: 'Earthquakes, fires, storms and floods' },
+  { id: 'traffic', label: 'Traffic, routes and transit' },
+  { id: 'cameras', label: 'Public cameras' },
+  { id: 'aviation', label: 'Aircraft' },
+  { id: 'maritime', label: 'Ships and vessels' },
+  { id: 'space', label: 'Satellites, launches and imagery' },
+  { id: 'news', label: 'News, radio stations and briefs' },
+  { id: 'places', label: 'Places, terrain and infrastructure' },
+  { id: 'map', label: "God's Eye View map links" },
+  { id: 'other', label: 'Other' },
+] as const;
+
+export type CategoryId = (typeof CATEGORIES)[number]['id'];
+export const CATEGORY_IDS = CATEGORIES.map((c) => c.id) as [CategoryId, ...CategoryId[]];
+
+const CATEGORY_OF: Record<string, CategoryId> = {
+  nearest_rail: 'rail',
+  crossings_near: 'rail',
+  rail_activity_near: 'rail',
+  incidents_near: 'scanner',
+  incident_detail: 'scanner',
+  search_transcripts: 'scanner',
+  feeds_status: 'scanner',
+  get_weather: 'weather',
+  get_weather_map: 'weather',
+  get_wind: 'weather',
+  get_earthquakes: 'hazards',
+  get_active_fires: 'hazards',
+  get_fire_perimeters: 'hazards',
+  get_cyclones: 'hazards',
+  get_bhote_koshi_flood: 'hazards',
+  get_traffic_flow: 'traffic',
+  plan_route: 'traffic',
+  get_transit_vehicles: 'traffic',
+  get_bike_share: 'traffic',
+  find_cctv_cameras: 'cameras',
+  get_cctv_snapshot: 'cameras',
+  find_alpr_cameras: 'cameras',
+  aircraft_in_area: 'aviation',
+  find_aircraft: 'aviation',
+  get_aircraft_track: 'aviation',
+  get_aircraft_info: 'aviation',
+  vessels_in_area: 'maritime',
+  find_vessel: 'maritime',
+  get_vessel_track: 'maritime',
+  get_recent_launches: 'space',
+  next_satellite_pass: 'space',
+  satellites_overhead: 'space',
+  get_recent_imagery: 'space',
+  get_regional_brief: 'news',
+  find_radio_stations: 'news',
+  situation_brief: 'news',
+  military_awareness: 'news',
+  get_hud_caption: 'news',
+  get_map_features: 'places',
+  get_terrain_height: 'places',
+  find_infrastructure: 'places',
+  find_submarine_cables: 'places',
+  find_military_installations: 'places',
+  search_places: 'places',
+  places_nearby: 'places',
+  show_in_gods_eye_view: 'map',
+};
+
+/** A tool's catalog category: hand-assigned, else by source (Pulse tools are scanner), else other. */
+export function categoryFor(name: string, source?: string): CategoryId {
+  return CATEGORY_OF[name] ?? (source === 'pulse' ? 'scanner' : 'other');
+}
+
 const OSM = '© OpenStreetMap contributors (ODbL), openstreetmap.org/copyright';
 const OPEN_METEO = 'Weather data by Open-Meteo.com (CC BY 4.0)';
 const NOAA = 'NOAA / NWS';

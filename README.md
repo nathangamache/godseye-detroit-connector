@@ -7,9 +7,11 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 ## Why a gateway
 
 * Claude gets **four** tools instead of 40+: `find_tools` (BM25 search with hand-written
-  synonyms), `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone
-  fix) and `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, traffic,
-  cameras and weather, in parallel, each with its data age).
+  synonyms; with no query it lists every tool the policy allows, by category, paginated),
+  `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
+  `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, traffic, cameras
+  and weather, in parallel, each with its data age). The server instructions give the live tool
+  count instead of a fixed number.
 * GEV's own MCP server is local-only and its UI assumes the owner is local. The gateway adds
   OAuth, licensing policy, quotas, result shrinking and link rewriting, and keeps every
   human-facing page on the tailnet, with an authenticator code (step-up) for approvals and
@@ -87,6 +89,15 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   (summary and images included) capped at 100k characters, provenance, retrieval time,
   attribution and an "untrusted data" label first.
 * Location reads (`where_am_i`, `whats_happening_here` without a point) are audited per grant.
+  A tool called for an explicit point, while the phone's fix is under 30 minutes old, adds a
+  "phone check" (distance, bearing from the point to the phone, fix age; never the phone's
+  coordinates) and says plainly when the phone is not there; that is audited as a location read
+  too.
+* Rail lines are reported with every subdivision name the FRA and NARN datasets give the same
+  track (they often differ), computed from the data, and Pulse rail coverage is matched on all of
+  them. Pulse radio results say whether a receiver actually covers the line or area (none
+  installed, offline since when, listening and quiet, activity, or Pulse too old to say), so zero
+  messages is never passed off as "quiet".
 
 ## Repository layout
 

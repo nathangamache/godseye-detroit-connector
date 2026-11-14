@@ -5,22 +5,44 @@ import type { AddressInfo } from 'node:net';
 export interface MockPulse {
   url: string;
   token: string;
+  /** Paths requested, in order. */
   requests: string[];
+  /** Full request URLs (path + query), in order. */
+  urls: URL[];
   close(): Promise<void>;
 }
 
-export async function startMockPulse(token = 'pulse-test-token'): Promise<MockPulse> {
+export interface MockPulseOptions {
+  /** Replaces the /v1/feeds/status body (default: one rail feed, contract v1 without receivers). */
+  feeds?: () => unknown;
+  /** Replaces the /v1/rail/activity body. */
+  rail?: (q: URLSearchParams) => unknown;
+  /** Replaces the /v1/incidents/near body. */
+  incidents?: (q: URLSearchParams) => unknown;
+}
+
+export async function startMockPulse(
+  token = 'pulse-test-token',
+  opts: MockPulseOptions = {},
+): Promise<MockPulse> {
   const requests: string[] = [];
+  const urls: URL[] = [];
   const now = () => new Date().toISOString();
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     requests.push(url.pathname);
+    urls.push(url);
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
     if (req.headers.authorization !== `Bearer ${token}`)
       return send(401, { error: { code: 'unauthorized', message: 'no' } });
+    if (url.pathname === '/v1/incidents/near' && opts.incidents)
+      return send(200, opts.incidents(url.searchParams));
+    if (url.pathname === '/v1/rail/activity' && opts.rail)
+      return send(200, opts.rail(url.searchParams));
+    if (url.pathname === '/v1/feeds/status' && opts.feeds) return send(200, opts.feeds());
     if (url.pathname === '/v1/incidents/near') {
       return send(200, {
         generated_at: now(),
@@ -90,6 +112,7 @@ export async function startMockPulse(token = 'pulse-test-token'): Promise<MockPu
     url: `http://127.0.0.1:${port}`,
     token,
     requests,
+    urls,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }

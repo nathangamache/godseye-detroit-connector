@@ -3,17 +3,23 @@ import { metaFor } from '../tools/tags.js';
 import type { ToolDef } from '../tools/types.js';
 import { humanDistance } from '../util/format.js';
 import type { CrossingHit, NearestLine, RailIndex } from './index.js';
+import { displayLineName, formatLineNames, titleCase } from './names.js';
+
+export { titleCase };
 
 const LATLON = {
   lat: { type: 'number', minimum: -90, maximum: 90, description: 'Latitude (WGS84)' },
   lon: { type: 'number', minimum: -180, maximum: 180, description: 'Longitude (WGS84)' },
 };
 
+/** "line names FRA: X Sub; NARN: Y Sub" (every name the datasets give the track), or the one name. */
+function namesPhrase(names: CrossingHit['line_names'], fallback?: string): string | undefined {
+  if (names.length) return `line names ${formatLineNames(names)}`;
+  return fallback ? displayLineName(fallback) : undefined;
+}
+
 function lineSentence(l: NearestLine): string {
-  const name = [
-    l.railroad ?? 'unknown railroad',
-    l.subdivision ? `${titleCase(l.subdivision)} Subdivision` : undefined,
-  ]
+  const name = [l.railroad ?? 'unknown railroad', namesPhrase(l.line_names, l.subdivision)]
     .filter(Boolean)
     .join(', ');
   const rights = l.trackage_rights.length
@@ -27,7 +33,7 @@ function crossingSentence(c: CrossingHit): string {
   const where = [c.street, c.city].filter(Boolean).join(', ');
   const rr = [
     c.railroad,
-    c.subdivision ? `${titleCase(c.subdivision)} Sub` : undefined,
+    namesPhrase(c.line_names, c.subdivision),
     c.milepost ? `MP ${c.milepost}` : undefined,
   ]
     .filter(Boolean)
@@ -39,25 +45,15 @@ function crossingSentence(c: CrossingHit): string {
   return `Nearest at-grade crossing: FRA ${c.fra_crossing_id}${where ? ` at ${where}` : ''}${rr ? ` (${rr})` : ''}, ${humanDistance(c.distance_m)} ${c.direction}; ${c.warning_devices ?? 'warning devices unknown'}.${trains}`;
 }
 
-/** "MICHIGAN LINE (NS)" -> "Michigan Line (NS)": parenthesized railroad marks stay upper case. */
-export function titleCase(s: string): string {
-  return s
-    .split(/(\([^)]*\))/)
-    .map((part) =>
-      part.startsWith('(') ? part : part.toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase()),
-    )
-    .join('');
-}
-
 export function railTools(index: RailIndex): ToolDef[] {
   const asOf = index.datasetAsOf();
-  const dataNote = `Static public datasets (FRA crossing inventory revised through ${asOf ?? 'unknown'}; NARN lines). They describe infrastructure, not live train positions.`;
+  const dataNote = `Static public datasets (FRA crossing inventory revised through ${asOf ?? 'unknown'}; NARN lines). They describe infrastructure, not live train positions. FRA and NARN often name the same track differently; line_names lists every name.`;
   return [
     {
       name: 'nearest_rail',
       title: 'Nearest rail line and train crossing',
       description:
-        'Nearest railroad line (owner, trackage rights, subdivision, distance, direction) and the nearest at-grade grade crossing (FRA crossing ID, street, railroad, daily train counts, warning devices, distance, bearing) to a point. Michigan coverage. Use for train, railroad, track or crossing questions.',
+        'Nearest railroad line (owner, trackage rights, every subdivision name the FRA and NARN datasets give it, distance, direction) and the nearest at-grade grade crossing (FRA crossing ID, street, railroad, daily train counts, warning devices, distance, bearing) to a point. Michigan coverage. Use for train, railroad, track or crossing questions.',
       source: 'gateway',
       family: 'pulse',
       inputSchema: {
@@ -109,7 +105,7 @@ export function railTools(index: RailIndex): ToolDef[] {
       name: 'crossings_near',
       title: 'List grade crossings in a radius',
       description:
-        'Railroad grade crossings within a radius of a point, nearest first, from the FRA crossing inventory: crossing ID, street, railroad, subdivision, milepost, at-grade vs grade-separated, warning devices, daily train counts, distance and bearing. Michigan coverage.',
+        'Railroad grade crossings within a radius of a point, nearest first, from the FRA crossing inventory: crossing ID, street, railroad, line names (FRA subdivision and the NARN name for the same track), milepost, at-grade vs grade-separated, warning devices, daily train counts, distance and bearing. Michigan coverage.',
       source: 'gateway',
       family: 'pulse',
       inputSchema: {
@@ -144,8 +140,10 @@ export function railTools(index: RailIndex): ToolDef[] {
           atGradeOnly: Boolean(args.at_grade_only),
           limit: (args.limit as number | undefined) ?? 20,
         });
-        const summary = hits.length
-          ? `${hits.length} crossing(s) within ${radiusKm} km; nearest is FRA ${hits[0]!.fra_crossing_id}${hits[0]!.street ? ` at ${hits[0]!.street}` : ''}, ${humanDistance(hits[0]!.distance_m)} ${hits[0]!.direction}. ${dataNote}`
+        const first = hits[0];
+        const firstNames = first ? namesPhrase(first.line_names, first.subdivision) : undefined;
+        const summary = first
+          ? `${hits.length} crossing(s) within ${radiusKm} km; nearest is FRA ${first.fra_crossing_id}${first.street ? ` at ${first.street}` : ''}${firstNames ? ` (${firstNames})` : ''}, ${humanDistance(first.distance_m)} ${first.direction}. ${dataNote}`
           : `No crossings within ${radiusKm} km (Michigan coverage only). ${dataNote}`;
         return {
           summary,

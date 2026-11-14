@@ -1,8 +1,10 @@
 # Detroit Pulse API contract (v1, for the gateway)
 
-Status: **contract only.** Pulse does not implement it yet. The gateway's client
-(`src/pulse/client.ts`) and tools (`src/pulse/tools.ts`) are written against this document, and the
-test double in `test/fixtures/mock-pulse.ts` implements it.
+Status: v1, plus the additive v1.1 receiver/coverage fields on `GET /v1/feeds/status` (below).
+The gateway's client (`src/pulse/client.ts`), tools (`src/pulse/tools.ts`) and coverage logic
+(`src/pulse/coverage.ts`) are written against this document, and the test double in
+`test/fixtures/mock-pulse.ts` implements it. Every v1.1 field is optional for the gateway: an
+older Pulse that omits them still works, and the gateway says it can't tell quiet from uncovered.
 
 ## Transport
 
@@ -91,8 +93,8 @@ nearest first. Includes incidents opened or updated within the window.
 |---|---|---|---|
 | `lat`, `lon` | number | required | |
 | `since_minutes` | integer | 30 | 1–720 |
-| `subdivision` | string | — | hint from the gateway's NARN lookup, e.g. `HOLLY` |
-| `railroad` | string | — | hint, e.g. `CN` |
+| `subdivision` | string | — | hint: the `coverage.lines[].name` from feeds/status that matched this track (any of its names or aliases), else a plain dataset name with marks and "Sub" removed, e.g. `Holly` |
+| `railroad` | string | — | hint, e.g. `CN` (only when the caller or the matched coverage line gives one) |
 
 Pulse maps the point (and hints) to the rail subdivision(s) and the radio channels it monitors for
 them, then returns:
@@ -134,10 +136,105 @@ licensing finding: Broadcastify's terms (rev. 2026-07-22, §9) forbid automated 
 transcription and LLM processing without a commercial licence, so Pulse needs its own SDR
 receivers or a licensed feed before this API carries real data.
 
+### v1.1: receivers and coverage (additive, backward compatible)
+
+Every existing field stays. Each feed adds:
+
+```ts
+receiver: {
+  state: "not_installed" | "offline" | "online";
+  last_seen_at?: string;     // ISO 8601 UTC, the receiver's last heartbeat
+  device?: string;           // e.g. "rtl_airband", "traintap"
+};
+coverage: {
+  area?: string;             // what the channel hears, e.g. a county or city
+  lines?: { railroad: string; name: string; aliases: string[] }[];
+  radius_km?: number;
+};
+example?: true;              // shipped placeholder feed (see below)
+```
+
+* `receiver.state`:
+  * `not_installed`: no receiver has **ever** reported for this feed's source (for example the SDR
+    containers/profile are not running and never produced a heartbeat).
+  * `offline`: a receiver reported before, but its heartbeat is older than `RECEIVER_STALE_S`
+    (default 300 s).
+  * `online`: the heartbeat is fresh. A fresh heartbeat with 0 chunks means the channel is
+    **quiet**, not uncovered.
+* `coverage` comes from Pulse's config. For rail feeds, `lines` are the lines this
+  receiver/channel hears; `aliases` lists **every other name the same track has in other
+  datasets** (for example the FRA crossing inventory and NARN often give one track different
+  subdivision names). Town-specific aliases belong only in Pulse's gitignored `*.local.*` config.
+* Example/placeholder feeds shipped in tracked config (ids starting `example_`) must be reported
+  with `"example": true` and must **not** count as coverage anywhere.
+
+At top level:
+
+```ts
+coverage_summary: {
+  rail_radio: S; eot: S; public_safety: S;
+}
+// S = "no_receiver" | "receiver_offline" | "listening" | "not_configured"
+// not_configured = no enabled feed of that kind exists, or only the shipped example/placeholder feeds.
+```
+
+Example (a rail channel set up but its SDR never started, the EOT receiver online without a
+location, a placeholder scanner feed):
+
+```json
+{
+  "generated_at": "2026-11-14T12:00:00Z",
+  "feeds": [
+    {"feed_id": "example_fire_dispatch", "name": "Example city fire dispatch", "category": "public_safety",
+     "enabled": true, "state": "down", "chunks_last_hour": 0, "source": "sdr:rtl_airband",
+     "example": true, "receiver": {"state": "not_installed"}, "coverage": {}},
+    {"feed_id": "rr_road", "name": "Railroad road channel", "category": "rail", "enabled": true,
+     "state": "down", "chunks_last_hour": 0, "source": "sdr:rtl_airband",
+     "receiver": {"state": "not_installed"},
+     "coverage": {"lines": [{"railroad": "CSX", "name": "Alpha Subdivision", "aliases": ["Bravo (CSXT)"]}]}},
+    {"feed_id": "eot_hot", "name": "EOT/HOT telemetry (traintap)", "category": "rail", "enabled": true,
+     "state": "up", "chunks_last_hour": 9, "source": "sdr:traintap",
+     "receiver": {"state": "online", "last_seen_at": "2026-11-14T11:59:40Z", "device": "traintap"},
+     "coverage": {}}
+  ],
+  "coverage_summary": {"rail_radio": "no_receiver", "eot": "listening", "public_safety": "not_configured"}
+}
+```
+
+### How the gateway uses it (`src/pulse/coverage.ts`)
+
+* Feeds with `"example": true` or an id starting `example_` are ignored, whatever their state.
+* Kinds: `category: "public_safety"` is scanner radio; within `category: "rail"`, a feed is EOT/HOT
+  telemetry when it has `kind: "eot"`, a `traintap` source, or an EOT id/name; otherwise it is
+  rail voice.
+* `rail_activity_near` (and `whats_happening_here`, which uses it) reads feeds/status first, then
+  works out every name the datasets give the track at the point (NARN's subdivision, the FRA
+  subdivision of crossings on the same rails within 3 km, the nearest crossing's names) and
+  matches them against each rail feed's `coverage.lines` names **and** aliases. Names are
+  compared normalised: case, parenthesised marks such as `(CSXT)`, "Subdivision"/"Sub"/"District",
+  a leading railroad mark, "MAIN LINE" vs "MAINLINE"; railroads must agree when both sides name
+  one (legacy marks such as GTW/CN or ATK/AMTK count as the same railroad). A feed that Pulse's own
+  `rail/activity` lists in `coverage.channels` also counts. The matched line's `name` is sent as the
+  `subdivision` hint.
+* Each result then states exactly one of: **activity found**; **listening and quiet** (a matching
+  receiver is online and 0 messages arrived in the window); **receiver offline since T**;
+  **no receiver** (none of that kind is set up, a channel is set up but its receiver never
+  reported, or no channel covers this line, naming the lines Pulse does cover); or **Pulse is
+  too old to say** (no `receiver`/`coverage`/`coverage_summary`; unknown, not "quiet"). EOT/HOT
+  results add that packets can't be tied to the place when the EOT receiver has no
+  `coverage.area`/`radius_km`. Scanner results list the areas the listening feeds cover (the
+  gateway can't tell whether the point is inside them).
+* `incidents_near` asks for feeds/status alongside the incidents and states the scanner verdict.
+* One feeds/status answer is shared for 10 s, so `whats_happening_here` asks once.
+
 ## Gateway behaviour
 
 * Pulse unreachable (connection refused, timeout) → the tool returns
   "Pulse is not running …" with `isError` and kind `unavailable`; `whats_happening_here` reports
-  "no Pulse data / no rail radio coverage yet" for that source and carries on.
+  "no Pulse data / no rail radio coverage yet" for that source and carries on. (`rail_activity_near`
+  returns that as soon as feeds/status is unreachable, without waiting out a second timeout.)
+* feeds/status failing (non-2xx) while the other route works → the result says the feed status
+  was unavailable, so 0 messages can't be told apart from no receiver.
+* An older Pulse without the v1.1 fields → treated as unknown, and the result says so.
 * Non-2xx → an error result quoting Pulse's `error.code` (never its stack).
 * Responses are size-capped, links rewritten, and summarized; `*_untrusted` text is passed as data.
