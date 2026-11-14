@@ -208,7 +208,7 @@ describe('rail radio: which situation applies', () => {
       expect(t).not.toMatch(/Example Subdivision/);
       // EOT: a channel exists but no receiver has ever reported.
       expect(t).toMatch(
-        /No EOT\/HOT receiver installed: EOT\/HOT telemetry \(traintap\) is configured but no receiver has ever reported/,
+        /No EOT\/HOT receiver installed: 1 EOT\/HOT telemetry channel \(EOT\/HOT telemetry \(traintap\)\) is configured, but no receiver has ever reported/,
       );
       // Scanner: only the example feed exists, so nothing is set up.
       expect(t).toMatch(

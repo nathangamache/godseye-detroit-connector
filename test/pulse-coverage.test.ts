@@ -125,7 +125,54 @@ describe('verdicts', () => {
     const v = rail(status([railFeed({ receiver: { state: 'not_installed' } })]));
     expect(v).toMatchObject({ state: 'no_receiver', reason: 'never_reported' });
     expect(verdictSentence(v, NOW)).toMatch(
-      /No rail radio receiver installed: CSX Alpha road is configured but no receiver has ever reported/,
+      /No rail radio receiver installed: 1 CSX channel \(CSX Alpha road\) is configured, but no receiver has ever reported/,
+    );
+  });
+
+  it('counts the configured channels, with the right grammar, instead of "X ... and N more is"', () => {
+    const never = { receiver: { state: 'not_installed' } };
+    const csx = Array.from({ length: 11 }, (_, i) =>
+      railFeed({ ...never, feed_id: `csx_line_${i}`, name: `CSX line ${i}` }),
+    );
+    const many = verdictSentence(rail(status(csx)), NOW);
+    expect(many).toMatch(
+      /No rail radio receiver installed: 11 CSX channels are configured, but no receiver has ever reported\./,
+    );
+    expect(many).not.toMatch(/more is|CSX line 0/);
+    const cn = (i: number) =>
+      railFeed({
+        ...never,
+        feed_id: `cn_${i}`,
+        name: `CN road ${i}`,
+        coverage: { lines: [{ railroad: 'CN', name: 'Alpha Subdivision', aliases: [] }] },
+      });
+    // Pulse's own lookup lists channels of two railroads for the point (shared track).
+    const mixed = assess('rail_radio', status([...csx.slice(0, 2), cn(1)]), {
+      messages: 0,
+      window_min: 30,
+      tracks: TRACK,
+      pulseChannels: ['csx_line_0', 'csx_line_1', 'cn_1'],
+    });
+    expect(verdictSentence(mixed, NOW)).toMatch(
+      /: 3 rail radio channels \(2 CSX, 1 CN\) are configured, but no receiver/,
+    );
+    const plain = (i: number) =>
+      railFeed({ ...never, feed_id: `road_${i}`, name: `Road ${i}`, coverage: { lines: [] } });
+    const listed = (feeds: unknown[], ids: string[]) =>
+      verdictSentence(
+        assess('rail_radio', status(feeds), {
+          messages: 0,
+          window_min: 30,
+          tracks: TRACK,
+          pulseChannels: ids,
+        }),
+        NOW,
+      );
+    expect(listed([plain(1), plain(2)], ['road_1', 'road_2'])).toMatch(
+      /: 2 rail radio channels are configured, but no receiver/,
+    );
+    expect(listed([plain(1)], ['road_1'])).toMatch(
+      /: 1 rail radio channel \(Road 1\) is configured, but no receiver/,
     );
   });
 

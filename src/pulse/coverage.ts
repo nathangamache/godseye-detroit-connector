@@ -187,10 +187,18 @@ export interface FeedRef {
   radius_km?: number;
   /** v1.2 verdicts: since when Pulse has been listening to this channel without a break. */
   listening_since?: string;
+  /** The railroads of the lines Pulse says this channel hears (coverage.lines[].railroad). */
+  railroads?: string[];
 }
 
 function ref(f: FeedInfo): FeedRef {
   const r: FeedRef = { feed_id: f.feed_id, name: f.name ?? f.feed_id };
+  const railroads = [
+    ...new Set(
+      (f.coverage?.lines ?? []).map((l) => l.railroad).filter((x): x is string => Boolean(x)),
+    ),
+  ];
+  if (railroads.length) r.railroads = railroads;
   if (f.receiver) r.receiver = f.receiver.state;
   if (f.receiver?.last_seen_at) r.last_seen_at = f.receiver.last_seen_at;
   const area = f.coverage?.area ?? f.county;
@@ -876,6 +884,29 @@ const NOUN: Record<
   },
 };
 
+/**
+ * The channels as a count with its verb, by railroad when Pulse names one: "1 CSX channel (CSX
+ * Alpha road) is", "11 CSX channels are", "3 rail radio channels (2 CSX, 1 CN) are".
+ */
+function channelsAre(feeds: FeedRef[], what: string): string {
+  const total = feeds.length;
+  const by = new Map<string, number>();
+  for (const f of feeds) {
+    const rr = (f.railroads ?? []).join('/');
+    if (rr) by.set(rr, (by.get(rr) ?? 0) + 1);
+  }
+  const [only] = by.keys();
+  const one = by.size === 1 && by.get(only!) === total;
+  const noun = `${one ? only : what} channel`;
+  if (total === 1) return `1 ${noun} (${feeds[0]!.name}) is`;
+  const rest = total - [...by.values()].reduce((a, b) => a + b, 0);
+  const split =
+    !one && by.size
+      ? ` (${[...by].map(([rr, k]) => `${k} ${rr}`).join(', ')}${rest ? `, ${rest} with no railroad` : ''})`
+      : '';
+  return `${total} ${noun}s${split} are`;
+}
+
 const names = (feeds: FeedRef[]) =>
   feeds
     .slice(0, 3)
@@ -969,7 +1000,7 @@ function noReceiverSentence(v: Extract<Verdict, { state: 'no_receiver' }>, place
     case 'not_configured':
       return `No ${n.rx} installed: Pulse has no ${n.what} channel set up (example placeholders don't count).${tail}`;
     case 'never_reported':
-      return `No ${n.rx} installed: ${v.feeds.length ? `${names(v.feeds)} is configured but` : 'a channel is configured but'} no receiver has ever reported.${tail}`;
+      return `No ${n.rx} installed: ${v.feeds.length ? `${channelsAre(v.feeds, n.what)} configured, but` : 'a channel is configured, but'} no receiver has ever reported.${tail}`;
     case 'no_line':
       return `No ${n.rx} for ${place}: no rail line identified here (no named track near this point in the rail datasets) and Pulse lists no ${n.what} channel for this point. Pulse's ${n.what} channels cover ${lines}.${tail}`;
     case 'not_near': {

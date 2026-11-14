@@ -357,6 +357,11 @@ location, a placeholder scanner feed):
   point); or **Pulse is too old to say** (no `receiver`/`coverage`/`coverage_summary`).
   `coverage_check.<kind>.basis` is `gateway_without_verdicts` here and `pulse_verdict` with
   verdicts.
+* Configured channels are given as a count, by the `coverage.lines[].railroad` Pulse lists for
+  each ("11 CSX channels are configured, but no receiver has ever reported"; "1 CSX channel
+  (CSX Alpha road) is configured"). Neither feeds/status nor rail/activity carries a channel's
+  `verified` flag or its `use`, so results show no "unconfirmed use" for a channel: the gateway
+  would only relay one Pulse sends, never infer it.
 * `incidents_near` asks for feeds/status alongside the incidents and states the scanner verdict
   the same way as rail without verdicts (scanner incidents have none), so never quiet: a scanner
   receiver online with 0 incidents is "can't confirm quiet", listing the areas the listening feeds
