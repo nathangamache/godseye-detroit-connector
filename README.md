@@ -105,7 +105,8 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   unvetted, images downscaled with sharp (dropped with a note if they can't fit), total size
   (summary and images included) capped at 100k characters, provenance, retrieval time,
   attribution and an "untrusted data" label first.
-* Location reads (`where_am_i`, `whats_happening_here` without a point) are audited per grant.
+* Location reads (`where_am_i`, `whats_happening_here` without a point, a weather, water or air
+  tool called with `here: true`) are audited per grant.
   A tool called for an explicit point, while the phone's fix is under 30 minutes old, adds a
   "phone check" (distance, bearing from the point to the phone, fix age; never the phone's
   coordinates) and says plainly when the phone is not there; that is audited as a location read
@@ -120,6 +121,25 @@ npm run smoke:live -- --url http://127.0.0.1:7700
   can't confirm, never "quiet", so zero messages is never passed off as a quiet line or area;
   EOT/HOT packets there are "heard but not placed", since such a Pulse can't tie them to the point.
 
+## Gateway-native tools: weather, water and air (`src/extra/weather`)
+
+Each takes `{lat, lon}` or `{here: true}` (the latest phone fix, audited as a location read; the
+fix's coordinates are never echoed back). Third-party text is capped and labelled untrusted;
+every result carries its source's credit.
+
+| Tool | What it returns | Source | Key |
+|---|---|---|---|
+| `weather_alerts` | active NWS watches, warnings and advisories for the point: event, severity, urgency, certainty, headline, description, instruction, areas, onset, ends, issuing office, link; "No active alerts for zone …" when there are none | NWS `api.weather.gov` (public domain) | none |
+| `weather_forecast` | 12-hour periods (up to 7 days) or hourly (`hourly: true`), `periods` 1-14: temperature, wind, chance of precipitation, forecast text | NWS `/points` → forecast / forecastHourly; office/grid cached per ~1 km cell for 12 h; points NWS doesn't cover are remembered for 12 h (per ~100 m) or, far from every US area, never sent | none |
+| `water_levels_near` | Great Lakes and tide stations, stream gages and NWS river gauges within `radius_km` (5-60): value, units, datum, ~3 h trend, flood stage and NWS flood category when known, update time | NOAA CO-OPS, USGS Water Data OGC API, NWS National Water Prediction Service (public domain) | `USGS_API_KEY` optional (else the shared `DEMO_KEY`) |
+| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **off** without it (`not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env`) |
+
+Quotas (`WEATHER_TOOL_RATE_LIMITS`, overridable per bucket in `TOOL_RATE_LIMITS`): alerts 120/h,
+forecast 60/h, water levels 20/h, air quality 30/h. Outbound requests use https only, a fixed host
+list per service, the User-Agent `(godseye-personal-connector)`, a 12 s timeout, two polite
+retries on 5xx (one on 429), no redirects and a size cap. Air quality is cached 30 min, USGS
+answers 10 min, NWS alerts 30 s and forecasts up to 10 min.
+
 ## Repository layout
 
 ```
@@ -131,6 +151,7 @@ src/            gateway (TypeScript, ESM)
   auth/         tailscale, step-up TOTP, dev login, CSRF location/   device tokens, ingest, /locate
   ui/           GEV reverse proxy, /pulse                http/       headers, Host/Origin checks, rate limits
   extra/aviation/  flights_near, aircraft_lookup, FAA registry sync
+  extra/weather/  NWS alerts and forecast, water levels, air quality (gateway-native tools)
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
 web/            /locate PWA and shared CSS
@@ -163,5 +184,8 @@ attribution to results. Rail data: U.S. DOT FRA and BTS, public domain. Map feat
 self-hosted Overpass loaded with Geofabrik's Michigan extract: © OpenStreetMap contributors, ODbL
 1.0 (`docs/overpass.md`). Live aircraft: adsb.fi (https://adsb.fi; personal, non-commercial use)
 and adsb.lol (https://adsb.lol; ODbL 1.0). Aircraft registry: FAA Releasable Aircraft Database (US
-government data). This repository is
+government data). Weather and water data: National Weather Service, NOAA CO-OPS, NWS National
+Water Prediction Service and USGS, public domain (USGS values are provisional). Air quality: EPA
+AirNow and the reporting agencies (Michigan EGLE), preliminary data under the AirNow Data Exchange
+Guidelines. This repository is
 public, for personal, non-commercial use; it holds no secrets or personal data.

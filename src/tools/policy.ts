@@ -4,7 +4,8 @@
  * Order of evaluation (first match wins):
  *  1. NEVER: tools that must not exist on the connector at all (panel_request).
  *  2. Licensing hard denies (Google-derived content; metered OpenAI). Not configurable.
- *  3. Licensing switches: OpenSky-backed aviation tools, ALPR locations.
+ *  3. Licensing switches: OpenSky-backed aviation tools, ALPR locations; then tools a backend
+ *     switched off at startup (switchOff, e.g. a missing API key).
  *  4. TOOL_DENYLIST from config.
  *  5. GEV tools must be on GEV_TOOL_ALLOWLIST (deny by default, so a tool that
  *     appears after an upstream pull stays hidden until it is vetted).
@@ -12,7 +13,7 @@
  * tools can't reach a denied one internally; argument rules (checkArguments) add a second
  * layer, e.g. no aircraft "follow" while OpenSky is off.
  */
-import type { Config, RateLimitSpec } from '../config.js';
+import { addDefaultRateLimits, type Config, type RateLimitSpec } from '../config.js';
 import { RateLimiter } from '../util/ratelimit.js';
 import type { ToolDef } from './types.js';
 
@@ -42,6 +43,8 @@ export type PolicyVerdict = { allowed: true } | { allowed: false; reason: string
 export class ToolPolicy {
   readonly limiter: RateLimiter;
   private readonly limits: RateLimitSpec[];
+  /** Tools a backend switched off at startup (e.g. its API key is missing), with the reason. */
+  private readonly switchedOff = new Map<string, string>();
 
   constructor(
     private readonly config: Pick<
@@ -56,7 +59,22 @@ export class ToolPolicy {
     limiter?: RateLimiter,
   ) {
     this.limiter = limiter ?? new RateLimiter();
-    this.limits = config.toolRateLimits;
+    this.limits = [...config.toolRateLimits];
+  }
+
+  /** Switch a tool off: hidden from find_tools, and run_tool answers with `reason`. */
+  switchOff(name: string, reason: string): void {
+    this.switchedOff.set(name, reason);
+  }
+
+  /**
+   * Default quotas a tool family brings (src/extra). A TOOL_RATE_LIMITS entry for the same
+   * bucket replaces them, so the operator's own limits always win. loadConfig already folds
+   * every family's *_RATE_LIMITS setting into toolRateLimits (composeToolRateLimits), so for a
+   * loaded config this adds nothing new; it keeps a hand-built config honest too.
+   */
+  addDefaultLimits(specs: RateLimitSpec[]): void {
+    addDefaultRateLimits(this.limits, specs);
   }
 
   evaluate(tool: Pick<ToolDef, 'name' | 'source'>): PolicyVerdict {
@@ -77,6 +95,8 @@ export class ToolPolicy {
       };
     if (ALPR_TOOLS.has(n) && !this.config.ALLOW_ALPR_TOOLS)
       return { allowed: false, reason: `${n} is disabled by policy (ALLOW_ALPR_TOOLS=false)` };
+    const off = this.switchedOff.get(n);
+    if (off) return { allowed: false, reason: `${n} is off: ${off}` };
     if (this.config.TOOL_DENYLIST.includes(n))
       return { allowed: false, reason: `${n} is on TOOL_DENYLIST` };
     if (tool.source === 'gev' && !this.config.GEV_TOOL_ALLOWLIST.includes(n))
@@ -95,6 +115,7 @@ export class ToolPolicy {
       METERED_TOOLS.has(name) ||
       OPENSKY_TOOLS.has(name) ||
       ALPR_TOOLS.has(name) ||
+      this.switchedOff.has(name) ||
       this.config.TOOL_DENYLIST.includes(name);
     if (!explicit) return null;
     const v = this.evaluate({ name, source: 'gev' });

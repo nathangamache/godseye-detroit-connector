@@ -272,7 +272,8 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
 * Arguments are validated against each tool's JSON schema; place names are refused unless a
   geocoder is configured.
 * Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket; `flights_near` and
-  `aircraft_lookup` from `AVIATION_RATE_LIMITS` unless `TOOL_RATE_LIMITS` sets them), per-grant
+  `aircraft_lookup` from `AVIATION_RATE_LIMITS`, the weather, water and air tools from
+  `WEATHER_TOOL_RATE_LIMITS`, each unless `TOOL_RATE_LIMITS` sets the same bucket), per-grant
   and per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
 * No tool reads gateway config, env or files beyond the bundled rail data and the FAA registry
   copy; error text is stripped of paths and truncated.
@@ -282,6 +283,44 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   flagged as third-party and unvetted**, in the result and in the server instructions. Every
   result, summary and images included, is capped at `MAX_RESULT_CHARS` (100k); Pulse labels are
   limited.
+
+### Outbound data sources of the gateway-native tools
+
+The weather, water and air tools (`src/extra/weather`) call public APIs from the gateway's
+namespace (the sidecar's `edge` network). Each request is https only, to a fixed host list per
+service (a URL from an upstream answer is used only if it is on that list), with the User-Agent
+`(godseye-personal-connector)` and no other identifying header, a per-attempt timeout
+(`WEATHER_HTTP_TIMEOUT_MS`, 12 s), no redirects, a response size cap, two polite retries on
+5xx and one on 429 (Retry-After honoured up to 5 s). Error text never contains a URL, so the
+AirNow key (a query parameter) can't reach a result or a log line. Third-party text (alert and
+forecast text, station names, the AirNow discussion) has control and bidi characters stripped,
+is length-capped and is labelled untrusted. What leaves the gateway: the point, rounded to
+4 decimals (~11 m); for `here: true` that is the phone's latest fix, so each such call is audited
+as a location read.
+
+| Tool | Host(s) | Key | Terms / licence | Caching, limits |
+|---|---|---|---|---|
+| `weather_alerts`, `weather_forecast` | `api.weather.gov` | none (User-Agent required) | NWS: open data, free to use for any purpose, public domain; credit "National Weather Service" | office/grid per ~1 km cell 12 h, "no data here" per ~100 m cell 12 h, alerts 30 s, forecasts ≤ 10 min; 120/h and 60/h |
+| `water_levels_near` | `api.tidesandcurrents.noaa.gov` | none | NOAA CO-OPS, public domain | station list 24 h, flood levels 24 h |
+| | `api.waterdata.usgs.gov` | `USGS_API_KEY` (header `X-Api-Key`), else the shared `DEMO_KEY` | USGS, public domain; values provisional | 10 min (DEMO_KEY limits are low); 20/h for the tool |
+| | `api.water.noaa.gov` (NWPS) | none | NOAA NWS, public domain | gauge list 10 min, flood stages 24 h |
+| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **off** without it | AirNow Data Exchange Guidelines: preliminary data, credit the agency (as AirNow names it; Michigan EGLE in Michigan) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
+
+* AirNow retired its old lat/long services on 2026-09-30 (its June 2026 notice). The tool asks
+  only the replacement services (`/aq/observation/current/ziplatlong/`, `/aq/forecast/current/`)
+  with `format`, `latitude`, `longitude` and the key; they pick the reporting area with their own
+  lookup boundary, so no distance is sent, and the retired paths are never tried. Their record
+  shape (nowcastAQI, aqiCategoryName, reportingAgency, dateValid, ...) matches responses recorded
+  from the live services in September 2026 by an open-source client's test suite; check it once
+  `AIRNOW_API_KEY` is set. AirNow's "There are no ..." answer is an empty result; any other
+  AirNow error message is shown with the key masked. Records in an unexpected format are passed
+  through as received, never reinterpreted.
+* NWS covers only the US, its territories and adjacent waters. A point far from all of them is
+  answered without a request; a `/points` 404 or an alerts "out of bounds" 400 is remembered for
+  12 h per ~100 m cell (fine enough that a cell can't span both banks of a border river), so the
+  same point doesn't earn the same 4xx again.
+* A missing key switches a tool off in the policy (hidden from `find_tools`; `run_tool` answers
+  "not configured: set … in deploy/secrets/gateway.env") and the tool makes no request.
 
 ### Data retention
 
@@ -433,11 +472,16 @@ Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
   called for an explicit point also gets a "phone check" (distance, bearing and age of a fix at
   most `LOCATION_PROXIMITY_MINUTES` old, never its coordinates); distance and bearing from a known
   place still locate the phone roughly, so each check is audited as a location read
-  (`purpose: proximity_check`).
+  (`purpose: proximity_check`). A weather, water or air tool called with `here: true` sends the
+  latest fix (4 decimals) to that public API, which sees it with the server's public IP; results
+  give only its age and accuracy, never the coordinates.
 * **claude.ai and a cross-host `authorization_endpoint`**: untested end to end. If it fails, the
   documented fallback weakens "humans only via Tailscale" (password+TOTP on the public host).
 * **Licensing**: Broadcastify's terms block Pulse's current audio source; OpenSky needs a licence;
-  Google content is excluded by policy, not by GEV.
+  Google content is excluded by policy, not by GEV. AirNow's guidelines ask that a product using
+  its data be made known to the agencies and AirNow: send a one-line notice of personal,
+  non-commercial use to dmc@airnowtech.org when you add `AIRNOW_API_KEY`. AirNow's terms don't
+  mention AI assistants.
 * **Aviation**: adsb.fi allows personal, non-commercial use only, and anyone else running this
   code is bound by that too. Organisation and government owner names (and private names with
   `AIRCRAFT_OWNER_DISCLOSURE=full`) reach Claude's transcript; name plus city and state can

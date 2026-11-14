@@ -69,6 +69,23 @@ const optionalString = z
   .optional()
   .transform((v) => (v && v.trim() ? v.trim() : undefined));
 
+/** A tool family's default quotas (TOOL_RATE_LIMITS syntax), checked when the config loads. */
+const rateLimitList = (def: string) =>
+  z
+    .string()
+    .default(def)
+    .refine(
+      (s) => {
+        try {
+          parseRateLimits(s);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'expected bucket=N/(s|m|h|d) entries separated by commas' },
+    );
+
 /** GEV tools vetted for exposure through run_tool. Anything else is denied by default. */
 export const DEFAULT_GEV_TOOL_ALLOWLIST = [
   'get_earthquakes',
@@ -275,17 +292,26 @@ const schema = z.object({
   /** adsb.lol calls per rolling 24 h (its keyless quota is per IP, shared with GEV). */
   ADSBLOL_DAILY_MAX: int(100, 0, 10_000),
   /** Default quotas for aviation buckets that TOOL_RATE_LIMITS does not set. */
-  AVIATION_RATE_LIMITS: z
-    .string()
-    .default('flights_near=60/h,flights_near=600/d,aircraft_lookup=120/h')
-    .refine((s) => {
-      try {
-        parseRateLimits(s);
-        return true;
-      } catch {
-        return false;
-      }
-    }, 'expected bucket=N/(s|m|h|d) entries'),
+  AVIATION_RATE_LIMITS: rateLimitList('flights_near=60/h,flights_near=600/d,aircraft_lookup=120/h'),
+  // ---- end aviation ----
+
+  // ---- weather ----
+  // Gateway-native weather, water and air tools (src/extra/weather). NWS, NOAA CO-OPS and NWPS
+  // are keyless.
+  /** USGS Water Data API key (api.waterdata.usgs.gov/signup). Unset: the shared DEMO_KEY (low limits). */
+  USGS_API_KEY: optionalString,
+  /** EPA AirNow API key. Unset: air_quality is off. */
+  AIRNOW_API_KEY: optionalString,
+  /** Timeout of each upstream request these tools make (retries included separately). */
+  WEATHER_HTTP_TIMEOUT_MS: int(12_000, 1_000, 60_000),
+  /**
+   * Default quotas for these tools (TOOL_RATE_LIMITS syntax). A TOOL_RATE_LIMITS entry for the
+   * same bucket replaces the default.
+   */
+  WEATHER_TOOL_RATE_LIMITS: rateLimitList(
+    'weather_alerts=120/h,weather_forecast=60/h,water_levels_near=20/h,air_quality=30/h',
+  ),
+  // ---- end weather ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
@@ -334,6 +360,42 @@ export function parseRateLimits(spec: string): RateLimitSpec[] {
     if (!m) throw new Error(`bad TOOL_RATE_LIMITS entry: ${part}`);
     out.push({ bucket: m[1]!, limit: Number(m[2]), windowMs: WINDOWS[m[3]!.toLowerCase()]! });
   }
+  return out;
+}
+
+/**
+ * Appends the defaults whose bucket `target` does not name yet, so a limit the operator set
+ * (or an earlier family's) for the same bucket wins; never adds a bucket and window twice.
+ */
+export function addDefaultRateLimits(
+  target: RateLimitSpec[],
+  defaults: RateLimitSpec[],
+): RateLimitSpec[] {
+  const named = new Set(target.map((l) => l.bucket));
+  for (const d of defaults)
+    if (
+      !named.has(d.bucket) &&
+      !target.some((t) => t.bucket === d.bucket && t.windowMs === d.windowMs)
+    )
+      target.push(d);
+  return target;
+}
+
+/** The settings that hold each gateway-native tool family's default quotas. */
+export const FAMILY_RATE_LIMIT_SETTINGS = [
+  'AVIATION_RATE_LIMITS',
+  'WEATHER_TOOL_RATE_LIMITS',
+] as const satisfies readonly (keyof RawConfig)[];
+
+/**
+ * The one quota list the policy enforces (config.toolRateLimits): every TOOL_RATE_LIMITS entry,
+ * then each family's defaults for the buckets TOOL_RATE_LIMITS does not name.
+ */
+export function composeToolRateLimits(
+  raw: Pick<RawConfig, 'TOOL_RATE_LIMITS' | (typeof FAMILY_RATE_LIMIT_SETTINGS)[number]>,
+): RateLimitSpec[] {
+  const out = parseRateLimits(raw.TOOL_RATE_LIMITS);
+  for (const k of FAMILY_RATE_LIMIT_SETTINGS) addDefaultRateLimits(out, parseRateLimits(raw[k]));
   return out;
 }
 
@@ -577,7 +639,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     loginProvider,
     ownerTailscaleLogin: raw.OWNER_TAILSCALE_LOGIN?.toLowerCase(),
     publicAuthorize,
-    toolRateLimits: parseRateLimits(raw.TOOL_RATE_LIMITS),
+    toolRateLimits: composeToolRateLimits(raw),
     gevApiOrigins: Array.from(gevApiOrigins),
   };
 }

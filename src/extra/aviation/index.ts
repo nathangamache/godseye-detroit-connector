@@ -7,12 +7,12 @@
  *   aviation.stop();                                     // on close
  *
  * Settings: the "---- aviation ----" block of src/config.ts. Default quotas come from
- * AVIATION_RATE_LIMITS and apply through the policy's toolRateLimits for every bucket that
- * TOOL_RATE_LIMITS does not already set.
+ * AVIATION_RATE_LIMITS and apply through the policy (config.toolRateLimits, composed in
+ * loadConfig, and policy.addDefaultLimits) for every bucket TOOL_RATE_LIMITS does not set.
  */
 import path from 'node:path';
 import type { Audit } from '../../audit.js';
-import { parseRateLimits, type Config, type RateLimitSpec } from '../../config.js';
+import { parseRateLimits, type Config } from '../../config.js';
 import type { LocationStore } from '../../location/store.js';
 import type { Logger } from '../../log.js';
 import type { TokenStore } from '../../oauth/tokens.js';
@@ -52,23 +52,12 @@ export function aviationDir(config: Pick<Config, 'AIRCRAFT_REGISTRY_DIR' | 'DATA
   return config.AIRCRAFT_REGISTRY_DIR ?? path.join(config.DATA_DIR, 'aviation');
 }
 
-/** Adds a family's default quotas for the buckets the configured list does not mention. */
-export function addDefaultRateLimits(target: RateLimitSpec[], defaults: RateLimitSpec[]): void {
-  const configured = new Set(target.map((l) => l.bucket));
-  for (const d of defaults)
-    if (
-      !configured.has(d.bucket) &&
-      !target.some((t) => t.bucket === d.bucket && t.windowMs === d.windowMs)
-    )
-      target.push(d);
-}
-
 export function registerAviation(registry: ToolRegistry, deps: AviationDeps): AviationHandle {
   const { config, logger } = deps;
   const now = deps.now ?? Date.now;
   const dir = aviationDir(config);
-  // The policy evaluates config.toolRateLimits, so the family's defaults join it there.
-  addDefaultRateLimits(config.toolRateLimits, parseRateLimits(config.AVIATION_RATE_LIMITS));
+  // A bucket TOOL_RATE_LIMITS already names keeps the operator's setting.
+  registry.policy.addDefaultLimits(parseRateLimits(config.AVIATION_RATE_LIMITS));
   const store = new RegistryStore(dir, now);
   const sync = new RegistrySync(
     {

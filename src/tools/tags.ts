@@ -11,7 +11,7 @@ export interface ToolMeta {
 export const CATEGORIES = [
   { id: 'rail', label: 'Rail lines, crossings and rail radio' },
   { id: 'scanner', label: 'Scanner radio and incidents (Detroit Pulse)' },
-  { id: 'weather', label: 'Weather, radar and wind' },
+  { id: 'weather', label: 'Weather, alerts, forecasts, radar, wind and air quality' },
   { id: 'hazards', label: 'Earthquakes, fires, storms and floods' },
   { id: 'traffic', label: 'Traffic, routes and transit' },
   { id: 'cameras', label: 'Public cameras' },
@@ -38,6 +38,11 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   get_weather: 'weather',
   get_weather_map: 'weather',
   get_wind: 'weather',
+  // gateway-native (src/extra/weather)
+  weather_alerts: 'weather',
+  weather_forecast: 'weather',
+  air_quality: 'weather',
+  water_levels_near: 'hazards',
   get_earthquakes: 'hazards',
   get_active_fires: 'hazards',
   get_fire_perimeters: 'hazards',

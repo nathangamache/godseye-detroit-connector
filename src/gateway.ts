@@ -11,6 +11,7 @@ import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
+import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
 import { makeGevCaller } from './gev/tools.js';
 import { LocationStore } from './location/store.js';
@@ -152,6 +153,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     logger: logger.child({ component: 'aviation' }),
     now,
   });
+  registerWeatherTools({ config, registry, locations, audit, tokens, logger, now });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(
