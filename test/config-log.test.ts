@@ -50,6 +50,57 @@ describe('config', () => {
     ]);
     expect(() => parseRateLimits('nope')).toThrow();
   });
+
+  it('composes one quota list: TOOL_RATE_LIMITS, then every family default it does not name', () => {
+    const key = (l: { bucket: string; windowMs: number }) => `${l.bucket}/${l.windowMs}`;
+    const c = loadConfig({});
+    const buckets = c.toolRateLimits.map((l) => l.bucket);
+    for (const b of [
+      'get_traffic_flow',
+      'nominatim',
+      'flights_near',
+      'aircraft_lookup',
+      'weather_alerts',
+      'air_quality',
+      'road_closures',
+      'geocode_place',
+      'border_wait_times',
+      'dpd_calls_near',
+      'transit_vehicles_near',
+      'local_headlines',
+    ])
+      expect(buckets).toContain(b);
+    const keys = c.toolRateLimits.map(key);
+    expect(new Set(keys).size).toBe(keys.length);
+    // An operator entry replaces every window of that bucket's family default.
+    const own = loadConfig({
+      TOOL_RATE_LIMITS: 'local_headlines=5/h,flights_near=1/h,road_closures=2/h,weather_alerts=3/h',
+    }).toolRateLimits;
+    for (const [b, limit] of [
+      ['local_headlines', 5],
+      ['flights_near', 1],
+      ['road_closures', 2],
+      ['weather_alerts', 3],
+    ] as const)
+      expect(own.filter((l) => l.bucket === b)).toEqual([
+        { bucket: b, limit, windowMs: 3_600_000 },
+      ]);
+    // A bucket two families both name keeps the first family's default only.
+    const shared = loadConfig({
+      AVIATION_RATE_LIMITS: 'shared_bucket=4/h',
+      CIVIC_TOOL_RATE_LIMITS: 'shared_bucket=9/h,shared_bucket=90/d',
+    }).toolRateLimits;
+    expect(shared.filter((l) => l.bucket === 'shared_bucket')).toEqual([
+      { bucket: 'shared_bucket', limit: 4, windowMs: 3_600_000 },
+    ]);
+    for (const k of [
+      'AVIATION_RATE_LIMITS',
+      'WEATHER_TOOL_RATE_LIMITS',
+      'ROADS_TOOL_RATE_LIMITS',
+      'CIVIC_TOOL_RATE_LIMITS',
+    ])
+      expect(() => loadConfig({ [k]: 'nonsense' })).toThrow(new RegExp(k));
+  });
 });
 
 describe('log sanitizer', () => {
