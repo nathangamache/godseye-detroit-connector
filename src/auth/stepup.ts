@@ -138,10 +138,15 @@ export class StepUp {
     })();
   }
 
+  /** The decrypted secret; undefined if none is enrolled or STEPUP_KEY changed since. */
   private secret(): string | undefined {
     const stored = kvGet(this.db, SECRET_KV);
     if (!stored) return undefined;
-    return decryptSecret(this.opts.key, stored);
+    try {
+      return decryptSecret(this.opts.key, stored);
+    } catch {
+      return undefined; // fail closed: approvals and admin refuse until re-enrolled
+    }
   }
 
   /** Verifies a code: single use, lockout after repeated failures. */

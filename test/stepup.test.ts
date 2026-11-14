@@ -310,6 +310,16 @@ describe('step-up enrollment and storage', () => {
     }
   });
 
+  it('fails closed (not enrolled) when STEPUP_KEY no longer decrypts the stored secret', async () => {
+    const t = await startTailscaleGateway({ STEPUP_KEY: randomBytes(32).toString('base64url') });
+    try {
+      const other = new StepUp(t.gw.db, { enabled: true, windowS: 600, key: randomBytes(32) });
+      expect(other.verifyCode(totp(t.stepupSecret), '127.0.0.1')).toBe('not_enrolled');
+    } finally {
+      await t.close();
+    }
+  });
+
   it('encrypt/decrypt round-trips and rejects tampering', () => {
     const key = randomBytes(32);
     const s = generateTotpSecret();
