@@ -19,6 +19,7 @@ import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { generateTotpSecret } from '../src/auth/totp.js';
 import { loadConfig } from '../src/config.js';
 import { startGateway, type Gateway } from '../src/gateway.js';
 import { nullLogger } from '../src/log.js';
@@ -99,6 +100,7 @@ beforeAll(async () => {
     gevChild: false,
     routes: installAllRoutes({ cimdFetch: fakeCimdFetch }),
   });
+  gw.stepup.enroll(generateTotpSecret());
   // netstack stand-ins for both listener ports
   servers.push(await relay(TAILNET_IP, gw.privatePort, '127.0.0.1'));
   servers.push(await relay(TAILNET_IP, gw.port, '127.0.0.1'));

@@ -119,6 +119,15 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX audit_ts ON audit_log(ts);
   `,
+  // 2: step-up (TOTP) sessions for consent and admin.
+  `
+  CREATE TABLE stepup_sessions (
+    id_hash TEXT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(file: string): DB {

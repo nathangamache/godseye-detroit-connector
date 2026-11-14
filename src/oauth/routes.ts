@@ -7,7 +7,8 @@ import { randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import type { AppContext } from '../app.js';
 import type { Audit } from '../audit.js';
-import type { Login } from '../auth/login.js';
+import { safeNext, type Login } from '../auth/login.js';
+import type { StepUp } from '../auth/stepup.js';
 import type { Csrf } from '../auth/csrf.js';
 import type { Config } from '../config.js';
 import { ipOf, pageHeaders, rateLimit, sameOriginPost } from '../http/security.js';
@@ -56,8 +57,12 @@ export interface OAuthDeps {
   tokens: TokenStore;
   clients: ClientRegistry;
   locations: LocationStore;
+  stepup: StepUp;
   now: () => number;
 }
+
+/** How long a consent page stays approvable. */
+const PENDING_TTL_MS = 10 * 60_000;
 
 function oauthError(res: Response, status: number, error: string, description: string): void {
   res
@@ -87,7 +92,7 @@ function str(v: unknown): string | undefined {
  * map is shared so a fallback deployment can serve authorize on either listener.
  */
 export function createOAuthRoutes(d: OAuthDeps) {
-  const { config, audit, tokens, clients } = d;
+  const { config, audit, tokens, clients, stepup } = d;
   const pending = new Map<string, PendingAuthz>();
   const asMeta = JSON.parse(JSON.stringify(authorizationServerMetadata(config)));
 
@@ -276,6 +281,7 @@ export function createOAuthRoutes(d: OAuthDeps) {
   /** /oauth/authorize and the consent decision (private listener, or public in fallback mode). */
   function authorize(app: Express, ctx: AppContext, login: Login, csrf: Csrf): void {
     const sec = ctx.sec;
+    const secure = sec.publicOrigin.startsWith('https://');
     const ip = (req: Request) => ipOf(req, sec);
     const form = express.urlencoded({ extended: false, limit: '16kb', parameterLimit: 30 });
     const owner = login.require();
@@ -346,8 +352,10 @@ export function createOAuthRoutes(d: OAuthDeps) {
           return err('invalid_scope', 'unsupported scope');
         const scope = Array.from(new Set(['mcp', ...requested])).join(' ');
 
+        const subject = req.owner!.subject;
         const id = randomBytes(24).toString('base64url');
-        for (const [k, p] of pending) if (p.expires < d.now()) pending.delete(k);
+        const created = d.now();
+        for (const [k, p] of pending) if (p.expires < created) pending.delete(k);
         if (pending.size > 200) pending.clear();
         pending.set(id, {
           client,
@@ -356,31 +364,59 @@ export function createOAuthRoutes(d: OAuthDeps) {
           codeChallenge: challenge,
           scope,
           resource: config.mcpResource,
-          subject: req.owner!.subject,
-          expires: d.now() + 10 * 60_000,
+          subject,
+          expires: created + PENDING_TTL_MS,
         });
-        const token = csrf.issue(req, res, `consent:${id}`, req.owner!.subject);
+        // The CSRF token is bound to the live step-up session when there is one; otherwise
+        // approving needs a fresh authenticator code in this form.
+        const su = stepup.current(req, subject, secure);
+        const needCode = stepup.enabled && !su;
+        const canApprove = !stepup.enabled || stepup.isEnrolled();
+        const token = csrf.issue(req, res, `consent:${id}`, subject, su?.binding ?? 'none');
         const redirectHost = new URL(redirectUri).host;
         const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(redirectHost);
         const verified = client.kind === 'cimd';
+        const existing = tokens.activeFamilies(client.client_id);
+        const when = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
         pageHeaders(res, [new URL(redirectUri).origin]);
         res.send(
           page(
             'Allow access?',
             `<h1>Allow access to God's Eye View + Detroit Pulse?</h1>
-<div class="card${verified ? '' : ' warn'}">
-<p><strong>${esc(client.client_name)}</strong> wants to use this connector's tools, including your phone's latest location.</p>
-<p class="muted">Client ID: <span class="mono">${esc(client.client_id)}</span><br>
-Registration: ${verified ? 'client metadata document fetched from its URL (allowlisted)' : 'self-registered (dynamic registration): the name is not verified'}<br>
-Will return to: <strong class="mono">${esc(redirectHost)}</strong>${loopback ? ' (a program on your own computer)' : ''}<br>
-Access: ${esc(scope)} (read-only tools) for ${esc(config.mcpResource)}</p>
-${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude.</strong></p>'}
+<div class="card warn">
+<p><strong>Only approve if you started connecting this connector yourself, on this device, in the last few minutes.</strong></p>
+<p>Anyone can start a connection in their own Claude account and send you the link to this page. Approving it gives <em>their</em> account access to these tools, including your phone's live location.</p>
 </div>
-<form method="post" action="/oauth/authorize/decision" class="row">
+<div class="card">
+<p><strong>${esc(client.client_name)}</strong> asks for read-only access to this connector's tools, <strong>including your phone's latest location</strong>.</p>
+<p class="muted">Client ID: <span class="mono">${esc(client.client_id)}</span><br>
+Registration: ${verified ? 'client metadata document fetched from its URL (allowlisted). The client is genuine, but not necessarily your own account' : 'self-registered (dynamic registration): the name is not verified'}<br>
+Will return to: <strong class="mono">${esc(redirectHost)}</strong>${loopback ? ' (a program on the computer that opened this page)' : ''}<br>
+Access: ${esc(scope)} (read-only tools) for ${esc(config.mcpResource)}<br>
+Request started: ${esc(when(created))}; it expires in ${PENDING_TTL_MS / 60_000} minutes</p>
+<p>${
+              existing.count
+                ? `This client already has <strong>${existing.count} active grant(s)</strong>${existing.lastUsedAt ? ` (last used ${esc(when(existing.lastUsedAt))})` : ''}. Approving adds another one. If you did not just reconnect, deny and check <a href="/oauth/admin">admin</a>.`
+                : 'This client has no active grant yet.'
+            }</p>
+</div>
+${
+  canApprove
+    ? ''
+    : '<div class="card warn"><p>Approving needs the step-up authenticator code, which is not set up on this gateway yet. On the server, run <code>node dist/scripts/stepup.js enroll</code> (docker: <code>docker exec -it godseye-gateway node dist/scripts/stepup.js enroll</code>).</p></div>'
+}
+<form method="post" action="/oauth/authorize/decision" class="card">
 <input type="hidden" name="request_id" value="${esc(id)}">
 <input type="hidden" name="csrf" value="${esc(token)}">
-<button type="submit" name="decision" value="approve">Approve</button>
-<button type="submit" name="decision" value="deny" class="secondary">Deny</button>
+${
+  needCode && canApprove
+    ? `<label for="totp">Authenticator code (needed to approve)</label><input id="totp" type="text" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6">`
+    : ''
+}
+<div class="row">
+${canApprove ? '<button type="submit" name="decision" value="approve">Approve</button>' : ''}
+<button type="submit" name="decision" value="deny" class="secondary" formnovalidate>Deny</button>
+</div>
 </form>`,
           ),
         );
@@ -397,12 +433,14 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
         const id = str(req.body?.request_id) ?? '';
         const p = pending.get(id);
         const subject = req.owner!.subject;
-        if (
-          !sameOriginPost(sec, req) ||
-          !p ||
-          !csrf.verify(req, `consent:${id}`, subject, req.body?.csrf) ||
-          p.subject !== subject
-        ) {
+        const purpose = `consent:${id}`;
+        const su = stepup.current(req, subject, secure);
+        const boundToSession = Boolean(
+          su && csrf.verify(req, purpose, subject, req.body?.csrf, su.binding),
+        );
+        const tokenOk =
+          boundToSession || csrf.verify(req, purpose, subject, req.body?.csrf, 'none');
+        if (!sameOriginPost(sec, req) || !p || !tokenOk || p.subject !== subject) {
           audit.record('consent_rejected', {
             ip: ip(req),
             subject,
@@ -418,8 +456,8 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
             );
           return;
         }
-        pending.delete(id);
         if (p.expires < d.now()) {
+          pending.delete(id);
           res
             .status(400)
             .send(
@@ -431,6 +469,7 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
           return;
         }
         if (req.body?.decision !== 'approve') {
+          pending.delete(id);
           audit.record('authorize_denied', { ip: ip(req), subject, clientId: p.client.client_id });
           return redirectWith(res, p.redirectUri, {
             error: 'access_denied',
@@ -439,6 +478,34 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
             iss: config.issuer,
           });
         }
+        // Step-up: approving needs a live step-up session bound into the form, or a fresh code.
+        if (stepup.enabled && !boundToSession) {
+          const check = stepup.verifyCode(req.body?.totp, ip(req));
+          if (check !== 'ok') {
+            audit.record(check === 'locked' ? 'stepup_locked' : 'stepup_failed', {
+              ip: ip(req),
+              subject,
+              clientId: p.client.client_id,
+              detail: { where: 'consent', reason: check },
+            });
+            res
+              .status(check === 'locked' ? 429 : check === 'not_enrolled' ? 503 : 403)
+              .send(
+                page(
+                  'Code not accepted',
+                  check === 'not_enrolled'
+                    ? '<h1>Step-up not set up</h1><p>Run <code>node dist/scripts/stepup.js enroll</code> on the server, then start the connection again.</p>'
+                    : check === 'locked'
+                      ? '<h1>Too many wrong codes</h1><p>Approvals are locked for a while. Wait, then start the connection again.</p>'
+                      : '<h1>Code not accepted</h1><p>The authenticator code was wrong, expired or already used. Go back, wait for the next code and approve again.</p>',
+                ),
+              );
+            return;
+          }
+          stepup.setCookie(res, stepup.createSession(subject), secure);
+          audit.record('stepup_ok', { ip: ip(req), subject, detail: { where: 'consent' } });
+        }
+        pending.delete(id);
         const code = tokens.createCode({
           clientId: p.client.client_id,
           redirectUri: p.redirectUri,
@@ -459,17 +526,100 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
     );
   }
 
-  /** /oauth/admin (private listener only). */
+  /** The step-up form (TOTP) that opens a short step-up session. */
+  function stepupForm(token: string, nextPath: string, subject: string, via: string): string {
+    return page(
+      'Confirm with your authenticator',
+      `<h1>Confirm it's you</h1>
+<p class="muted">Signed in as ${esc(subject)} via ${esc(via)}.</p>
+<div class="card"><p>Admin needs a code from your authenticator app. It stays open for ${Math.round(stepup.windowS / 60)} minutes.</p>
+<form method="post" action="/oauth/stepup">
+<input type="hidden" name="csrf" value="${esc(token)}">
+<input type="hidden" name="next" value="${esc(nextPath)}">
+<label for="code">Authenticator code</label><input id="code" type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+<div class="row"><button type="submit">Continue</button></div>
+</form></div>`,
+    );
+  }
+
+  const notEnrolledPage = page(
+    'Step-up not set up',
+    '<h1>Step-up not set up</h1><p>Admin needs the step-up authenticator code, which is not set up yet. On the server, run <code>node dist/scripts/stepup.js enroll</code> (docker: <code>docker exec -it godseye-gateway node dist/scripts/stepup.js enroll</code>), then reload.</p>',
+  );
+
+  /** /oauth/admin and /oauth/stepup (private listener only). */
   function admin(app: Express, ctx: AppContext, login: Login, csrf: Csrf): void {
     const sec = ctx.sec;
+    const secure = sec.publicOrigin.startsWith('https://');
     const ip = (req: Request) => ipOf(req, sec);
     const form = express.urlencoded({ extended: false, limit: '16kb', parameterLimit: 30 });
     const owner = login.require();
+    const stepupNext = (v: unknown) => {
+      const n = safeNext(String(v ?? '/oauth/admin'));
+      return n.startsWith('/oauth/') ? n : '/oauth/admin';
+    };
+
+    // ---------------- /oauth/stepup ----------------
+    app.get('/oauth/stepup', owner, (req, res) => {
+      pageHeaders(res);
+      const subject = req.owner!.subject;
+      if (!stepup.enabled) return res.redirect(303, stepupNext(req.query.next));
+      if (!stepup.isEnrolled()) return res.status(503).send(notEnrolledPage);
+      const t = csrf.issue(req, res, 'stepup', subject);
+      res.status(401).send(stepupForm(t, stepupNext(req.query.next), subject, req.owner!.via));
+    });
+    app.post(
+      '/oauth/stepup',
+      rateLimit(ctx.limiter, 'stepup', 10, 15 * 60_000, ip),
+      form,
+      owner,
+      (req, res) => {
+        pageHeaders(res);
+        const subject = req.owner!.subject;
+        if (!sameOriginPost(sec, req) || !csrf.verify(req, 'stepup', subject, req.body?.csrf)) {
+          audit.record('stepup_csrf_rejected', { ip: ip(req), subject });
+          res.status(403).send(page('Forbidden', '<h1>Forbidden</h1><p>Reload and try again.</p>'));
+          return;
+        }
+        const check = stepup.enabled ? stepup.verifyCode(req.body?.code, ip(req)) : 'ok';
+        if (check !== 'ok') {
+          audit.record(check === 'locked' ? 'stepup_locked' : 'stepup_failed', {
+            ip: ip(req),
+            subject,
+            detail: { where: 'admin', reason: check },
+          });
+          if (check === 'not_enrolled') return res.status(503).send(notEnrolledPage);
+          res
+            .status(check === 'locked' ? 429 : 403)
+            .send(
+              page(
+                'Code not accepted',
+                check === 'locked'
+                  ? '<h1>Too many wrong codes</h1><p>Step-up is locked for a while. Wait and try again.</p>'
+                  : `<h1>Code not accepted</h1><p>The code was wrong, expired or already used. <a href="/oauth/stepup?next=${encodeURIComponent(stepupNext(req.body?.next))}">Try again</a> with the next code.</p>`,
+              ),
+            );
+          return;
+        }
+        if (stepup.enabled) {
+          stepup.setCookie(res, stepup.createSession(subject), secure);
+          audit.record('stepup_ok', { ip: ip(req), subject, detail: { where: 'admin' } });
+        }
+        res.redirect(303, stepupNext(req.body?.next));
+      },
+    );
+
     // ---------------- /oauth/admin ----------------
     app.get('/oauth/admin', owner, (req, res) => {
       pageHeaders(res);
       const subject = req.owner!.subject;
-      const t = csrf.issue(req, res, 'admin', subject);
+      const su = stepup.current(req, subject, secure);
+      if (stepup.enabled && !su) {
+        if (!stepup.isEnrolled()) return res.status(503).send(notEnrolledPage);
+        const st = csrf.issue(req, res, 'stepup', subject);
+        return res.status(401).send(stepupForm(st, '/oauth/admin', subject, req.owner!.via));
+      }
+      const t = csrf.issue(req, res, 'admin', subject, su?.binding ?? '');
       const fmt = (ms: number | null | undefined) =>
         ms ? new Date(ms).toISOString().replace('.000Z', 'Z') : '';
       const clientRows = clients
@@ -483,8 +633,11 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
             }</td></tr>`,
         )
         .join('');
-      const famRows = tokens
-        .listFamilies()
+      const families = tokens.listFamilies();
+      const recent = families.filter(
+        (f) => !f.revoked_at && f.created_at > d.now() - 86_400_000,
+      ).length;
+      const famRows = families
         .map(
           (f) =>
             `<tr><td class="mono">${esc(f.family_id.slice(0, 8))}</td><td class="mono">${esc(f.client_id.slice(0, 60))}</td><td>${fmt(f.created_at)}</td><td>${fmt(f.last_used_at)}</td><td>${fmt(f.refresh_expires_at)}</td><td>${
@@ -512,11 +665,16 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
             `<tr><td>${fmt(a.ts)}</td><td>${esc(a.event)}</td><td class="mono">${esc((a.client_id ?? '').slice(0, 40))}</td><td class="mono">${esc(a.ip ?? '')}</td></tr>`,
         )
         .join('');
+      const lock = su
+        ? `<form method="post" action="/oauth/stepup/end" class="row"><input type="hidden" name="csrf" value="${esc(t)}"><span class="muted">Step-up open until ${fmt(su.expiresAt)}.</span> <button class="secondary" type="submit">Lock admin now</button></form>`
+        : '';
       res.send(
         page(
           'Connector admin',
           `<h1>Connector admin</h1>
 <p class="muted">Signed in as ${esc(subject)} via ${esc(req.owner!.via)}.</p>
+${lock}
+${recent ? `<div class="card warn"><p><strong>${recent} grant(s) created in the last 24 hours.</strong> Revoke any you don't recognise.</p></div>` : ''}
 <h2>OAuth clients</h2><div class="card"><table><tr><th>Client</th><th>Kind</th><th>Registered</th><th>Last used</th><th></th></tr>${clientRows || '<tr><td colspan="5">None</td></tr>'}</table></div>
 <h2>Token grants</h2><div class="card"><table><tr><th>Grant</th><th>Client</th><th>Issued</th><th>Last used</th><th>Refresh expires</th><th></th></tr>${famRows || '<tr><td colspan="6">None</td></tr>'}</table></div>
 <h2>Location devices</h2><div class="card"><table><tr><th>Name</th><th>Created</th><th>Last fix</th><th></th></tr>${devRows || '<tr><td colspan="4">None</td></tr>'}</table><p class="muted">Add devices with <code>npm run devices -- add NAME</code> on the server.</p></div>
@@ -526,23 +684,53 @@ ${verified ? '' : '<p><strong>Only approve if you just clicked Connect in Claude
       );
     });
 
+    /** Admin POSTs: owner, same-origin, a live step-up session, CSRF bound to that session. */
+    const adminGuard = (req: Request, res: Response): boolean => {
+      const subject = req.owner!.subject;
+      const su = stepup.current(req, subject, secure);
+      if (
+        !sameOriginPost(sec, req) ||
+        (stepup.enabled && !su) ||
+        !csrf.verify(req, 'admin', subject, req.body?.csrf, su?.binding ?? '')
+      ) {
+        audit.record('admin_csrf_rejected', {
+          ip: ip(req),
+          subject,
+          detail: { stepup: su ? 'live' : 'none' },
+        });
+        res
+          .status(403)
+          .send(
+            page(
+              'Forbidden',
+              '<h1>Forbidden</h1><p>The admin page expired (or its step-up session did). <a href="/oauth/admin">Reload it</a> and try again.</p>',
+            ),
+          );
+        return false;
+      }
+      return true;
+    };
+    app.post(
+      '/oauth/stepup/end',
+      rateLimit(ctx.limiter, 'admin', 60, 60_000, ip),
+      form,
+      owner,
+      (req, res) => {
+        pageHeaders(res);
+        if (!adminGuard(req, res)) return;
+        stepup.end(req, res, secure);
+        audit.record('stepup_ended', { ip: ip(req), subject: req.owner!.subject });
+        res.redirect(303, '/oauth/admin');
+      },
+    );
     const adminPost = (path: string, action: (req: Request) => string | undefined) => {
       app.post(path, rateLimit(ctx.limiter, 'admin', 60, 60_000, ip), form, owner, (req, res) => {
         pageHeaders(res);
-        const subject = req.owner!.subject;
-        if (!sameOriginPost(sec, req) || !csrf.verify(req, 'admin', subject, req.body?.csrf)) {
-          audit.record('admin_csrf_rejected', { ip: ip(req), subject });
-          res
-            .status(403)
-            .send(
-              page('Forbidden', '<h1>Forbidden</h1><p>Reload the admin page and try again.</p>'),
-            );
-          return;
-        }
+        if (!adminGuard(req, res)) return;
         const what = action(req);
         audit.record(`admin_${path.split('/').pop()}`, {
           ip: ip(req),
-          subject,
+          subject: req.owner!.subject,
           detail: { target: what },
         });
         res.redirect(303, '/oauth/admin');

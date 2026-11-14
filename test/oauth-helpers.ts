@@ -4,6 +4,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { hashPassword } from '../src/auth/password.js';
+import { StepUp } from '../src/auth/stepup.js';
 import { generateTotpSecret, totp } from '../src/auth/totp.js';
 import { REPO_ROOT, loadConfig } from '../src/config.js';
 import { startGateway, type Gateway } from '../src/gateway.js';
@@ -75,16 +76,25 @@ export interface TestGateway {
   provider: 'tailscale' | 'password';
   password: string;
   totpSecret: string;
+  /** The step-up TOTP secret enrolled at start (tests/stepup.test.ts exercises it directly). */
+  stepupSecret: string;
   dir: string;
   /** Headers that authenticate the owner on the private listener (plus the jar's cookies). */
   auth(jar: Jar): Record<string, string>;
   close(): Promise<void>;
 }
 
+/** Route options plus test-only switches. */
+export type TestRouteOptions = RouteOptions & {
+  skipStepupEnroll?: boolean;
+  /** Gateway clock (tests that move time). */
+  now?: () => number;
+};
+
 async function start(
   provider: 'tailscale' | 'password',
   env: Record<string, string>,
-  routeOpts: RouteOptions,
+  routeOpts: TestRouteOptions,
   logger: Logger,
 ): Promise<TestGateway> {
   const port = await freePort();
@@ -111,6 +121,7 @@ async function start(
   });
   const gw = await startGateway(config, {
     logger,
+    now: routeOpts.now,
     gevChild: childSpawnSpec({
       gevRoot: REPO_ROOT,
       gevUrl: 'http://127.0.0.1:7701',
@@ -118,6 +129,8 @@ async function start(
     }),
     routes: installAllRoutes({ cimdFetch: fakeCimdFetch, ...routeOpts }),
   });
+  const stepupSecret = generateTotpSecret();
+  if (!routeOpts.skipStepupEnroll) gw.stepup.enroll(stepupSecret);
   return {
     gw,
     origin,
@@ -125,6 +138,7 @@ async function start(
     provider,
     password,
     totpSecret,
+    stepupSecret,
     dir,
     auth: (jar) => ({
       cookie: jar.header(),
@@ -142,12 +156,12 @@ async function start(
 
 export const startPasswordGateway = (
   env: Record<string, string> = {},
-  routeOpts: RouteOptions = {},
+  routeOpts: TestRouteOptions = {},
   logger: Logger = nullLogger,
 ) => start('password', env, routeOpts, logger);
 export const startTailscaleGateway = (
   env: Record<string, string> = {},
-  routeOpts: RouteOptions = {},
+  routeOpts: TestRouteOptions = {},
   logger: Logger = nullLogger,
 ) => start('tailscale', env, routeOpts, logger);
 
@@ -184,9 +198,26 @@ export async function passwordLogin(
   return jar;
 }
 
-/** A jar that is "logged in": password mode logs in; tailscale mode needs no session. */
-export async function ownerJar(t: TestGateway): Promise<Jar> {
-  return t.provider === 'password' ? passwordLogin(t) : new Jar();
+/**
+ * A jar that is "logged in" and stepped up: password mode logs in; tailscale mode needs no
+ * session. The step-up session is created directly in the store (tests/stepup.test.ts covers
+ * the TOTP form itself), so many approvals can run within one 30 s TOTP step.
+ */
+export async function ownerJar(t: TestGateway, opts: { stepup?: boolean } = {}): Promise<Jar> {
+  const jar = t.provider === 'password' ? await passwordLogin(t) : new Jar();
+  if (opts.stepup !== false) stepUpJar(t, jar);
+  return jar;
+}
+
+export function ownerSubject(t: Pick<TestGateway, 'provider'>): string {
+  return t.provider === 'password' ? 'owner' : OWNER_TS_LOGIN;
+}
+
+/** Puts a fresh step-up session cookie for the owner into the jar. */
+export function stepUpJar(t: TestGateway, jar: Jar): Jar {
+  const id = t.gw.stepup.createSession(ownerSubject(t));
+  jar.cookies.set(StepUp.cookieName(t.privateOrigin.startsWith('https://')), id);
+  return jar;
 }
 
 export function authorizeUrl(

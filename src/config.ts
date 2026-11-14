@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { parseStepUpKey } from './auth/stepup.js';
 
 /** Repository root (works from src/ under vitest and from dist/src/ when compiled). */
 export const REPO_ROOT = (() => {
@@ -217,6 +218,15 @@ const schema = z.object({
   GATEWAY_TOTP_SECRET: optionalString,
   SESSION_SECRET: optionalString,
   SESSION_TTL_S: int(12 * 3600, 300, 7 * 86_400),
+  /**
+   * Step-up second factor (TOTP) on the consent approval and /oauth/admin. On by default;
+   * enroll with `node dist/scripts/stepup.js enroll`.
+   */
+  STEPUP_TOTP: z.enum(['on', 'off']).default('on'),
+  /** How long a correct code opens admin (and further approvals) for. */
+  STEPUP_WINDOW_S: int(600, 60, 3600),
+  /** 32-byte key (base64url) that encrypts the TOTP secret at rest. Required in production. */
+  STEPUP_KEY: optionalString,
 
   // Location
   LOCATION_RETENTION_HOURS: int(24, 1, 24 * 30),
@@ -394,6 +404,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       throw new ConfigError('LOGIN_PROVIDER=password is not allowed in production; use tailscale');
     }
     checkProductionBinds(raw);
+    if (raw.STEPUP_TOTP === 'on' && !raw.STEPUP_KEY) {
+      throw new ConfigError(
+        'production requires STEPUP_KEY (encrypts the step-up TOTP secret at rest; generate one with `node dist/scripts/stepup.js keygen`), or STEPUP_TOTP=off',
+      );
+    }
+  }
+  if (raw.STEPUP_KEY) {
+    try {
+      parseStepUpKey(raw.STEPUP_KEY);
+    } catch (err) {
+      throw new ConfigError((err as Error).message);
+    }
   }
   if (publicAuthorize && !passwordConfigured) {
     throw new ConfigError(

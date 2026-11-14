@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import type { Express } from 'express';
 import { createPrivateApp, createPublicApp, hardenServer } from './app.js';
 import { Audit } from './audit.js';
+import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import type { Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { GevChild, childSpawnSpec } from './gev/child.js';
@@ -47,6 +48,7 @@ export interface GatewayCore {
   runner: ToolRunner;
   limiter: RateLimiter;
   sessionSecret: string;
+  stepup: StepUp;
   gev?: GevChild;
   rail?: RailIndex;
   now: () => number;
@@ -126,6 +128,22 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
   });
   for (const t of pulseTools(pulse)) registry.register(t);
   for (const t of overrides.extraTools ?? []) registry.register(t);
+  const sessionSecret = sessionSecretFor(config, db);
+  const stepup = new StepUp(
+    db,
+    {
+      enabled: config.STEPUP_TOTP === 'on',
+      windowS: config.STEPUP_WINDOW_S,
+      // Production requires STEPUP_KEY (config.ts); dev/test may derive one.
+      key: config.STEPUP_KEY ? parseStepUpKey(config.STEPUP_KEY) : deriveStepUpKey(sessionSecret),
+    },
+    now,
+  );
+  if (!stepup.enabled) logger.warn('stepup_disabled', { note: 'STEPUP_TOTP=off' });
+  else if (!stepup.isEnrolled())
+    logger.warn('stepup_not_enrolled', {
+      note: 'Consent approval and /oauth/admin refuse until you run: node dist/scripts/stepup.js enroll',
+    });
   return {
     config,
     db,
@@ -136,7 +154,8 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     registry,
     runner,
     limiter,
-    sessionSecret: sessionSecretFor(config, db),
+    sessionSecret,
+    stepup,
     rail,
     now,
   };
@@ -195,6 +214,7 @@ export async function startGateway(
       core.locations.prune();
       core.tokens.prune();
       core.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(core.now());
+      core.stepup.prune();
       core.audit.prune();
     } catch (err) {
       logger.warn('prune_failed', { error: (err as Error).message });

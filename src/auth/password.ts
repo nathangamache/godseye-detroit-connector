@@ -63,24 +63,33 @@ export const DEFAULT_LOCKOUT: LockoutPolicy = {
 };
 
 export class Lockout {
+  /** `prefix` separates counters (password login uses none, the step-up uses "stepup:"). */
   constructor(
     private readonly db: DB,
     private readonly policy: LockoutPolicy = DEFAULT_LOCKOUT,
     private readonly now: () => number = Date.now,
+    private readonly prefix = '',
   ) {}
 
   isLocked(ip: string): boolean {
     const t = this.now();
     const rows = this.db
       .prepare('SELECT locked_until FROM login_failures WHERE key IN (?, ?)')
-      .all(`ip:${ip}`, 'global') as Array<{ locked_until: number | null }>;
+      .all(`${this.prefix}ip:${ip}`, `${this.prefix}global`) as Array<{
+      locked_until: number | null;
+    }>;
     return rows.some((r) => (r.locked_until ?? 0) > t);
   }
 
   fail(ip: string): void {
-    this.bump(`ip:${ip}`, this.policy.perIpMax, this.policy.perIpWindowMs, this.policy.perIpLockMs);
     this.bump(
-      'global',
+      `${this.prefix}ip:${ip}`,
+      this.policy.perIpMax,
+      this.policy.perIpWindowMs,
+      this.policy.perIpLockMs,
+    );
+    this.bump(
+      `${this.prefix}global`,
       this.policy.globalMax,
       this.policy.globalWindowMs,
       this.policy.globalLockMs,
@@ -88,7 +97,7 @@ export class Lockout {
   }
 
   succeed(ip: string): void {
-    this.db.prepare('DELETE FROM login_failures WHERE key = ?').run(`ip:${ip}`);
+    this.db.prepare('DELETE FROM login_failures WHERE key = ?').run(`${this.prefix}ip:${ip}`);
   }
 
   private bump(key: string, max: number, windowMs: number, lockMs: number): void {

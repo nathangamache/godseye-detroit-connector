@@ -53,6 +53,7 @@ export function installAllRoutes(opts: RouteOptions = {}): RouteSet {
         tokens: gw.tokens,
         clients,
         locations: gw.locations,
+        stepup: gw.stepup,
         now: gw.now,
       });
       shared = { clients, oauth };

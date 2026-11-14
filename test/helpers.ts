@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { REPO_ROOT } from '../src/config.js';
@@ -27,6 +28,7 @@ export const PROD_ENV: Record<string, string> = {
   PRIVATE_ORIGIN: 'https://godseye.example-tailnet.ts.net',
   OWNER_TAILSCALE_LOGIN: 'owner@example.com',
   PULSE_URL: 'http://127.0.0.1:9',
+  STEPUP_KEY: randomBytes(32).toString('base64url'),
 };
 
 export async function waitFor(fn: () => boolean, timeoutMs = 10_000, stepMs = 25): Promise<void> {

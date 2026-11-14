@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tailscaleIdentity } from '../src/auth/tailscale.js';
-import { base32Encode, hotp, totp, verifyTotp } from '../src/auth/totp.js';
+import { base32Encode, generateTotpSecret, hotp, totp, verifyTotp } from '../src/auth/totp.js';
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { safeNext } from '../src/auth/login.js';
 import { ConfigError, loadConfig } from '../src/config.js';
@@ -221,6 +221,7 @@ describe('production configuration', () => {
     PRIVATE_HOST: '127.0.0.2',
     TRUSTED_PROXY_IPS: '172.30.77.10',
     TAILSCALE_TRUSTED_PROXY_IPS: '127.0.0.1',
+    STEPUP_KEY: PROD_ENV.STEPUP_KEY!,
   };
   const prod = {
     GATEWAY_MODE: 'production',
@@ -247,6 +248,7 @@ describe('production configuration', () => {
         GATEWAY_MODE: 'production',
         PRIVATE_ORIGIN: prod.PRIVATE_ORIGIN,
         OWNER_TAILSCALE_LOGIN: prod.OWNER_TAILSCALE_LOGIN,
+        STEPUP_KEY: prod.STEPUP_KEY,
       }),
     ).toThrow(ConfigError);
     // Development keeps loopback defaults (host tailscale serve, kernel TUN).
@@ -328,11 +330,20 @@ describe('production mode listeners', () => {
         p,
       ).toBe(403);
     }
+    // Not enrolled yet: admin refuses (step-up is on by default and fails closed).
+    const notYet = await fetch(gw.privateUrl + '/oauth/admin', {
+      headers: { 'tailscale-user-login': OWNER },
+    });
+    expect(notYet.status).toBe(503);
+    gw.stepup.enroll(generateTotpSecret());
+    // The owner is recognised, and asked for the step-up code before admin opens.
     const ok = await fetch(gw.privateUrl + '/oauth/admin', {
       headers: { 'tailscale-user-login': OWNER },
     });
-    expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain('Signed in as owner@example.com via tailscale');
+    expect(ok.status).toBe(401);
+    const html = await ok.text();
+    expect(html).toContain('Signed in as owner@example.com via tailscale');
+    expect(html).toContain('action="/oauth/stepup"');
     expect((await fetch(gw.privateUrl + '/auth/login')).status).toBe(404); // no password login in production
   });
 

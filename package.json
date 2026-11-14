@@ -21,6 +21,7 @@
     "smoke:live": "npm run build && node dist/scripts/smoke-live.js",
     "devices": "node dist/scripts/devices.js",
     "hash-password": "node dist/scripts/hash-password.js",
+    "stepup": "node dist/scripts/stepup.js",
     "backup": "node dist/scripts/backup-db.js",
     "rail:build": "node scripts/build-rail-data.mjs"
   },

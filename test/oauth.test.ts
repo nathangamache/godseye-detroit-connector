@@ -456,8 +456,8 @@ describe('PUBLIC_AUTHORIZE_FALLBACK=password (off by default)', () => {
       );
       expect(anon.status).toBe(302);
       expect(anon.headers.get('location')).toMatch(/^\/auth\/login/);
-      const { passwordLogin } = await import('./oauth-helpers.js');
-      const jar = await passwordLogin(t, new Jar(), { origin: t.origin });
+      const { passwordLogin, stepUpJar } = await import('./oauth-helpers.js');
+      const jar = stepUpJar(t, await passwordLogin(t, new Jar(), { origin: t.origin }));
       const { verifier, challenge } = pkce();
       const loc = await approve(
         t,

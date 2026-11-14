@@ -26,6 +26,7 @@ describe('config', () => {
       PRIVATE_HOST: '127.0.0.2',
       TRUSTED_PROXY_IPS: '172.30.77.10',
       TAILSCALE_TRUSTED_PROXY_IPS: '127.0.0.1',
+      STEPUP_TOTP: 'off',
     });
     expect(ok.loginProvider).toBe('tailscale');
     expect(ok.ownerTailscaleLogin).toBe('owner@example.com');

@@ -277,6 +277,19 @@ export class TokenStore {
     return fams.length;
   }
 
+  /** Live (not revoked, refresh not expired) grants of one client. */
+  activeFamilies(clientId: string): { count: number; lastUsedAt: number | null } {
+    const r = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n, MAX(f.last_used_at) AS last FROM token_families f
+          WHERE f.client_id = ? AND f.revoked_at IS NULL
+            AND EXISTS (SELECT 1 FROM tokens t WHERE t.family_id = f.family_id AND t.kind = 'refresh'
+                          AND t.revoked_at IS NULL AND t.expires_at > ?)`,
+      )
+      .get(clientId, this.now()) as { n: number; last: number | null };
+    return { count: r.n, lastUsedAt: r.last };
+  }
+
   listFamilies(): Array<{
     family_id: string;
     client_id: string;
