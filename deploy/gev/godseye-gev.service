@@ -1,7 +1,7 @@
 # systemd --user unit: God's Eye View in `vite preview` mode (DEV / plain-node mode).
 # Production runs GEV in a hardened container instead (deploy/docker-compose.yml).
 #
-# Install (Nathan decides; this repo never enables or starts it):
+# Install (the owner decides; this repo never enables or starts it):
 #   cp deploy/gev/godseye-gev.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
 #   systemctl --user start godseye-gev      # or: enable --now

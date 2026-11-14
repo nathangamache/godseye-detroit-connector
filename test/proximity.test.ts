@@ -36,7 +36,7 @@ describe('proximityCheck', () => {
     const c = proximityCheck(DETROIT, fixAt(DETROIT.lat + 0.01, DETROIT.lon, 3), NOW, 30)!;
     expect(c).toMatchObject({ distance_km: 1.1, compass: 'N', fix_age_s: 180, at_place: false });
     expect(c.note).toBe(
-      "Phone check: Nathan's latest phone fix (3 min old) is 1.1 km N of this point, so his phone is NOT at this place. If he said he is here, tell him his phone puts him 1.1 km N of it and ask which is right before answering as if he were here.",
+      "Phone check: the user's latest phone fix (3 min old) is 1.1 km N of this point, so the phone is NOT at this place. If the user claims to be here, say that the phone puts the user 1.1 km N of it and ask which is right before answering as if the user were here.",
     );
     // South of the place: bearing is FROM the place TO the phone.
     expect(
@@ -48,7 +48,7 @@ describe('proximityCheck', () => {
     const at = proximityCheck(DETROIT, fixAt(DETROIT.lat + 0.004, DETROIT.lon, 1), NOW, 30)!;
     expect(at.at_place).toBe(true);
     expect(at.note).toMatch(
-      /0\.4 km N of this point, so his phone is at or very near this place\.$/,
+      /0\.4 km N of this point, so the phone is at or very near this place\.$/,
     );
     const rough = proximityCheck(DETROIT, fixAt(DETROIT.lat, DETROIT.lon, 1, 1500), NOW, 30)!;
     expect(rough.note).toMatch(/only accurate to about 1500 m/);

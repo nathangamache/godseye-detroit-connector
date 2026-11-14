@@ -1,5 +1,5 @@
 /**
- * Owner-location awareness: a tool called for an explicit point, while Nathan's latest phone
+ * Owner-location awareness: a tool called for an explicit point, while the user's latest phone
  * fix is recent, says how far the phone is from that point (km, compass bearing from the point
  * to the phone, fix age) and says plainly when the phone is not there. The note never carries
  * the phone's coordinates, and it is audited as a location read.
@@ -110,7 +110,7 @@ describe('phone check on explicit-point calls', () => {
     expect(expectedKm).toBe('2.5');
     expect(expectedDir).toBe('WSW');
     expect(t).toContain(
-      `Phone check: Nathan's latest phone fix (4 min old) is 2.5 km WSW of this point, so his phone is NOT at this place.`,
+      `Phone check: the user's latest phone fix (4 min old) is 2.5 km WSW of this point, so the phone is NOT at this place.`,
     );
     expect(t).toMatch(
       /"owner_phone":\{"distance_km":2\.5,"bearing_from_point_deg":\d+,"compass_from_point":"WSW","fix_age_s":2\d\d,"at_this_place":false\}/,
@@ -142,7 +142,7 @@ describe('phone check on explicit-point calls', () => {
       const first = (r.content as Array<{ text: string }>)[0]!.text;
       expect(
         first.startsWith(
-          `Phone check: Nathan's latest phone fix (2 min old) is 2.5 km WSW of this point`,
+          `Phone check: the user's latest phone fix (2 min old) is 2.5 km WSW of this point`,
         ),
         name,
       ).toBe(true);
@@ -160,7 +160,7 @@ describe('phone check on explicit-point calls', () => {
       arguments: { name: 'nearest_rail', arguments: PLACE },
     });
     expect((r.content as Array<{ text: string }>)[0]!.text).toMatch(
-      /^Phone check: Nathan's latest phone fix \(\d+ s old\) is 0\.\d km [NESW]+ of this point, so his phone is at or very near this place\./,
+      /^Phone check: the user's latest phone fix \(\d+ s old\) is 0\.\d km [NESW]+ of this point, so the phone is at or very near this place\./,
     );
   });
 

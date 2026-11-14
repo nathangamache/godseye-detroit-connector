@@ -8,7 +8,7 @@
  *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
  *   GEV          -> get_traffic_flow, find_cctv_cameras, get_weather
  * and returns one compact summary with each source's timestamp/age and error. For an explicit
- * point it also says how far Nathan's phone is from that point (src/location/proximity.ts).
+ * point it also says how far the user's phone is from that point (src/location/proximity.ts).
  */
 import type { Config } from '../config.js';
 import type { Point, ProximityCheck } from '../location/proximity.js';
@@ -53,9 +53,9 @@ export function currentPosition(
 export function noFixMessage(publicOrigin: string, retentionHours: number): string {
   return (
     `No phone location fix is available (none received in the last ${retentionHours} h). ` +
-    `Ask Nathan to open ${publicOrigin}/locate/ on his phone (over Tailscale) and tap "Update My Location", ` +
+    `Ask the user to open ${publicOrigin}/locate/ on the phone (over Tailscale) and tap "Update My Location", ` +
     'or to check that OwnTracks is running and allowed to report location. ' +
-    'Alternatively, ask him where he is and pass lat/lon explicitly.'
+    'Alternatively, ask the user for the place and pass lat/lon explicitly.'
   );
 }
 
@@ -78,8 +78,8 @@ export function whereAmI(store: LocationStore, config: Config, now = Date.now())
   ];
   if (pos.stale) {
     lines.push(
-      `STALE: this fix is older than ${config.LOCATION_STALE_MINUTES} minutes, so Nathan may have moved. ` +
-        `Say how old it is, and suggest he opens ${config.privateOrigin}/locate/ (needs Tailscale) or checks OwnTracks.`,
+      `STALE: this fix is older than ${config.LOCATION_STALE_MINUTES} minutes, so the user may have moved. ` +
+        `Say how old it is, and suggest opening ${config.privateOrigin}/locate/ (needs Tailscale) or checking OwnTracks.`,
     );
   }
   return {
@@ -243,7 +243,7 @@ export async function whatsHappeningHere(
   } else {
     positionNote = 'position supplied by caller';
   }
-  // An explicit point: is Nathan's phone actually there?
+  // An explicit point: is the user's phone actually there?
   const phone = usesCaller(args) ? deps.phoneCheck?.({ lat, lon }) : undefined;
 
   const runner = deps.runner;
@@ -388,7 +388,7 @@ export async function whatsHappeningHere(
     const flag = s.status === 'ok' ? '' : ` (${s.status})`;
     lines.push(`- ${label[s.source] ?? s.source}${flag}: ${oneLine(s.summary)}${age}`);
   }
-  lines.push(`Retrieved ${retrievedAt()}. Always tell Nathan how old each piece of data is.`);
+  lines.push(`Retrieved ${retrievedAt()}. Always tell the user how old each piece of data is.`);
 
   const output: ToolOutput = {
     summary: lines.join('\n'),

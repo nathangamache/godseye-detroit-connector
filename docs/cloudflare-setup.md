@@ -1,4 +1,4 @@
-# Cloudflare setup (dashboard steps for Nathan)
+# Cloudflare setup (dashboard steps for the owner)
 
 Cloudflare carries only the **machine-to-machine** side: claude.ai's server calls and OwnTracks.
 Everything a human logs into is Tailscale-only (`docs/tailscale-setup.md`); **Cloudflare Access is

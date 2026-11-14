@@ -2,7 +2,7 @@
  * Owner-location awareness for tools called with an explicit point.
  *
  * When Claude asks about a place ("I'm stuck at the X St crossing") it passes that place's
- * coordinates; nothing then tells it that Nathan's phone may be kilometres away. If his latest
+ * coordinates; nothing then tells it that the user's phone may be kilometres away. If the latest
  * fix is recent, results for an explicit point carry a short note with the distance, the compass
  * bearing from the place to the phone and the fix age, and say plainly when the phone is not at
  * the place. The note never contains the phone's coordinates; the caller audits it as a
@@ -53,7 +53,7 @@ export interface ProximityCheck {
 
 /**
  * Compares the place with the latest fix. Undefined when there is no fix or it is older than
- * `maxAgeMinutes` (an old fix says nothing about where he is now).
+ * `maxAgeMinutes` (an old fix says nothing about where the user is now).
  */
 export function proximityCheck(
   place: Point,
@@ -73,9 +73,9 @@ export function proximityCheck(
     fix.accuracy_m !== null && fix.accuracy_m > AT_PLACE_M
       ? ` The fix is only accurate to about ${Math.round(fix.accuracy_m)} m, so treat this as rough.`
       : '';
-  const fixed = `Nathan's latest phone fix (${humanAge(age)} old) is ${km.toFixed(1)} km ${compass} of this point`;
+  const fixed = `the user's latest phone fix (${humanAge(age)} old) is ${km.toFixed(1)} km ${compass} of this point`;
   const note = at
-    ? `Phone check: ${fixed}, so his phone is at or very near this place.${acc}`
-    : `Phone check: ${fixed}, so his phone is NOT at this place. If he said he is here, tell him his phone puts him ${km.toFixed(1)} km ${compass} of it and ask which is right before answering as if he were here.${acc}`;
+    ? `Phone check: ${fixed}, so the phone is at or very near this place.${acc}`
+    : `Phone check: ${fixed}, so the phone is NOT at this place. If the user claims to be here, say that the phone puts the user ${km.toFixed(1)} km ${compass} of it and ask which is right before answering as if the user were here.${acc}`;
   return { distance_km: km, bearing_deg: brg, compass, fix_age_s: age, at_place: at, note };
 }
