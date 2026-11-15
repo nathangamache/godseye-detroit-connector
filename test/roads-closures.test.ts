@@ -9,9 +9,11 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Audit } from '../src/audit.js';
 import type { LocationStore } from '../src/location/store.js';
-import { bboxAreaKm2, decodePolyline } from '../src/extra/roads/geo.js';
+import { bboxAreaKm2, decodePolyline, type LonLat } from '../src/extra/roads/geo.js';
 import { loadConfig } from '../src/config.js';
-import { ClosureService } from '../src/extra/roads/closures.js';
+import { ClosureService, toPublic, type RoadItem } from '../src/extra/roads/closures.js';
+import { mergeDirections } from '../src/extra/roads/merge.js';
+import { closuresOnRoute } from '../src/extra/roads/route.js';
 import {
   ATTRIBUTION as GEO_ATTRIBUTION,
   roadLabel,
@@ -44,6 +46,7 @@ import {
   harness,
   header,
   json,
+  line,
   mockFetch,
   type Handler,
   type Harness,
@@ -750,6 +753,209 @@ describe('TomTom road names', () => {
     expect(roadLabel({ ref: 'I 94;US 12' })).toBe('I-94 / US-12');
     expect(roadLabel({ name: 'First Street' })).toBe('First Street');
     expect(roadLabel({ highway: 'residential' })).toBeNull();
+  });
+});
+
+/** The same stretch southbound: reversed, 5 m west, cross streets swapped. */
+const CLOSED_SB: Array<[number, number]> = [
+  [-83.05006, 42.338],
+  [-83.05006, 42.335],
+];
+
+describe('one item per closed stretch', () => {
+  const TT_ONLY = { ...ALL_KEYS, MDOT_RIDE_API_KEY: '', ONTARIO_511_API_KEY: '' };
+
+  it('merges a TomTom closure reported once per direction, and counts it once', async () => {
+    const x = h(
+      {
+        ...TT_ONLY,
+        OVERPASS_URL: 'http://overpass.invalid/api/interpreter',
+        DETROIT_ROW_ENABLED: 'false',
+      },
+      {
+        routes: [
+          [
+            /api\.tomtom\.com/,
+            () =>
+              json({
+                incidents: [
+                  ...TOMTOM.incidents,
+                  unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St'),
+                  unnamedClosure('tt-sb', CLOSED_SB, 'Bravo St', 'Alpha St'),
+                ],
+              }),
+          ],
+          [/overpass\.invalid/, () => json(NEAR_WAYS)],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const tt = itemsOf(out).filter((i) => i.source === 'tomtom');
+    expect(tt).toHaveLength(3);
+    const both = tt.find((i) => i.from_cross_street === 'Alpha St')!;
+    expect(both).toMatchObject({
+      road: 'Charlie Avenue (M-99)',
+      direction: 'both directions',
+      to_cross_street: 'Bravo St',
+      full_closure: true,
+      merged_reports: 2,
+      // One direction's length, not both added up.
+      geometry_summary: '334 m long',
+    });
+    expect(both.note).toContain('2 reports of this stretch (one per direction) merged');
+    // Named once, for the one item.
+    expect(x.mock.count(/overpass\.invalid/)).toBe(1);
+    // Counts are after merging.
+    expect(sourcesOf(out).find((s) => s.source === 'tomtom')!.count).toBe(3);
+    expect((out.data as { count: number }).count).toBe(itemsOf(out).length);
+  });
+
+  it('merges reports whose lines overlap, but not a shorter stretch or other work', async () => {
+    // Two carriageways 15 m apart, NB and SB, with no cross streets; a NB stretch half as long;
+    // and other work on the same stretch.
+    const nb = line({ lat: 42.335, lon: -83.05 }, { lat: 42.339, lon: -83.05 }, 8);
+    const sb = line({ lat: 42.339, lon: -83.05018 }, { lat: 42.335, lon: -83.05018 }, 8);
+    const half = line({ lat: 42.335, lon: -83.05 }, { lat: 42.337, lon: -83.05 }, 4);
+    const zone = (id: string, coords: Array<[number, number]>, direction: string, d: string) => ({
+      id,
+      type: 'Feature',
+      properties: {
+        core_details: {
+          event_type: 'work-zone',
+          road_names: ['Test Blvd'],
+          direction,
+          description: d,
+        },
+        start_date: '2026-11-01T00:00:00Z',
+        vehicle_impact: 'some-lanes-closed',
+      },
+      geometry: { type: 'LineString', coordinates: coords },
+    });
+    const x = h(
+      { MDOT_RIDE_API_KEY: 'k', DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          [
+            /work_zone_information/,
+            () =>
+              json({
+                type: 'FeatureCollection',
+                features: [
+                  zone('nb', nb, 'northbound', 'Northbound right lane closed for sewer work'),
+                  zone('sb', sb, 'southbound', 'Southbound right lane closed for sewer work'),
+                  zone('half', half, 'northbound', 'Right lane closed for sewer work'),
+                  zone('other', nb, 'northbound', 'Shoulder closed for tree trimming'),
+                ],
+              }),
+          ],
+          [/traffic_events/, () => json({ data: [] })],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const items = itemsOf(out);
+    expect(items).toHaveLength(3);
+    const merged = items.find((i) => i.merged_reports === 2)!;
+    expect(merged).toMatchObject({ road: 'Test Blvd', direction: 'both directions' });
+    expect(items.filter((i) => i.direction === 'northbound')).toHaveLength(2);
+    expect(sourcesOf(out).find((s) => s.source === 'mdot_ride')!.count).toBe(3);
+  });
+
+  const item = (over: Partial<RoadItem>): RoadItem => ({
+    source: 'mdot_ride',
+    id: over.id ?? 'x',
+    kind: 'work_zone',
+    type: 'work-zone',
+    road: 'Test Rd',
+    direction: null,
+    lanes: null,
+    vehicle_impact: null,
+    full_closure: true,
+    description: 'Road closed',
+    from_cross_street: null,
+    to_cross_street: null,
+    start: null,
+    end: null,
+    updated: null,
+    lines: [],
+    ...over,
+  });
+
+  it('keeps both carriageways of a merged closure, so routing still meets it', () => {
+    // 40 m apart: too far for the overlap test, but the same cross streets in either order.
+    const nb = item({
+      id: 'nb',
+      from_cross_street: 'Alpha St',
+      to_cross_street: 'Bravo St',
+      lines: [line({ lat: 42.335, lon: -83.05 }, { lat: 42.338, lon: -83.05 }, 6)],
+    });
+    const sb = item({
+      id: 'sb',
+      from_cross_street: 'Bravo St',
+      to_cross_street: 'Alpha St',
+      lines: [line({ lat: 42.338, lon: -83.0505 }, { lat: 42.335, lon: -83.0505 }, 6)],
+    });
+    const [m, ...rest] = mergeDirections([nb, sb]);
+    expect(rest).toEqual([]);
+    expect(m).toMatchObject({ id: 'nb+sb', direction: 'both directions', merged: 2 });
+    expect(m!.lines).toHaveLength(2);
+    expect(toPublic(m!).geometry_summary).toBe('334 m long');
+    // A southbound route along the far carriageway still runs through it.
+    const route = line({ lat: 42.34, lon: -83.0505 }, { lat: 42.333, lon: -83.0505 }, 20);
+    expect(closuresOnRoute([m!], route)).toHaveLength(1);
+  });
+
+  it('merges a duplicate in one direction without calling it both directions', () => {
+    const a = item({
+      id: 'a',
+      direction: 'Eastbound',
+      lines: [
+        [
+          [-83.05, 42.335],
+          [-83.046, 42.335],
+        ],
+      ],
+    });
+    const b = item({
+      id: 'b',
+      direction: 'EB',
+      lines: [
+        [
+          [-83.05, 42.33502],
+          [-83.046, 42.33502],
+        ],
+      ],
+    });
+    const [m, ...rest] = mergeDirections([a, b]);
+    expect(rest).toEqual([]);
+    expect(m!.direction).toBe('Eastbound');
+  });
+
+  it('never merges across sources, roads, distant stretches or points by position', () => {
+    const l = [line({ lat: 42.335, lon: -83.05 }, { lat: 42.338, lon: -83.05 }, 6)];
+    const cross = { from_cross_street: 'Alpha St', to_cross_street: 'Bravo St' };
+    expect(
+      mergeDirections([item({ id: 'a', lines: l }), item({ id: 'b', source: 'tomtom', lines: l })]),
+    ).toHaveLength(2);
+    expect(
+      mergeDirections([item({ id: 'a', lines: l }), item({ id: 'b', road: 'Other Rd', lines: l })]),
+    ).toHaveLength(2);
+    // Same cross-street names 5 km apart: two stretches.
+    const far = [line({ lat: 42.38, lon: -83.05 }, { lat: 42.383, lon: -83.05 }, 6)];
+    expect(
+      mergeDirections([
+        item({ id: 'a', lines: l, ...cross }),
+        item({ id: 'b', lines: far, ...cross }),
+      ]),
+    ).toHaveLength(2);
+    // Two crashes at one spot are two crashes.
+    const pt: LonLat[][] = [[[-83.05, 42.335]]];
+    expect(
+      mergeDirections([
+        item({ id: 'a', kind: 'incident', type: 'crash', lines: pt }),
+        item({ id: 'b', kind: 'incident', type: 'crash', lines: pt }),
+      ]),
+    ).toHaveLength(2);
   });
 });
 

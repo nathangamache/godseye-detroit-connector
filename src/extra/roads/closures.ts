@@ -15,6 +15,7 @@ import {
   type LonLat,
   type Point,
 } from './geo.js';
+import { mergeDirections } from './merge.js';
 import { mentionsRoad, type RoadQuery } from './text.js';
 
 export type SourceId = 'detroit_row' | 'tomtom' | 'mdot_ride' | 'ontario511';
@@ -40,6 +41,10 @@ export interface RoadItem {
   updated: string | null;
   /** Geometry, GeoJSON order; a point is a one-vertex line. Never output as is. */
   lines: LonLat[][];
+  /** Merged reports (merge.ts): one report's lines, for the length shown (lines holds all). */
+  primaryLines?: LonLat[][];
+  /** How many source reports this item merges (one per direction, typically). */
+  merged?: number;
   /** start/end are local calendar dates (YYYY-MM-DD), not instants. */
   dateOnly?: boolean;
   /** Looks up the street name when the source has none (Detroit permits, TomTom). */
@@ -119,6 +124,8 @@ export interface PublicItem {
   distance_km: number | null;
   at: Point | null;
   geometry_summary: string;
+  /** Reports of this stretch merged into this item (one per direction), when more than one. */
+  merged_reports?: number;
   note?: string;
 }
 
@@ -141,7 +148,9 @@ export function timeState(
 }
 
 export function toPublic(it: RoadItem, center?: Point): PublicItem {
-  const verts = it.lines.reduce((n, l) => n + l.length, 0);
+  // A merged item is summed up by one of its reports (both directions are one stretch).
+  const shape = it.primaryLines ?? it.lines;
+  const verts = shape.reduce((n, l) => n + l.length, 0);
   let at: Point | null = null;
   let distance: number | null = null;
   if (center) {
@@ -150,17 +159,17 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
       distance = Math.round(d.distM / 100) / 10;
       at = { lat: round4(d.at.lat), lon: round4(d.at.lon) };
     }
-  } else if (it.lines[0]?.length) {
-    const m = lineMidpoint(it.lines[0]);
+  } else if (shape[0]?.length) {
+    const m = lineMidpoint(shape[0]);
     at = { lat: round4(m.lat), lon: round4(m.lon) };
   }
-  const len = it.lines.reduce((m, l) => m + lineLengthM(l), 0);
+  const len = shape.reduce((m, l) => m + lineLengthM(l), 0);
   const geometry_summary =
-    verts <= it.lines.length
-      ? it.lines.length > 1
-        ? `${it.lines.length} points`
+    verts <= shape.length
+      ? shape.length > 1
+        ? `${shape.length} points`
         : 'point'
-      : `${it.lines.length > 1 ? `${it.lines.length} segments, ` : ''}${humanDistance(len)} long`;
+      : `${shape.length > 1 ? `${shape.length} segments, ` : ''}${humanDistance(len)} long`;
   return {
     source: it.source,
     kind: it.kind,
@@ -179,6 +188,7 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
     distance_km: distance,
     at,
     geometry_summary,
+    ...(it.merged && it.merged > 1 ? { merged_reports: it.merged } : {}),
     ...(it.note ? { note: it.note } : {}),
   };
 }
@@ -188,6 +198,8 @@ export interface ClosureAnswer {
   reports: SourceReport[];
   /** Items with no road name that were not checked against the road asked for (lookup cap). */
   unchecked: number;
+  /** Source reports folded into the items shown (one stretch reported per direction). */
+  merged: number;
   attributions: string[];
 }
 
@@ -258,7 +270,8 @@ export class ClosureService {
         return [];
       }
     });
-    const all = (await Promise.all(runs)).flat();
+    // One item per closed stretch: reports of it per direction are merged first.
+    const all = mergeDirections((await Promise.all(runs)).flat());
     const order = new Map(this.o.sources.map((s, i) => [s.id, i]));
     reports.sort((a, b) => (order.get(a.source) ?? 0) - (order.get(b.source) ?? 0));
 
@@ -313,7 +326,8 @@ export class ClosureService {
         attributions.push(it.roadCredit);
     for (const r of reports)
       if (r.status === 'ok') r.count = out.filter((i) => i.source === r.source).length;
-    return { items: out, reports, unchecked, attributions };
+    const merged = out.reduce((n, it) => n + (it.merged ?? 1) - 1, 0);
+    return { items: out, reports, unchecked, merged, attributions };
   }
 
   private keep(it: RoadItem, q: ClosureQuery): boolean {
