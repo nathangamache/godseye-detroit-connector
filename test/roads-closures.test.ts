@@ -1820,6 +1820,11 @@ describe('source parsers', () => {
   it('cleans third-party text and decodes polylines', () => {
     expect(cleanText('<script>x</script> a&amp;b‮\u0000  c', 50)).toBe('x a&b c');
     expect(cleanText('y'.repeat(400), 10)).toHaveLength(10);
+    // Long text is cut after a whole word, with an ellipsis.
+    expect(cleanText('Lane closed for the following work: Installation of conduit', 50)).toBe(
+      'Lane closed for the following work: Installation…',
+    );
+    expect(cleanText('Closed between Alpha St and Bravo St', 26)).toBe('Closed between Alpha St…');
     expect(cleanText(undefined)).toBeNull();
     const pts: Array<[number, number]> = [
       [-83.0458, 42.3314],

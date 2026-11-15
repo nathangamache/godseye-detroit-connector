@@ -16,11 +16,12 @@ const ENTITIES: Record<string, string> = {
 
 /**
  * Plain, bounded text from an upstream string: tags stripped, a few entities decoded, control
- * characters and runs of whitespace collapsed, cut at max characters. Not a string: null.
+ * characters and runs of whitespace collapsed, at most max characters (cut after a whole word,
+ * with an ellipsis). Not a string: null.
  */
 export function cleanText(v: unknown, max = 300): string | null {
   if (typeof v !== 'string' && typeof v !== 'number') return null;
-  let s = String(v)
+  const s = String(v)
     .slice(0, 20_000)
     .replace(/<[^>]{0,500}>/g, ' ')
     .replace(/&(amp|lt|gt|quot|apos|nbsp|#39);/g, (_m, e: string) => ENTITIES[e] ?? ' ')
@@ -30,8 +31,23 @@ export function cleanText(v: unknown, max = 300): string | null {
     .replace(/ ([.,;:!?])(?=\s|$)/g, '$1')
     .trim();
   if (!s) return null;
-  if (s.length > max) s = s.slice(0, Math.max(1, max - 1)).trimEnd() + '…';
-  return s;
+  return clipWords(s, max);
+}
+
+/**
+ * At most max characters, cut after a whole word with an ellipsis (never mid-word); a text
+ * that fits is returned as is.
+ */
+export function clipWords(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, Math.max(1, max - 1));
+  // Mid-word: back to the last space, unless that would drop most of the text (one very long
+  // word, cut where it must be).
+  if (!/\s/.test(s[cut.length]!)) {
+    const sp = cut.lastIndexOf(' ');
+    if (sp >= max * 0.5) cut = cut.slice(0, sp);
+  }
+  return `${cut.replace(/[\s,;:.\-–—(]+$/, '')}…`;
 }
 
 /**

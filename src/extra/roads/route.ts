@@ -27,7 +27,7 @@ import {
   type Point,
 } from './geo.js';
 import { HttpError, errorText, type Http, type Pacer } from './http.js';
-import { cleanText, roadText } from './text.js';
+import { cleanText, clipWords, roadText } from './text.js';
 
 export const VALHALLA_ATTRIBUTION =
   'Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL); fix the map: https://www.openstreetmap.org/fixthemap';
@@ -245,13 +245,16 @@ export function routingSources(closures: ClosureService): ClosureSource[] {
   return closures.sources.filter((s) => !s.skip?.(probe));
 }
 
+/** Most characters of a closure's description a warning repeats (cut after a whole word). */
+const WARNING_TEXT_MAX = 200;
+
 function describe(it: RoadItem): string {
   const where = it.road
     ? ` on ${it.road}${it.direction ? ` ${it.direction}` : ''}`
     : it.direction
       ? ` (${it.direction})`
       : '';
-  return `${it.type}${where} (${it.source})${it.description ? `: ${it.description.slice(0, 140)}` : ''}`;
+  return `${it.type}${where} (${it.source})${it.description ? `: ${clipWords(it.description, WARNING_TEXT_MAX)}` : ''}`;
 }
 
 /** Street names for the items a route reports (Detroit permits have none), a few at a time. */

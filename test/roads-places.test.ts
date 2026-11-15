@@ -1018,6 +1018,50 @@ describe('route_avoiding_closures', () => {
     expect(r2.rings.reduce((m, r) => m + ringPerimeterM(r), 0)).toBeLessThanOrEqual(9_000);
   });
 
+  it('cuts a long closure description in a warning after a whole word', async () => {
+    const onRoute = line(DETROIT, BELLE_ISLE, 40);
+    const description =
+      'Right lane closed for the following work: Installation of conduit and fiber optic cable, signal upgrades at three intersections, curb ramp reconstruction to current accessibility standards, and pavement marking replacement along the corridor.';
+    const zones = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          id: 'lane',
+          properties: {
+            core_details: { event_type: 'work-zone', road_names: ['Test Blvd'], description },
+            vehicle_impact: 'some-lanes-closed',
+            start_date: '2026-11-01T00:00:00Z',
+          },
+          geometry: { type: 'LineString', coordinates: onRoute.slice(15, 20) },
+        },
+      ],
+    };
+    const x = h(
+      { MDOT_RIDE_API_KEY: 'k', DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          [/work_zone_information/, () => json(zones)],
+          [/traffic_events/, () => json({ data: [] })],
+          [
+            /valhalla/,
+            () =>
+              json({
+                trip: {
+                  summary: { length: 4, time: 600 },
+                  legs: [{ shape: encodePolyline(onRoute, 6), maneuvers: [] }],
+                },
+              }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    expect((out.data as { warnings: string[] }).warnings).toEqual([
+      'On the route (not avoided, the road stays open): work-zone on Test Blvd (mdot_ride): Right lane closed for the following work: Installation of conduit and fiber optic cable, signal upgrades at three intersections, curb ramp reconstruction to current accessibility standards, and…',
+    ]);
+    expect(out.summary).toContain('accessibility standards, and… Closure descriptions');
+  });
+
   it('warns about lane closures on the way and closures it cannot avoid', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const onRoute = line(DETROIT, BELLE_ISLE, 40);
