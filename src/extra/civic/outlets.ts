@@ -2,7 +2,8 @@
  * Local news outlets by metro, so local_headlines can ask GDELT for stories from the metro's
  * own newsrooms (GDELT's domain: filter) before the broad "any outlet that mentions the place"
  * search. A metro is recognised from the Census county of a point, or from a place name (a
- * listed city or county, with no conflicting state or province). Only public outlets of a few
+ * listed city, or a listed county written with "County" or with the metro's state or province,
+ * and no conflicting state or province). Only public outlets of a few
  * large metros near the connector's area are listed; anywhere else the search falls back to the
  * place's country (sourcecountry:) or the broad search.
  */
@@ -199,8 +200,6 @@ const CA_PROVINCES = [
 ];
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\.$/, '').replace(/\s+/g, ' ');
-const countyWords = (m: Metro) =>
-  m.counties.flatMap((c) => [c.toLowerCase(), c.toLowerCase().replace(/ county$/, '')]);
 
 /** The metro of a point's Census county and state, if it is one listed here. */
 export function metroForCounty(county?: string, state?: string): Metro | undefined {
@@ -215,20 +214,30 @@ export function metroForCounty(county?: string, state?: string): Metro | undefin
 }
 
 /**
- * The metro a place name is in: a listed city or county, and every other comma part either the
- * metro's state/province, one of its counties or its country (so "Lansing, Illinois" is not the
- * Lansing area).
+ * The metro a place name is in: a listed city, or a listed county written with "County"
+ * ("Ottawa County") or with the metro's state or province ("Ottawa, MI"), and every other comma
+ * part either the metro's state/province, one of its counties or its country (so "Lansing,
+ * Illinois" is not the Lansing area). A bare county name alone names no metro: many places share
+ * one ("Ottawa" is also Ottawa, Ontario; "Oakland" is also Oakland, California).
  */
 export function metroForPlace(place: string): Metro | undefined {
   const parts = place.split(',').map(norm).filter(Boolean);
   if (!parts.length) return undefined;
   return METROS.find((m) => {
-    const counties = countyWords(m);
+    const counties = m.counties.map((c) => c.toLowerCase());
+    const bare = counties.map((c) => c.replace(/ county$/, ''));
     const country = m.country === 'US' ? US_WORDS : ['canada'];
-    const named = parts.some((p) => m.cities.includes(p) || counties.includes(p));
+    const withRegion = parts.some((p) => m.region.includes(p));
+    const named = parts.some(
+      (p) => m.cities.includes(p) || counties.includes(p) || (withRegion && bare.includes(p)),
+    );
     const consistent = parts.every(
       (p) =>
-        m.cities.includes(p) || counties.includes(p) || m.region.includes(p) || country.includes(p),
+        m.cities.includes(p) ||
+        counties.includes(p) ||
+        bare.includes(p) ||
+        m.region.includes(p) ||
+        country.includes(p),
     );
     return named && consistent;
   });

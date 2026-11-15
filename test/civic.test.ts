@@ -27,6 +27,7 @@ import {
   type Clock,
 } from '../src/extra/civic/headlines.js';
 import { civicTools } from '../src/extra/civic/index.js';
+import { metroForPlace } from '../src/extra/civic/outlets.js';
 import { SWIFTLY_BASE } from '../src/extra/civic/transit.js';
 import { LocationStore } from '../src/location/store.js';
 import { nullLogger } from '../src/log.js';
@@ -986,6 +987,49 @@ describe('local_headlines', () => {
     await run('local_headlines', { place: 'Lansing, Illinois' });
     expect(queries[0]).toMatch(/sourcecountry:US$/);
     expect(queries[0]).not.toMatch(/domain:/);
+  });
+
+  it('a bare county name is a metro only with "County" or the metro\'s state or province', async () => {
+    // Many places share a county's name (Ottawa, Ontario; Oakland, California).
+    for (const p of ['Ottawa', 'Oakland', 'Kent', 'Essex', 'Clinton', 'Livingston', 'Ottawa, USA'])
+      expect(metroForPlace(p), p).toBeUndefined();
+    expect(metroForPlace('Ottawa, Ontario')).toBeUndefined();
+    expect(metroForPlace('Oakland, California')).toBeUndefined();
+    expect(metroForPlace('MI')).toBeUndefined();
+    const id = (p: string) => metroForPlace(p)?.id;
+    expect(id('Ottawa County')).toBe('grand_rapids');
+    expect(id('Ottawa, Michigan')).toBe('grand_rapids');
+    expect(id('Ottawa, MI')).toBe('grand_rapids');
+    expect(id('Ottawa County, Michigan')).toBe('grand_rapids');
+    expect(id('Oakland County')).toBe('detroit');
+    expect(id('Oakland, Mich.')).toBe('detroit');
+    expect(id('Essex, Ontario')).toBe('windsor');
+    expect(id('Essex County, ON')).toBe('windsor');
+    // A city still names its metro alone, and a bare county may still go with it.
+    expect(id('Dearborn')).toBe('detroit');
+    expect(id('Grand Rapids, Kent')).toBe('grand_rapids');
+    expect(id('Ottawa County, Ontario')).toBeUndefined();
+
+    const queries: string[] = [];
+    const { run } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          (u) => {
+            queries.push(u.searchParams.get('query')!);
+            return json(gdeltBody(1));
+          },
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Ottawa' });
+    expect(queries).toEqual(['"Ottawa"']);
+    expect(data(r)).toMatchObject({ mode: 'broad' });
+    expect(r.summary).not.toMatch(/Grand Rapids/);
+    queries.length = 0;
+    const county = await run('local_headlines', { place: 'Ottawa County' });
+    expect(queries[0]).toMatch(/^"Ottawa County" \(domain:woodtv\.com OR /);
+    expect(data(county)).toMatchObject({ mode: 'local_outlets', metro: 'the Grand Rapids area' });
   });
 
   it('a narrow query GDELT refuses falls back to the broad one', async () => {
