@@ -81,6 +81,9 @@ export interface FetchResult {
 /** Thrown by a source whose own budget (daily cap, throttle) is spent. */
 export class QuotaError extends Error {}
 
+/** Thrown by a source still loading its data when the call's time is up (its message says so). */
+export class NotReadyError extends Error {}
+
 export interface ClosureSource {
   id: SourceId;
   label: string;
@@ -228,7 +231,7 @@ export class ClosureService {
           status: 'ok',
           count: kept.length,
           retrieved_at: new Date(q.now - (r.cacheAgeMs ?? 0)).toISOString(),
-          ...(r.cacheAgeMs ? { cache_age_s: Math.round(r.cacheAgeMs / 1000) } : {}),
+          ...(r.cacheAgeMs !== undefined ? { cache_age_s: Math.round(r.cacheAgeMs / 1000) } : {}),
           ...(r.note ? { note: r.note } : {}),
         });
         return kept;
@@ -240,7 +243,12 @@ export class ClosureService {
           reports.push({
             ...base,
             status: 'error',
-            note: timeout.aborted ? `${src.label} timed out` : errorText(err),
+            note:
+              err instanceof NotReadyError
+                ? err.message
+                : timeout.aborted
+                  ? `${src.label} timed out`
+                  : errorText(err),
           });
         }
         return [];

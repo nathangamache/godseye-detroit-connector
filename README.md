@@ -142,8 +142,9 @@ latest fix and is audited as a location read.
   its own: one down never sinks the others, and "none found" is reported as "not proof the road
   is open", with the list of sources checked.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
-  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; MDOT RIDE is polled at most every
-  5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
+  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; the City of Detroit permits are
+  one in-memory snapshot refreshed every 15 minutes (the last good copy is kept when a refresh
+  fails, and results say how old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
   minute; Valhalla and Nominatim get at most one request a second; Nominatim at most
   `GEOCODER_NOMINATIM_DAILY_MAX` (50) a day and the shared `nominatim` bucket; border feeds are
   cached 5 minutes.

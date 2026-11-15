@@ -459,29 +459,31 @@ export const CBSA_CSV =
   'Ambassador Bridge;; Windsor, ON/Detroit, MI;; 2026-11-14 14:12 EST;; 45 minutes;; --;; No Delay;; --;; \n' +
   'Gordie Howe International Bridge;; Windsor, ON/Detroit, MI;; 2026-11-14 14:52 EST;; 5 minutes;; --;; 10 minutes;; --;; \n';
 
-/** The permit layer as ArcGIS answers: planned vs current, and the LIKE text filter applied. */
-function arcgis(u: URL, current: { features: unknown[] }, planned: { features: unknown[] }) {
-  const where = u.searchParams.get('where') ?? '';
-  const like = /LIKE '%([A-Z0-9 ]+)%'/.exec(where)?.[1];
-  const base = /start_date > DATE/.test(where) ? planned : current;
-  const features = base.features.filter(
-    (f) =>
-      !like ||
-      String((f as { attributes: { work_description: string } }).attributes.work_description)
-        .toUpperCase()
-        .includes(like),
-  );
-  return json({ ...base, features });
+/**
+ * A permit layer as ArcGIS answers the gateway's snapshot query (every roadway permit not yet
+ * ended, current and planned alike): one page per resultOffset, at most maxRecordCount (1000)
+ * records, with exceededTransferLimit while more remain.
+ */
+export function arcgisLayer(features: unknown[], maxRecordCount = 1000) {
+  return (u: URL) => {
+    const off = Number(u.searchParams.get('resultOffset') ?? 0);
+    const n = Math.min(maxRecordCount, Number(u.searchParams.get('resultRecordCount') ?? 1000));
+    return json({
+      objectIdFieldName: 'ObjectId',
+      features: features.slice(off, off + n),
+      ...(off + n < features.length ? { exceededTransferLimit: true } : {}),
+    });
+  };
 }
 
 /** Default routes: every upstream answers with the fixtures above. */
 export function defaultRoutes(): Array<[RegExp, Handler]> {
   return [
-    [/arcgis\.com\/.*\/FeatureServer\/4\/query/, (u) => arcgis(u, DETROIT_LINES, DETROIT_PLANNED)],
     [
-      /arcgis\.com\/.*\/FeatureServer\/5\/query/,
-      (u) => arcgis(u, DETROIT_POINTS, { features: [] }),
+      /arcgis\.com\/.*\/FeatureServer\/4\/query/,
+      arcgisLayer([...DETROIT_LINES.features, ...DETROIT_PLANNED.features]),
     ],
+    [/arcgis\.com\/.*\/FeatureServer\/5\/query/, arcgisLayer(DETROIT_POINTS.features)],
     [
       /photon\.komoot\.io\/reverse/,
       (u) =>

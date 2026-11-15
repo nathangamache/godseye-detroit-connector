@@ -10,7 +10,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Audit } from '../src/audit.js';
 import type { LocationStore } from '../src/location/store.js';
 import { bboxAreaKm2, decodePolyline } from '../src/extra/roads/geo.js';
-import { permitClosesRoad } from '../src/extra/roads/sources/detroitRow.js';
+import { loadConfig } from '../src/config.js';
+import { ClosureService } from '../src/extra/roads/closures.js';
+import type { Geocoder } from '../src/extra/roads/geocode.js';
+import { registerRoads } from '../src/extra/roads/index.js';
+import {
+  PermitSnapshot,
+  detroitRowSource,
+  permitClosesRoad,
+} from '../src/extra/roads/sources/detroitRow.js';
+import { ToolPolicy } from '../src/tools/policy.js';
+import { ToolRegistry } from '../src/tools/registry.js';
 import { ontario511Source, parseOntario } from '../src/extra/roads/sources/ontario511.js';
 import { parseRideRecord, recordsOf } from '../src/extra/roads/sources/mdotRide.js';
 import { Http } from '../src/extra/roads/http.js';
@@ -18,10 +28,12 @@ import { mentionsRoad, normRoad, roadQuery, cleanText } from '../src/extra/roads
 import {
   ALL_KEYS,
   COMERICA_PARK,
+  DETROIT_LINES,
   MDOT_EVENTS,
   NOW,
   ONTARIO_EVENTS,
   WINDSOR_CITY_HALL,
+  arcgisLayer,
   encodePolyline,
   harness,
   header,
@@ -108,22 +120,23 @@ describe('road_closures with no keys', () => {
     ]);
   });
 
-  it('asks the permit layers for roadway work in effect today, in the box asked', async () => {
+  it('loads one snapshot of the roadway permits not yet ended and answers from memory', async () => {
     const x = h();
     await x.run('road_closures', { ...DETROIT, radius_km: 2 });
     const q4 = x.mock.last(/FeatureServer\/4\/query/)!.url.searchParams;
     expect(x.mock.count(/FeatureServer\/5\/query/)).toBe(1);
-    expect(q4.get('where')).toBe(
-      "is_roadway = 1 AND start_date <= DATE '2026-11-14' AND end_date >= DATE '2026-11-14'",
-    );
-    expect(q4.get('inSR')).toBe('4326');
+    // The whole city, current and planned work alike: no box, no per-call dates.
+    expect(q4.get('where')).toBe("is_roadway = 1 AND end_date >= DATE '2026-11-14'");
+    expect(q4.has('geometry')).toBe(false);
     expect(q4.get('outSR')).toBe('4326');
-    expect(q4.get('geometryType')).toBe('esriGeometryEnvelope');
-    const [w, s, e, n] = q4.get('geometry')!.split(',').map(Number);
-    expect(w).toBeLessThan(DETROIT.lon);
-    expect(e).toBeGreaterThan(DETROIT.lon);
-    expect(s).toBeLessThan(DETROIT.lat);
-    expect(n).toBeGreaterThan(DETROIT.lat);
+    expect(q4.get('orderByFields')).toBe('ObjectId');
+    expect(q4.get('resultOffset')).toBe('0');
+    expect(q4.get('resultRecordCount')).toBe('1000');
+    // Another point, a road search and planned work: all from memory, no new request.
+    await x.run('road_closures', { ...COMERICA_PARK, radius_km: 1 });
+    await x.run('road_closures', { road: 'Woodward' });
+    await x.run('road_closures', { ...DETROIT, when: 'planned' });
+    expect(x.mock.count(/arcgis/)).toBe(2);
     // Generic, self-describing User-Agent on every request; nothing personal.
     for (const c of x.mock.calls) {
       const ua = header(c.init, 'user-agent')!;
@@ -132,12 +145,19 @@ describe('road_closures with no keys', () => {
     }
   });
 
+  it('keeps only the permits in the box asked, for the dates asked', async () => {
+    const x = h();
+    // 1 km around one permit: the dumpster 1.2 km away is left out.
+    const near = await x.run('road_closures', { lat: 42.328, lon: -83.0515, radius_km: 1 });
+    expect(itemsOf(near).map((i) => i.type)).toEqual(['permit: Barricade', 'permit: Water Tap']);
+    const far = await x.run('road_closures', { lat: 42.42, lon: -83.2, radius_km: 1 });
+    expect(itemsOf(far)).toEqual([]);
+    expect(sourcesOf(far).find((s) => s.source === 'detroit_row')!.status).toBe('ok');
+  });
+
   it('lists planned work with when=planned', async () => {
     const x = h();
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 2, when: 'planned' });
-    expect(x.mock.last(/FeatureServer\/4\/query/)!.url.searchParams.get('where')).toBe(
-      "is_roadway = 1 AND start_date > DATE '2026-11-14'",
-    );
     expect(itemsOf(out).map((i) => i.start)).toEqual(['2026-11-20']);
     expect(out.summary).toContain('planned');
   });
@@ -145,12 +165,13 @@ describe('road_closures with no keys', () => {
   it('narrows a city-wide road search with the permit text', async () => {
     const x = h();
     const out = await x.run('road_closures', { road: 'Woodward Ave' });
-    const where = x.mock.last(/FeatureServer\/4\/query/)!.url.searchParams.get('where')!;
-    expect(where).toContain("UPPER(work_description) LIKE '%WOODWARD%'");
     expect(itemsOf(out).map((i) => i.description)).toEqual([
       'Dumpster in the curb lane on Woodward',
     ]);
     expect(itemsOf(out)[0]!.distance_km).toBeNull();
+    expect(sourcesOf(out).find((s) => s.source === 'detroit_row')!.note).toContain(
+      'matched on the permit text',
+    );
   });
 
   it('skips the permits when only incidents are asked for', async () => {
@@ -560,6 +581,238 @@ describe('road_closures failure isolation and limits', () => {
     const r = await none.run('road_closures', { here: true });
     expect(r.isError).toBe(true);
     expect(r.summary).toContain('No phone location fix');
+  });
+});
+
+describe('City of Detroit permit snapshot', () => {
+  const tap = (i: number, lon: number, lat: number) => ({
+    attributes: {
+      ObjectId: i + 1,
+      permit_id: 90_000 + i,
+      permit_type: 'Water Tap',
+      work_description: `Tap ${i}`,
+      start_date: '2026-11-01',
+      end_date: '2026-12-01',
+      roadway_direction_impact: 'Eastbound',
+      is_sidewalk: 0,
+    },
+    geometry: {
+      paths: [
+        [
+          [lon, lat],
+          [lon + 0.0005, lat],
+        ],
+      ],
+    },
+  });
+  const permitReport = (out: { data?: unknown }) =>
+    sourcesOf(out).find((s) => s.source === 'detroit_row')! as ReturnType<
+      typeof sourcesOf
+    >[number] & { cache_age_s?: number };
+  const layer4 = (x: Harness) => x.mock.count(/FeatureServer\/4\/query/);
+
+  it('pages past the layer limit of 1,000 records', async () => {
+    const many = Array.from({ length: 2500 }, (_, i) => tap(i, -83.2 + i * 0.0001, 42.35));
+    const x = h(
+      {},
+      {
+        routes: [
+          [/FeatureServer\/4\/query/, arcgisLayer(many)],
+          [/FeatureServer\/5\/query/, arcgisLayer([])],
+        ],
+      },
+    );
+    // Next to permit 2450, which only the third page holds.
+    const out = await x.run('road_closures', {
+      lat: 42.35,
+      lon: -83.2 + 2450 * 0.0001,
+      radius_km: 1,
+      limit: 10,
+    });
+    expect(
+      x.mock.calls
+        .filter((c) => /FeatureServer\/4\/query/.test(c.url.href))
+        .map((c) => c.url.searchParams.get('resultOffset')),
+    ).toEqual(['0', '1000', '2000']);
+    expect(itemsOf(out).map((i) => i.description)).toContain('Tap 2450');
+    expect(permitReport(out).note).not.toMatch(/more (active )?permits/);
+  });
+
+  it('refreshes every 15 minutes and answers from the snapshot in between, saying how old', async () => {
+    const x = h();
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    x.clock.now += 14 * 60_000;
+    const mid = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(layer4(x)).toBe(1);
+    expect(itemsOf(mid).filter((i) => i.source === 'detroit_row')).toHaveLength(3);
+    expect(permitReport(mid)).toMatchObject({ status: 'ok', cache_age_s: 840 });
+    expect(permitReport(mid).note).toBe('permit snapshot 14 min old (refreshed every 15 min)');
+    expect(mid.summary).toContain(
+      'City of Detroit permits: 3 (permit snapshot 14 min old (refreshed every 15 min))',
+    );
+    // Past 15 minutes: this call is answered from the old copy and starts a refresh.
+    x.clock.now += 61_000;
+    const stale = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permitReport(stale).cache_age_s).toBe(901);
+    await vi.waitFor(async () => {
+      const fresh = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+      expect(permitReport(fresh).cache_age_s).toBe(0);
+    });
+    expect(layer4(x)).toBe(2);
+  });
+
+  it('keeps the last good snapshot when a refresh fails, and says so', async () => {
+    let down = false;
+    const lines = arcgisLayer([...DETROIT_LINES.features]);
+    const x = h(
+      {},
+      {
+        routes: [
+          [/FeatureServer\/4\/query/, (u) => (down ? json({ error: 'busy' }, 500) : lines(u))],
+        ],
+      },
+    );
+    const first = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(itemsOf(first)).toHaveLength(3);
+    down = true;
+    x.clock.now += 16 * 60_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    const out = await vi.waitFor(async () => {
+      const o = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+      expect(permitReport(o).note).toContain('the last refresh failed');
+      return o;
+    });
+    expect(permitReport(out)).toMatchObject({ status: 'ok', cache_age_s: 960 });
+    expect(permitReport(out).note).toBe(
+      'permit snapshot 16 min old (refreshed every 15 min); the last refresh failed (City of Detroit permits returned HTTP 500), so this is the last good copy',
+    );
+    expect(itemsOf(out)).toHaveLength(3);
+    // Tried again a minute later, not on every call.
+    expect(layer4(x)).toBe(2);
+    x.clock.now += 61_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(layer4(x)).toBe(3);
+  });
+
+  it('gives the snapshot its own generous timeout, not the per-request one', async () => {
+    const lines = arcgisLayer([...DETROIT_LINES.features]);
+    const x = h(
+      { ROADS_FETCH_TIMEOUT_MS: '1000' },
+      {
+        routes: [
+          [
+            /FeatureServer\/4\/query/,
+            async (u, init) => {
+              // Like a real fetch, an aborted request fails.
+              await new Promise((resolve, reject) => {
+                const t = setTimeout(resolve, 1500);
+                init.signal?.addEventListener('abort', () => {
+                  clearTimeout(t);
+                  reject(new Error('aborted'));
+                });
+              });
+              return lines(u);
+            },
+          ],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permitReport(out).status).toBe('ok');
+    expect(itemsOf(out)).toHaveLength(3);
+  });
+
+  it('says the list is still loading when the first load outlasts the call', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const m = mockFetch([
+      [
+        /FeatureServer\/4\/query/,
+        async (u) => {
+          await gate;
+          return arcgisLayer([...DETROIT_LINES.features])(u);
+        },
+      ],
+      [/FeatureServer\/5\/query/, arcgisLayer([])],
+    ]);
+    const http = new Http({ userAgent: 'ua', timeoutMs: 50, fetch: m.fetch });
+    const snapshot = new PermitSnapshot({
+      http,
+      baseUrl: 'https://services2.arcgis.com/x/arcgis/rest/services/p/FeatureServer',
+      now: () => NOW,
+    });
+    const geocoder = { reverseStreet: async () => 'First Street' } as unknown as Geocoder;
+    const svc = new ClosureService({
+      sources: [detroitRowSource({ enabled: true, geocoder, snapshot })],
+      sourceTimeoutMs: 100,
+    });
+    const q = {
+      bbox: [-83.06, 42.32, -83.04, 42.34] as [number, number, number, number],
+      center: DETROIT,
+      radiusKm: 3,
+      when: 'now' as const,
+      include: new Set(['work_zone' as const]),
+      now: NOW,
+      purpose: 'list' as const,
+    };
+    const signal = new AbortController().signal;
+    const early = await svc.query(q, 20, signal);
+    expect(early.reports[0]).toMatchObject({
+      status: 'error',
+      note: 'still loading the city permit list (first load since the gateway started); try again in a minute',
+    });
+    // A second call joins the same load.
+    await svc.query(q, 20, signal);
+    expect(m.count(/FeatureServer\/4\/query/)).toBe(1);
+    release();
+    await vi.waitFor(async () => {
+      const later = await svc.query(q, 20, signal);
+      expect(later.reports[0]!.status).toBe('ok');
+      expect(later.items.map((i) => i.type)).toEqual(['permit: Water Tap', 'permit: Barricade']);
+    });
+    expect(m.count(/FeatureServer\/4\/query/)).toBe(1);
+  });
+
+  it('refreshes in the background once started, until stopped', async () => {
+    const m = mockFetch([[/FeatureServer\/\d\/query/, arcgisLayer([])]]);
+    const snapshot = new PermitSnapshot({
+      http: new Http({ userAgent: 'ua', timeoutMs: 1000, fetch: m.fetch }),
+      baseUrl: 'https://services2.arcgis.com/x/arcgis/rest/services/p/FeatureServer',
+      now: Date.now,
+      startupDelayMs: 0,
+      refreshMs: 40,
+    });
+    snapshot.start();
+    await vi.waitFor(() => expect(m.count(/\/4\/query/)).toBe(2));
+    snapshot.stop();
+    const n = m.calls.length;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(m.calls.length).toBe(n);
+  });
+
+  it('starts the background refresh with the gateway, never in test mode', () => {
+    const start = vi.spyOn(PermitSnapshot.prototype, 'start').mockImplementation(() => undefined);
+    try {
+      const reg = (env: Record<string, string>) => {
+        const x = h();
+        const config = loadConfig({ DATA_DIR: x.dir, ...env });
+        return registerRoads(new ToolRegistry(new ToolPolicy(config)), {
+          config,
+          fetch: x.mock.fetch,
+        });
+      };
+      reg({ GATEWAY_MODE: 'test' }).start();
+      expect(start).not.toHaveBeenCalled();
+      reg({ GATEWAY_MODE: 'test', DETROIT_ROW_ENABLED: 'false' }).start();
+      reg({ DETROIT_ROW_ENABLED: 'false' }).start();
+      expect(start).not.toHaveBeenCalled();
+      const roads = reg({});
+      roads.start();
+      expect(start).toHaveBeenCalledTimes(1);
+      roads.stop();
+    } finally {
+      start.mockRestore();
+    }
   });
 });
 
