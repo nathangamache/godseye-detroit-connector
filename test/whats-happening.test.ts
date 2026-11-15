@@ -9,7 +9,15 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { ONTARIO_ATTRIBUTION, ONTARIO_DISCLAIMER } from '../src/extra/roads/sources/ontario511.js';
 import { nullLogger } from '../src/log.js';
-import { harness as roadsHarness, ALL_KEYS } from './fixtures/roads.js';
+import {
+  harness as roadsHarness,
+  ALL_KEYS,
+  CLOSED_NB,
+  CLOSED_SB,
+  TOMTOM,
+  json,
+  unnamedClosure,
+} from './fixtures/roads.js';
 import {
   IntervalGate,
   TOMTOM_SUMMARY_INTERVAL_MS,
@@ -645,6 +653,48 @@ describe('whats_happening_here sections', () => {
       h.clock.now += 15 * 60_000;
       await h.run(DETROIT);
       expect(roads.mock.count(/tomtom/)).toBe(3);
+    } finally {
+      rmSync(roads.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('with the real road_closures: a stretch reported per direction is one closure, counted once', async () => {
+    const env = {
+      ...ALL_KEYS,
+      MDOT_RIDE_API_KEY: '',
+      ONTARIO_511_API_KEY: '',
+      DETROIT_ROW_ENABLED: 'false',
+    };
+    // TomTom's two items plus one stretch reported once per direction: four reports, three closures.
+    const roads = roadsHarness(env, {
+      routes: [
+        [
+          /api\.tomtom\.com/,
+          () =>
+            json({
+              incidents: [
+                ...TOMTOM.incidents,
+                unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St'),
+                unnamedClosure('tt-sb', CLOSED_SB, 'Bravo St', 'Alpha St'),
+              ],
+            }),
+        ],
+      ],
+    });
+    try {
+      const h = harness({}, { env, roadClosures: roads.tools.road_closures });
+      const roadsLine = line((await h.run(DETROIT)).text, 'Road closures')!;
+      expect(roadsLine).toMatch(
+        /^- Road closures: 3 closures within 5 km; all 3 shown \(2 full closures\): /,
+      );
+      // road_closures' own line for the item, its source named last.
+      expect(roadsLine).toContain(
+        'Unknown road: road closed between Alpha St and Bravo St (both directions, 0.5 km away, TomTom incidents)',
+      );
+      // The source's count agrees with the total: stretches, not reports.
+      expect(roadsLine).toContain(
+        'Sources checked: TomTom incidents: 3 (59 of 60 requests left today).',
+      );
     } finally {
       rmSync(roads.dir, { recursive: true, force: true });
     }

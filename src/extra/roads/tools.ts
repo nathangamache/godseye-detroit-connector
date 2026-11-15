@@ -257,7 +257,7 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
       const listed = total > items.length ? ` (the nearest ${items.length} listed)` : '';
       // The count is of stretches: reports of one stretch per direction are one item.
       const merged = ans.merged
-        ? `; from ${items.length + ans.merged} source reports, each stretch counted once`
+        ? `; from ${total + ans.merged} source reports, each stretch counted once`
         : '';
       const more =
         items.length > SUMMARY_ITEMS ? `; ${items.length - SUMMARY_ITEMS} more in items` : '';

@@ -222,6 +222,45 @@ export const TOMTOM = {
   ],
 };
 
+/** A TomTom road closure on a street with no route number: only the cross streets are named. */
+export function unnamedClosure(
+  id: string,
+  coordinates: Array<[number, number]>,
+  from: string,
+  to: string,
+): Record<string, unknown> {
+  return {
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates },
+    properties: {
+      id,
+      iconCategory: 8,
+      magnitudeOfDelay: 4,
+      events: [{ description: 'Closed', code: 401, iconCategory: 8 }],
+      startTime: '2026-11-14T10:00:00Z',
+      endTime: '2026-11-14T22:00:00Z',
+      from,
+      to,
+      length: 330,
+      delay: 0,
+      roadNumbers: [],
+      lastReportTime: '2026-11-14T16:50:00Z',
+    },
+  };
+}
+
+/** Northbound along a test street; its midpoint is 42.3365, -83.05. */
+export const CLOSED_NB: Array<[number, number]> = [
+  [-83.05, 42.335],
+  [-83.05, 42.338],
+];
+
+/** The same stretch southbound: reversed, 5 m west, cross streets swapped. */
+export const CLOSED_SB: Array<[number, number]> = [
+  [-83.05006, 42.338],
+  [-83.05006, 42.335],
+];
+
 // --- MDOT RIDE: WZDx v4 work zones, and traffic events (shape unverified: a flat record) -----
 export const MDOT_WORK_ZONES = {
   type: 'FeatureCollection',

@@ -34,6 +34,8 @@ import { Http } from '../src/extra/roads/http.js';
 import { mentionsRoad, normRoad, roadQuery, cleanText } from '../src/extra/roads/text.js';
 import {
   ALL_KEYS,
+  CLOSED_NB,
+  CLOSED_SB,
   COMERICA_PARK,
   DETROIT_LINES,
   MDOT_EVENTS,
@@ -48,6 +50,7 @@ import {
   json,
   line,
   mockFetch,
+  unnamedClosure,
   type Handler,
   type Harness,
 } from './fixtures/roads.js';
@@ -644,39 +647,6 @@ describe('road_closures failure isolation and limits', () => {
   });
 });
 
-/** A TomTom road closure on a street with no route number: only the cross streets are named. */
-function unnamedClosure(
-  id: string,
-  coordinates: Array<[number, number]>,
-  from: string,
-  to: string,
-): Record<string, unknown> {
-  return {
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates },
-    properties: {
-      id,
-      iconCategory: 8,
-      magnitudeOfDelay: 4,
-      events: [{ description: 'Closed', code: 401, iconCategory: 8 }],
-      startTime: '2026-11-14T10:00:00Z',
-      endTime: '2026-11-14T22:00:00Z',
-      from,
-      to,
-      length: 330,
-      delay: 0,
-      roadNumbers: [],
-      lastReportTime: '2026-11-14T16:50:00Z',
-    },
-  };
-}
-
-/** Northbound along a test street; its midpoint is 42.3365, -83.05. */
-const CLOSED_NB: Array<[number, number]> = [
-  [-83.05, 42.335],
-  [-83.05, 42.338],
-];
-
 /** Overpass ways near the midpoint: the closed street 2.5 m off, a cross street 11 m off. */
 const NEAR_WAYS = {
   elements: [
@@ -808,12 +778,6 @@ describe('TomTom road names', () => {
   });
 });
 
-/** The same stretch southbound: reversed, 5 m west, cross streets swapped. */
-const CLOSED_SB: Array<[number, number]> = [
-  [-83.05006, 42.338],
-  [-83.05006, 42.335],
-];
-
 describe('one item per closed stretch', () => {
   const TT_ONLY = { ...ALL_KEYS, MDOT_RIDE_API_KEY: '', ONTARIO_511_API_KEY: '' };
   const tomtomWith = (...extra: Array<Record<string, unknown>>): [RegExp, Handler] => [
@@ -899,6 +863,38 @@ describe('one item per closed stretch', () => {
     expect(byRoad.summary).toContain(
       '1 closure, incident and work-zone item(s) on Charlie Avenue in SE Michigan and Windsor/Essex (in effect now; from 2 source reports, each stretch counted once), 1 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 334 m long).',
     );
+  });
+
+  it('counts a point search after merging, per source and in the summary, also past the limit', async () => {
+    // Four TomTom reports in range: the default two and one stretch reported per direction.
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          tomtomWith(
+            unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St'),
+            unnamedClosure('tt-sb', CLOSED_SB, 'Bravo St', 'Alpha St'),
+          ),
+        ],
+      },
+    );
+    const tomtom = (out: { data?: unknown }) => sourcesOf(out).find((s) => s.source === 'tomtom');
+    const all = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    expect(all.data).toMatchObject({ count: 3, total: 3 });
+    // What the source found is the stretches in range, as the total counts them.
+    expect(tomtom(all)).toMatchObject({ count: 3, found: 3 });
+    // Listing one: the total and the reports behind it are still of every stretch in range.
+    const one = await x.run('road_closures', { ...DETROIT, radius_km: 5, limit: 1 });
+    expect(one.data).toMatchObject({ count: 1, total: 3 });
+    expect(tomtom(one)).toMatchObject({ count: 1, found: 3 });
+    expect(one.summary).toContain(
+      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (the nearest 1 listed) (in effect now; from 4 source reports, each stretch counted once), 1 full closure(s): Unknown road: road closed between Alpha St and Bravo St (both directions, 0.5 km away).',
+    );
+    // The merged stretch beyond the limit still counts: the nearest item alone is one report.
+    const far = await x.run('road_closures', { lat: 42.347, lon: -83.061, radius_km: 5, limit: 1 });
+    expect(far.data).toMatchObject({ count: 1, total: 3 });
+    expect(tomtom(far)).toMatchObject({ count: 1, found: 3 });
+    expect(far.summary).toContain('(the nearest 1 listed) (in effect now; from 4 source reports,');
   });
 
   it('keeps two parallel streets closed between the same cross streets as two items', async () => {

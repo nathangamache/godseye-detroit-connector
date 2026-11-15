@@ -79,7 +79,10 @@ export interface SourceReport {
   status: SourceStatus;
   /** Items of this source in the answer (after the limit). */
   count: number;
-  /** Items of this source in range before the limit (point searches without a road only). */
+  /**
+   * Items of this source in range before the limit, after merging (point searches without a
+   * road only).
+   */
   found?: number;
   note?: string;
   retrieved_at?: string;
@@ -209,7 +212,10 @@ export interface ClosureAnswer {
   reports: SourceReport[];
   /** Items with no road name that were not checked against the road asked for (lookup cap). */
   unchecked: number;
-  /** Source reports folded into the items shown (one stretch reported per direction). */
+  /**
+   * Source reports folded into the items counted (one stretch reported per direction): every
+   * item in range for a point search (its total), the items listed for a road search.
+   */
   merged: number;
   attributions: string[];
 }
@@ -257,7 +263,6 @@ export class ClosureService {
           ...base,
           status: 'ok',
           count: kept.length,
-          ...(q.road ? {} : { found: kept.length }),
           retrieved_at: new Date(q.now - (r.cacheAgeMs ?? 0)).toISOString(),
           ...(r.cacheAgeMs !== undefined ? { cache_age_s: Math.round(r.cacheAgeMs / 1000) } : {}),
           ...(r.note ? { note: r.note } : {}),
@@ -287,6 +292,10 @@ export class ClosureService {
     });
     // One item per closed stretch: reports of it per direction are merged first.
     const all = mergeDirections((await Promise.all(runs)).flat());
+    // What each source found in range, counted as the total is: after merging.
+    if (!q.road)
+      for (const r of reports)
+        if (r.status === 'ok') r.found = all.filter((i) => i.source === r.source).length;
     const order = new Map(this.o.sources.map((s, i) => [s.id, i]));
     reports.sort((a, b) => (order.get(a.source) ?? 0) - (order.get(b.source) ?? 0));
 
@@ -341,7 +350,9 @@ export class ClosureService {
         attributions.push(it.roadCredit);
     for (const r of reports)
       if (r.status === 'ok') r.count = out.filter((i) => i.source === r.source).length;
-    const merged = out.reduce((n, it) => n + (it.merged ?? 1) - 1, 0);
+    // Reports behind the items counted: all in range for a point search (its total), else those
+    // listed.
+    const merged = (q.road ? out : all).reduce((n, it) => n + (it.merged ?? 1) - 1, 0);
     return {
       items: out,
       ...(q.road ? {} : { total: all.length }),
