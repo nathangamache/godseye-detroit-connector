@@ -52,7 +52,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `border_wait_times` | gateway (roads) | waits at the Ambassador Bridge, tunnel, Gordie Howe and Blue Water bridges | none |
 | `flights_near` | gateway (aviation) | aircraft near a point or the phone, with registry and LADD/PIA flags | none (adsb.fi, personal non-commercial use; adsb.lol fallback, `ADSBLOL_DAILY_MAX`) |
 | `aircraft_lookup` | gateway (aviation) | one aircraft by hex or N-number from the FAA registry | the daily FAA registry copy (`AIRCRAFT_REGISTRY_SYNC`, or `scripts/aircraft-registry-sync.ts`) |
-| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind | GEV running (`GEV_URL`); none |
+| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind (in F and mph: the gateway converts GEV's C and km/h, keeping both in data) | GEV running (`GEV_URL`); none |
 | `get_earthquakes`, `get_cyclones`, `get_fire_perimeters` | GEV | earthquakes, tropical cyclones, wildfire perimeters | GEV; none |
 | `get_active_fires` | GEV | satellite fire detections (NASA FIRMS) | `FIRMS_MAP_KEY` in GEV |
 | `get_traffic_flow` | GEV | TomTom speed vs free flow in an area | `TOMTOM_API_KEY` in GEV (quota 20/h, 150/d) |

@@ -191,6 +191,10 @@ describe('/mcp tools', () => {
     expect(text).toMatch(/Clear/);
     expect(text).toContain('https://godseye.example-tailnet.ts.net:8443/#v=2');
     expect(text).not.toContain('127.0.0.1:7701');
+    // US units: GEV's "3 °C" reaches the user in F (with C), and data gains temperature_f.
+    expect(text).toMatch(/Clear, 37 F \(3 C\) at 42\.33, -83\.05\./);
+    expect(text).not.toMatch(/°C/);
+    expect(text).toContain('"temperature_f":37.4');
   });
 
   it('run_tool rejects panel_request and Google tools', async () => {

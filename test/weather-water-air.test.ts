@@ -538,6 +538,17 @@ describe('weather_forecast', () => {
     expect(text).toMatch(/This Afternoon: Partly Sunny, 46°F, wind NW 12 mph, precip 14%/);
   });
 
+  it('shows a period the NWS gives in C in F as well, like every temperature here', async () => {
+    const h = harness();
+    nwsBasics(h);
+    const celsius = structuredClone(FORECAST);
+    Object.assign(celsius.properties.periods[0]!, { temperature: 4, temperatureUnit: 'C' });
+    h.on(NWS, /\/forecast$/, { body: celsius });
+    const { text } = await h.run('weather_forecast', { ...DETROIT, periods: 2 });
+    expect(text).toMatch(/This Afternoon: Partly Sunny, 39 F \(4 C\), wind NW 12 mph/);
+    expect(text).toMatch(/Tonight: Mostly Cloudy, 35°F/);
+  });
+
   it('hourly: true uses forecastHourly, with dewpoint and humidity', async () => {
     const h = harness();
     nwsBasics(h);

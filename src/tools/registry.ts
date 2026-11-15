@@ -7,6 +7,7 @@ import { NEVER_TOOLS, type ToolPolicy } from './policy.js';
 import { ToolSearch, type SearchHit } from './search.js';
 import { CATEGORIES, categoryFor, metaFor, type CategoryId } from './tags.js';
 import type { ToolContext, ToolDef, ToolOutput } from './types.js';
+import { imperialGevOutput, withImperialDefault } from './units.js';
 
 export type GevCaller = (
   name: string,
@@ -42,7 +43,12 @@ export class ToolRegistry {
         tags: meta.tags,
         attribution: meta.attribution,
         untrustedText: t.name === 'get_regional_brief' || t.name === 'find_radio_stations',
-        run: (args, ctx) => call(t.name, args, { ...ctx, timeoutMs }),
+        // US units: GEV's weather comes back in C and km/h (src/tools/units.ts).
+        run: async (args, ctx) =>
+          imperialGevOutput(
+            t.name,
+            await call(t.name, withImperialDefault(t.inputSchema, args), { ...ctx, timeoutMs }),
+          ),
       });
     }
     this.reindex();

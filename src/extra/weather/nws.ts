@@ -15,6 +15,7 @@
  * a US point must never inherit its neighbour's "outside".
  */
 import { z } from 'zod';
+import { tempText } from '../../tools/units.js';
 import type { ToolDef, ToolOutput } from '../../tools/types.js';
 import {
   LOCATION_SHAPE,
@@ -595,7 +596,13 @@ async function forecastFor(
       isError: true,
       errorKind: 'retry_later',
     };
-  const unit = (x: PeriodOut) => (x.temp !== null ? `${x.temp}°${x.temp_unit ?? ''}` : '');
+  // US units: the NWS answers in F; a period in C reads "39 F (4 C)" like the rest.
+  const unit = (x: PeriodOut) =>
+    x.temp === null
+      ? ''
+      : x.temp_unit?.toUpperCase() === 'C'
+        ? tempText(x.temp)
+        : `${x.temp}°${x.temp_unit ?? ''}`;
   const lines = f.periods.slice(0, hourly ? 12 : 6).map((x) => {
     const label = hourly ? (x.start ?? '') : (x.name ?? x.start ?? '');
     const bits = [

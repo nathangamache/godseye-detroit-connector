@@ -353,6 +353,30 @@ describe('whats_happening_here sections', () => {
     );
   });
 
+  it('the weather line is in F and mph (GEV reports C and km/h)', async () => {
+    const { text, data } = await harness({
+      get_weather: async () => ({
+        summary: 'Weather at 42.3314, -83.0458: light snow, -1°C, wind 19 km/h.',
+        data: {
+          weather: {
+            observed_at: '2026-11-14T16:45:00Z',
+            conditions: 'light snow',
+            temperature_c: -1.2,
+            wind_kph: 19.3,
+          },
+        },
+      }),
+    }).run(DETROIT);
+    expect(line(text, 'Weather:')).toMatch(
+      /^- Weather: Weather at 42\.3314, -83\.0458: light snow, 30 F \(-1 C\), wind 12 mph\./,
+    );
+    expect(text).not.toMatch(/°C|km\/h/);
+    const w = data.sources.find((s) => s.source === 'weather')!.data as {
+      weather: Record<string, number>;
+    };
+    expect(w.weather).toMatchObject({ temperature_f: 29.8, wind_mph: 12 });
+  });
+
   it('the rail and Pulse sections read exactly as before', async () => {
     const { text, data } = await harness().run(DETROIT);
     expect(line(text, 'Rail line & crossing')).toBe(
