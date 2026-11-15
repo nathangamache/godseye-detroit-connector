@@ -2,10 +2,13 @@
  * One closed stretch, one item. Sources report a closure once per direction (TomTom: "closed
  * between A and B", then "between B and A"); road_closures shows such reports as one item with
  * direction "both directions". Two reports of the same source, kind and type (and the same
- * description, apart from direction words) are the same stretch when they are on the same road
- * between the same cross streets, in either order, or when their lines overlap: at least 70% of
- * each lies within 25 m of the other. The merged item keeps every report's geometry, so a route
- * along either carriageway still meets it.
+ * description, apart from direction words) are the same stretch when they are between the same
+ * cross streets, in either order, within 300 m of each other, and either on the same named road
+ * or, when a road is not named (TomTom often names none), with at least 70% of each within 60 m
+ * of the other, as a divided road's two carriageways are; parallel streets closed between the
+ * same two cross streets stay apart. Without matching cross streets, their lines must overlap:
+ * at least 70% of each within 25 m of the other. The merged item keeps every report's geometry,
+ * so a route along either carriageway still meets it.
  */
 import type { RoadItem } from './closures.js';
 import {
@@ -23,8 +26,14 @@ import { normRoad } from './text.js';
 export const SAME_STRETCH_M = 25;
 /** Share of each line that must lie on the other. */
 export const SAME_STRETCH_SHARE = 0.7;
-/** Reports between the same cross streets must still be this close to be one stretch. */
+/** Reports between the same cross streets must still be this close (box to box) to be one. */
 const CROSS_STREET_NEAR_M = 300;
+/**
+ * Reports between the same cross streets, on roads not both named and the same, must lie this
+ * close along most of their length: wide enough for a divided road's two carriageways, narrower
+ * than a city block, so two parallel streets are never taken for one.
+ */
+export const CARRIAGEWAYS_M = 60;
 /** Lines shorter than this (points, mostly) are merged only by their cross streets. */
 const MIN_LINE_M = 30;
 
@@ -78,13 +87,22 @@ function padded(b: BBox, m: number): BBox {
   return [b[0] - dLon, b[1] - dLat, b[2] + dLon, b[3] + dLat];
 }
 
-/** The share of a's length (sampled every 10 m) that lies within SAME_STRETCH_M of b. */
-function shareOn(a: LonLat[][], b: LonLat[][]): number {
-  const pts = a.flatMap((l) => (l.length > 1 ? samplePoints(l, 10, 400) : []));
+/**
+ * The share of a's length (sampled every 10 m) that lies within tolM of b. An item that is only
+ * points (one-vertex lines) is sampled at its points.
+ */
+function shareOn(a: LonLat[][], b: LonLat[][], tolM: number): number {
+  let pts = a.flatMap((l) => (l.length > 1 ? samplePoints(l, 10, 400) : []));
+  if (!pts.length) pts = a.flat().map(([lon, lat]) => ({ lat, lon }));
   if (!pts.length) return 0;
   let on = 0;
-  for (const p of pts) if (distanceToLinesM(p, b).distM <= SAME_STRETCH_M) on++;
+  for (const p of pts) if (distanceToLinesM(p, b).distM <= tolM) on++;
   return on / pts.length;
+}
+
+/** At least SAME_STRETCH_SHARE of each lies within tolM of the other. */
+function runTogether(a: LonLat[][], b: LonLat[][], tolM: number): boolean {
+  return shareOn(a, b, tolM) >= SAME_STRETCH_SHARE && shareOn(b, a, tolM) >= SAME_STRETCH_SHARE;
 }
 
 export function sameStretch(a: RoadItem, b: RoadItem): boolean {
@@ -95,22 +113,23 @@ export function sameStretch(a: RoadItem, b: RoadItem): boolean {
   const fa = factsOf(a);
   const fb = factsOf(b);
   if (!fa.box || !fb.box) return false;
-  if (!intersects(padded(fa.box, CROSS_STREET_NEAR_M), padded(fb.box, CROSS_STREET_NEAR_M)))
-    return false;
+  // Within CROSS_STREET_NEAR_M of each other in all: one box padded, not both.
+  if (!intersects(padded(fa.box, CROSS_STREET_NEAR_M), fb.box)) return false;
   if (fa.road && fb.road && fa.road !== fb.road) return false;
   if (fa.desc && fb.desc && fa.desc !== fb.desc) return false;
-  // Between the same two cross streets, in either order.
+  // Between the same two cross streets, in either order: enough on one named road; otherwise
+  // the lines must run together, as a divided road's carriageways do and parallel streets don't.
   if (fa.cross && fb.cross) {
     const [x, y] = fa.cross;
     const [u, v] = fb.cross;
-    if ((x === u && y === v) || (x === v && y === u)) return true;
+    if ((x === u && y === v) || (x === v && y === u)) {
+      const oneRoad = Boolean(fa.road) && fa.road === fb.road;
+      return oneRoad || runTogether(a.lines, b.lines, CARRIAGEWAYS_M);
+    }
   }
   if (fa.len < MIN_LINE_M || fb.len < MIN_LINE_M) return false;
   if (!intersects(padded(fa.box, SAME_STRETCH_M), fb.box)) return false;
-  return (
-    shareOn(a.lines, b.lines) >= SAME_STRETCH_SHARE &&
-    shareOn(b.lines, a.lines) >= SAME_STRETCH_SHARE
-  );
+  return runTogether(a.lines, b.lines, SAME_STRETCH_M);
 }
 
 /** The heading of an item's longest line (first vertex to last), in local metres. */

@@ -853,6 +853,69 @@ describe('one item per closed stretch', () => {
     );
   });
 
+  it('keeps two parallel streets closed between the same cross streets as two items', async () => {
+    // Two one-way streets a block apart (about 165 m), closed between the same two cross
+    // streets: Charlie Avenue northbound, Delta Street southbound. TomTom names neither.
+    const delta: Array<[number, number]> = [
+      [-83.052, 42.338],
+      [-83.052, 42.335],
+    ];
+    const grid = {
+      elements: [
+        ...NEAR_WAYS.elements.slice(0, 1),
+        {
+          type: 'way',
+          tags: { highway: 'residential', name: 'Charlie Avenue' },
+          geometry: [
+            { lat: 42.334, lon: -83.05003 },
+            { lat: 42.339, lon: -83.05003 },
+          ],
+        },
+        {
+          type: 'way',
+          tags: { highway: 'residential', name: 'Delta Street' },
+          geometry: [
+            { lat: 42.334, lon: -83.05203 },
+            { lat: 42.339, lon: -83.05203 },
+          ],
+        },
+      ],
+    };
+    const x = h(
+      {
+        ...TT_ONLY,
+        OVERPASS_URL: 'http://overpass.invalid/api/interpreter',
+        DETROIT_ROW_ENABLED: 'false',
+      },
+      {
+        routes: [
+          tomtomWith(
+            unnamedClosure('tt-charlie', CLOSED_NB, 'Alpha St', 'Bravo St'),
+            unnamedClosure('tt-delta', delta, 'Bravo St', 'Alpha St'),
+          ),
+          [/overpass\.invalid/, () => json(grid)],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const tt = itemsOf(out).filter((i) => i.source === 'tomtom');
+    expect(tt).toHaveLength(4);
+    expect(tt.filter((i) => i.merged_reports !== undefined)).toEqual([]);
+    expect(tt.find((i) => i.road === 'Charlie Avenue')).toMatchObject({
+      from_cross_street: 'Alpha St',
+      direction: null,
+      full_closure: true,
+    });
+    expect(tt.find((i) => i.road === 'Delta Street')).toMatchObject({
+      from_cross_street: 'Bravo St',
+      direction: null,
+      full_closure: true,
+    });
+    expect(out.summary).toContain(
+      '4 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now), 3 full closure(s): Charlie Avenue: road closed between Alpha St and Bravo St (0.5 km away); Delta Street: road closed between Bravo St and Alpha St (0.6 km away);',
+    );
+  });
+
   it('says when a road is unknown or a closure is full, and how many more are in items', async () => {
     const x = h(
       { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
@@ -970,6 +1033,41 @@ describe('one item per closed stretch', () => {
     expect(closuresOnRoute([m!], route)).toHaveLength(1);
   });
 
+  it('keeps parallel streets closed between the same cross streets apart, unless they run together', () => {
+    // TomTom names neither road: only the lines tell the streets apart.
+    const tt = {
+      source: 'tomtom',
+      kind: 'incident',
+      type: 'road closed',
+      road: null,
+      description: null,
+    } as const;
+    const cross = { from_cross_street: 'Alpha St', to_cross_street: 'Bravo St' };
+    const swapped = { from_cross_street: 'Bravo St', to_cross_street: 'Alpha St' };
+    const street = (lon: number) => [line({ lat: 42.335, lon }, { lat: 42.338, lon }, 6)];
+    const pair = (dLon: number, other: typeof cross) =>
+      mergeDirections([
+        item({ id: 'a', ...tt, ...cross, lines: street(-83.05) }),
+        item({ id: 'b', ...tt, ...other, lines: street(-83.05 - dLon) }),
+      ]);
+    // One block (about 80 m), two blocks (165 m) and about 400 m apart, in either order.
+    for (const dLon of [0.001, 0.002, 0.0049])
+      for (const other of [cross, swapped]) expect(pair(dLon, other)).toHaveLength(2);
+    // A divided road's two carriageways, 45 m apart, are one stretch.
+    const [m, ...rest] = pair(0.00055, swapped);
+    expect(rest).toEqual([]);
+    expect(m).toMatchObject({ id: 'a+b', direction: 'both directions', merged: 2 });
+    // Points between the same cross streets: one spot is one stretch, a block away is not.
+    const at = (lon: number): LonLat[][] => [[[lon, 42.3365]]];
+    const points = (dLon: number) =>
+      mergeDirections([
+        item({ id: 'a', ...tt, ...cross, lines: at(-83.05) }),
+        item({ id: 'b', ...tt, ...swapped, lines: at(-83.05 - dLon) }),
+      ]);
+    expect(points(0.0001)).toHaveLength(1);
+    expect(points(0.002)).toHaveLength(2);
+  });
+
   it('merges a duplicate in one direction without calling it both directions', () => {
     const a = item({
       id: 'a',
@@ -1011,6 +1109,14 @@ describe('one item per closed stretch', () => {
       mergeDirections([
         item({ id: 'a', lines: l, ...cross }),
         item({ id: 'b', lines: far, ...cross }),
+      ]),
+    ).toHaveLength(2);
+    // On one named road, within 300 m in all, not 300 m added on each side: 450 m apart is two.
+    const apart = [line({ lat: 42.335, lon: -83.0555 }, { lat: 42.338, lon: -83.0555 }, 6)];
+    expect(
+      mergeDirections([
+        item({ id: 'a', lines: l, ...cross }),
+        item({ id: 'b', lines: apart, ...cross }),
       ]),
     ).toHaveLength(2);
     // Two crashes at one spot are two crashes.

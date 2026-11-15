@@ -141,10 +141,12 @@ latest fix and is audited as a location read.
   (`not configured: set MDOT_RIDE_API_KEY in deploy/secrets/gateway.env`). Each source fails on
   its own: one down never sinks the others, and "none found" is reported as "not proof the road
   is open", with the list of sources checked.
-* A stretch a source reports once per direction (the same road between the same cross streets,
-  in either order, or lines that overlap by 70% or more) is one item, direction "both
-  directions"; counts are after merging, and the merged item keeps both directions' geometry for
-  routing.
+* A stretch a source reports once per direction (between the same cross streets, in either
+  order, within 300 m, on the same named road or, unnamed, with lines that run within 60 m of
+  each other as a divided road's carriageways do; or lines that overlap by 70% or more) is one
+  item, direction "both directions". Parallel streets closed between the same cross streets stay
+  separate items. Counts are after merging, and the merged item keeps both directions' geometry
+  for routing.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
   `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; the City of Detroit permits are
   one in-memory snapshot refreshed every 15 minutes (the last good copy is kept when a refresh
