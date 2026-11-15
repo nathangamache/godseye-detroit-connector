@@ -14,6 +14,7 @@ import { errorText } from './http.js';
 import {
   SE_MICHIGAN,
   bboxCenter,
+  distanceToLineM,
   distanceToLinesM,
   inBox,
   round4,
@@ -202,6 +203,35 @@ const num = (v: unknown): number | undefined => {
   return typeof n === 'number' && Number.isFinite(n) ? n : undefined;
 };
 
+/** Ways a vehicle closure can be on: not paths, steps, service aisles or planned roads. */
+const ROAD_KINDS =
+  '["highway"!~"^(footway|cycleway|path|steps|service|track|pedestrian|bridleway|corridor|platform|proposed)$"]';
+
+/** "Woodward Avenue (M-1)", "I-94", "First Street": a way's name, with its route numbers. */
+export function roadLabel(tags: Record<string, unknown>): string | null {
+  const name = cleanText(tags.name, 80);
+  const refs = (cleanText(tags.ref, 60) ?? '')
+    .split(';')
+    .map((r) =>
+      r
+        .trim()
+        .replace(
+          /^(I|US|M)[ -]?(\d+[A-Z]?)$/i,
+          (_m, a: string, n: string) => `${a.toUpperCase()}-${n}`,
+        ),
+    )
+    .filter(Boolean)
+    .slice(0, 3);
+  if (name && refs.length) return `${name} (${refs.join(' / ')})`;
+  return name ?? (refs.length ? refs.join(' / ') : null);
+}
+
+function wayGeometry(wy: Record<string, unknown>): LonLat[] {
+  return (Array.isArray(wy.geometry) ? wy.geometry : [])
+    .map((g: { lat?: unknown; lon?: unknown }) => [num(g?.lon), num(g?.lat)])
+    .filter((c): c is LonLat => c[0] !== undefined && c[1] !== undefined);
+}
+
 export class Geocoder {
   constructor(private readonly o: GeocoderOptions) {}
 
@@ -381,13 +411,14 @@ export class Geocoder {
   private async overpass(
     ql: string,
     signal?: AbortSignal,
+    timeoutMs = 30_000,
   ): Promise<Array<Record<string, unknown>>> {
     const j = await this.o.http.json<{ elements?: unknown[] }>('Overpass', this.o.overpassUrl!, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ data: ql }).toString(),
       maxBytes: 8 * 1024 * 1024,
-      timeoutMs: 30_000,
+      timeoutMs,
       signal,
     });
     return (j.elements ?? []).filter(
@@ -435,9 +466,7 @@ export class Geocoder {
       for (const wy of near) {
         if (wy.type !== 'way') continue;
         const tags = (wy.tags ?? {}) as Record<string, string>;
-        const geom = (Array.isArray(wy.geometry) ? wy.geometry : [])
-          .map((g: { lat?: unknown; lon?: unknown }) => [num(g?.lon), num(g?.lat)])
-          .filter((c): c is LonLat => c[0] !== undefined && c[1] !== undefined);
+        const geom = wayGeometry(wy);
         if (geom.length < 2) continue;
         if (fa.test(tags)) A.push(geom);
         if (fb.test(tags)) B.push(geom);
@@ -478,6 +507,31 @@ export class Geocoder {
       if (out.length >= 5) break;
     }
     return out;
+  }
+
+  /**
+   * The named road nearest a point, within radiusM, from the self-hosted Overpass only (our own
+   * OpenStreetMap copy; never an outside geocoder) and never cached: the point may come from a
+   * source whose data must not be stored (TomTom). Null without Overpass or a road in range.
+   */
+  async nearestRoad(p: Point, radiusM: number, signal?: AbortSignal): Promise<string | null> {
+    if (!this.o.overpassUrl) return null;
+    const at = `around:${Math.round(radiusM)},${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+    const els = await this.overpass(
+      `[out:json][timeout:10];(way(${at})["highway"]${ROAD_KINDS}["name"];way(${at})["highway"]${ROAD_KINDS}["ref"];);out tags geom;`,
+      signal,
+      12_000,
+    );
+    let best: { d: number; label: string } | undefined;
+    for (const wy of els) {
+      if (wy.type !== 'way') continue;
+      const label = roadLabel((wy.tags ?? {}) as Record<string, unknown>);
+      const geom = wayGeometry(wy);
+      if (!label || !geom.length) continue;
+      const d = distanceToLineM(p, geom).distM;
+      if (d <= radiusM && (!best || d < best.d)) best = { d, label };
+    }
+    return best?.label ?? null;
   }
 
   /** The street at a point (Overpass when configured, else Photon reverse), cached. */

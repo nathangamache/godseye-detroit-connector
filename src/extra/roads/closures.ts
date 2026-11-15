@@ -42,8 +42,12 @@ export interface RoadItem {
   lines: LonLat[][];
   /** start/end are local calendar dates (YYYY-MM-DD), not instants. */
   dateOnly?: boolean;
-  /** Looks up the street name when the source has none (Detroit permits). */
+  /** Looks up the street name when the source has none (Detroit permits, TomTom). */
   resolveRoad?: (signal: AbortSignal) => Promise<string | null>;
+  /** Credit for the map a looked-up name comes from (shown once a name was found). */
+  roadCredit?: string;
+  /** Set when road came from resolveRoad. */
+  roadLookedUp?: boolean;
   note?: string;
 }
 
@@ -182,7 +186,7 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
 export interface ClosureAnswer {
   items: RoadItem[];
   reports: SourceReport[];
-  /** Detroit permits near the point that were not checked against the road name (lookup cap). */
+  /** Items with no road name that were not checked against the road asked for (lookup cap). */
   unchecked: number;
   attributions: string[];
 }
@@ -286,6 +290,7 @@ export class ClosureService {
         await Promise.all(
           take.map(async (it) => {
             it.road = await it.resolveRoad!(signal).catch(() => null);
+            if (it.road) it.roadLookedUp = true;
           }),
         );
       for (const it of batch) {
@@ -302,6 +307,10 @@ export class ClosureService {
     }
     const used = new Set(out.map((i) => i.source));
     const attributions = this.o.sources.filter((s) => used.has(s.id)).map((s) => s.attribution);
+    // A street name looked up on a map carries that map's credit (ODbL for OpenStreetMap).
+    for (const it of out)
+      if (it.roadLookedUp && it.roadCredit && !attributions.includes(it.roadCredit))
+        attributions.push(it.roadCredit);
     for (const r of reports)
       if (r.status === 'ok') r.count = out.filter((i) => i.source === r.source).length;
     return { items: out, reports, unchecked, attributions };

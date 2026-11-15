@@ -777,12 +777,15 @@ describe('route_avoiding_closures', () => {
     ).toBe(true);
     expect(w[3]).toContain('7 more work site(s) on the route');
     expect(x.mock.count(/photon\.komoot\.io\/reverse/)).toBe(3);
-    // City permit text in the warnings carries the city's credit.
+    // City permit text in the warnings carries the city's credit, the street names the map's.
     expect((out.data as { attribution: string[] }).attribution).toEqual([
       VALHALLA_ATTRIBUTION,
       DETROIT_ATTRIBUTION,
+      GEO_ATTRIBUTION.photon,
     ]);
-    expect(out.summary).toContain(`Closure data: ${DETROIT_ATTRIBUTION}.`);
+    expect(out.summary).toContain(
+      `Closure data: ${DETROIT_ATTRIBUTION}; ${GEO_ATTRIBUTION.photon}.`,
+    );
   });
 
   it('reports Valhalla failures as errors', async () => {

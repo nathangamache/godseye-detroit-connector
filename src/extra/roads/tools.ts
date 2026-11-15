@@ -245,7 +245,7 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
         : `No ${what}${road ? ` on ${road.text}` : ''} found ${area} (${when === 'now' ? 'in effect now' : 'planned'}) in the sources checked. That is not proof the road is open: only the sources below were checked.`;
       const checked = `Sources: ${ans.reports.map(reportSentence).join('; ')}.`;
       const unchecked = ans.unchecked
-        ? ` ${ans.unchecked} nearby Detroit permit(s) were not checked against the road name (street lookups are capped per call).`
+        ? ` ${ans.unchecked} nearby item(s) without a road name were not checked against the road asked for (street lookups are capped per call).`
         : '';
       const ontario = ans.items.some((i) => i.source === 'ontario511')
         ? ` ${ONTARIO_DISCLAIMER}`

@@ -16,7 +16,7 @@ import {
   type FetchResult,
   type RoadItem,
 } from '../closures.js';
-import type { Geocoder } from '../geocode.js';
+import { ATTRIBUTION as GEO_ATTRIBUTION, type Geocoder } from '../geocode.js';
 import {
   DETROIT_CITY,
   bboxOf,
@@ -414,6 +414,9 @@ export function detroitRowSource(o: DetroitRowOptions): ClosureSource {
           lines: p.lines,
           dateOnly: true,
           resolveRoad: (sig) => o.geocoder.reverseStreet(mid, sig),
+          roadCredit: o.geocoder.overpassConfigured
+            ? GEO_ATTRIBUTION.overpass
+            : GEO_ATTRIBUTION.photon,
           note: `${segs} permit segment(s); street name looked up from the map${segs > 1 ? ' at the segment shown' : ''}; full_closure is inferred from the permit text`,
         });
       }

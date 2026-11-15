@@ -161,6 +161,10 @@ export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDe
       baseUrl: c.TOMTOM_API_URL,
       key: c.TOMTOM_API_KEY,
       allowed: c.ALLOW_TOMTOM_INCIDENTS,
+      // Our own OpenStreetMap copy names roads TomTom leaves unnamed; never an outside geocoder.
+      roadAt: geocoder.overpassConfigured
+        ? (p, radiusM, signal) => geocoder.nearestRoad(p, radiusM, signal)
+        : undefined,
       daily: new DailyCounter(
         path.join(cacheDir, 'tomtom-incidents-usage.json'),
         c.TOMTOM_INCIDENTS_DAILY_MAX,

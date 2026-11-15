@@ -249,6 +249,7 @@ async function nameAll(items: RoadItem[], signal: AbortSignal): Promise<void> {
   await Promise.all(
     todo.map(async (it) => {
       it.road = await it.resolveRoad!(signal).catch(() => null);
+      if (it.road) it.roadLookedUp = true;
     }),
   );
 }
@@ -303,6 +304,10 @@ export async function routeAvoidingClosures(
       ? excludeRings(blocking, first.shape)
       : { rings: [], kept: [], dropped: [] };
     await nameAll([...kept, ...atEnds, ...dropped, ...shown], signal);
+    // A street name looked up on a map carries that map's credit.
+    for (const it of [...kept, ...atEnds, ...dropped, ...shown])
+      if (it.roadLookedUp && it.roadCredit && !attributions.includes(it.roadCredit))
+        attributions.push(it.roadCredit);
     for (const it of atEnds)
       warnings.push(`Closure at the start or end of the trip, can't be avoided: ${describe(it)}`);
     for (const it of dropped)
