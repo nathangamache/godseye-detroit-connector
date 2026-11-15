@@ -68,6 +68,7 @@ describe('config', () => {
       'dpd_calls_near',
       'transit_vehicles_near',
       'local_headlines',
+      'radio_stations_near',
     ])
       expect(buckets).toContain(b);
     const keys = c.toolRateLimits.map(key);
@@ -98,6 +99,7 @@ describe('config', () => {
       'WEATHER_TOOL_RATE_LIMITS',
       'ROADS_TOOL_RATE_LIMITS',
       'CIVIC_TOOL_RATE_LIMITS',
+      'RADIO_TOOL_RATE_LIMITS',
     ])
       expect(() => loadConfig({ [k]: 'nonsense' })).toThrow(new RegExp(k));
   });

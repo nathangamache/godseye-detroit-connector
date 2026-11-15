@@ -44,6 +44,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
 | `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `local_headlines` | gateway (civic) | recent GDELT headlines for a place or point | none |
+| `radio_stations_near` | gateway (radio) | internet radio stations near a point or the phone from the Radio Browser directory, nearest first: distance and bearing, tags, languages, codec, https/HLS, stream URL and homepage (Claude can't listen; on the globe only https MP3/AAC non-HLS streams play) | none |
 | `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
 | `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
 | `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (listed as OFF, answering `not_configured`, without) |
@@ -73,9 +74,10 @@ Never exposed: `panel_request`, `search_places`, `places_nearby` (Google content
 `get_hud_caption` (metered); see Tool policy.
 
 `flights_near` never sends the exact position: the query centre is snapped to a 0.05° grid and
-the radius enlarged by 3 nm, then everything is measured here. Owner rules, LADD withholding and
-the sources' terms are in `docs/security.md` ("Aviation data"); the registry sync in
-`docs/operations.md`.
+the radius enlarged by 3 nm, then everything is measured here. `radio_stations_near` does the
+same with the radius enlarged by 6 km, and never fetches a stream. Owner rules, LADD withholding
+and the sources' terms are in `docs/security.md` ("Aviation data", and the radio source table);
+the registry sync in `docs/operations.md`.
 
 ## Architecture
 
@@ -187,9 +189,10 @@ latest fix and is audited as a location read.
   60/h, imagery 20/h, regional news 30/h, place lookups 30/h. Each gateway-native family adds
   its defaults for the buckets `TOOL_RATE_LIMITS` does not set: `AVIATION_RATE_LIMITS`
   (`flights_near` 60/h and 600/d, `aircraft_lookup` 120/h), `WEATHER_TOOL_RATE_LIMITS`,
-  `ROADS_TOOL_RATE_LIMITS` and `CIVIC_TOOL_RATE_LIMITS` (Detroit 911 calls 60/h, SMART buses
-  120/h, local headlines 30/h and 200/d). Outbound: adsb.fi at most one request per 1.1 s,
-  adsb.lol at most `ADSBLOL_DAILY_MAX` (100) calls a day.
+  `ROADS_TOOL_RATE_LIMITS`, `CIVIC_TOOL_RATE_LIMITS` (Detroit 911 calls 60/h, SMART buses
+  120/h, local headlines 30/h and 200/d) and `RADIO_TOOL_RATE_LIMITS` (radio stations 60/h and
+  300/d). Outbound: adsb.fi at most one request per 1.1 s, adsb.lol at most `ADSBLOL_DAILY_MAX`
+  (100) calls a day.
 * Every call: ajv validation (a failure returns the schema), 110 s timeout, at most 4 at once.
 * Every result: one copy of the data (GEV duplicates it), `data.view` stripped (its link kept as
   `map_url`), internal GEV links rewritten to the tailnet UI origin, third-party links flagged as
@@ -197,7 +200,7 @@ latest fix and is audited as a location read.
   (summary and images included) capped at 100k characters, provenance, retrieval time,
   attribution and an "untrusted data" label first.
 * Location reads (`where_am_i`, `whats_happening_here` without a point, a weather, water, air,
-  roads or civic tool called with `here: true`) are audited per grant.
+  roads, civic or radio tool called with `here: true`) are audited per grant.
   A tool called for an explicit point, while the phone's fix is under 30 minutes old, adds a
   "phone check" (distance, bearing from the point to the phone, fix age; never the phone's
   coordinates) and says plainly when the phone is not there; that is audited as a location read
@@ -262,6 +265,7 @@ src/            gateway (TypeScript, ESM)
     weather/    NWS alerts and forecast, water levels, air quality
     roads/      road closures, geocoding, closure-aware routes, Mi Drive links, border waits
     civic/      Detroit 911 calls, SMART buses, GDELT headlines
+    radio/      Radio Browser stations near a point (mirror discovery, coarse queries)
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
 web/            /locate PWA and shared CSS

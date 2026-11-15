@@ -273,8 +273,9 @@ chose) untouched; the connection then arrives from `127.0.0.1`, exactly like ser
   geocoder is configured.
 * Per-tool quota limits (TomTom, OSRM, imagery, a Nominatim bucket; each gateway-native family's
   defaults: `AVIATION_RATE_LIMITS`, `WEATHER_TOOL_RATE_LIMITS`, `ROADS_TOOL_RATE_LIMITS`,
-  `CIVIC_TOOL_RATE_LIMITS`, each unless `TOOL_RATE_LIMITS` sets the same bucket), per-grant and
-  per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4) calls at once.
+  `CIVIC_TOOL_RATE_LIMITS`, `RADIO_TOOL_RATE_LIMITS`, each unless `TOOL_RATE_LIMITS` sets the
+  same bucket), per-grant and per-IP request limits, and at most `MAX_CONCURRENT_TOOL_CALLS` (4)
+  calls at once.
 * No tool reads gateway config, env or files beyond the bundled rail data, the FAA registry copy
   and the roads tools' own cache and counters in `DATA_DIR/cache`; error text is stripped of paths
   and truncated.
@@ -360,6 +361,43 @@ or host. Results carry the attribution below and are labelled untrusted third-pa
 | GDELT DOC 2.0 API (`api.gdeltproject.org`) | `local_headlines` | none | "Unlimited and unrestricted use ... without fee"; any use must cite the GDELT Project with a link (in every result). GDELT asks for at most one request every 5 s per address: one process-wide queue (`src/extra/civic/gdelt.ts`), which every gateway GDELT caller shares, starts a request only after the previous one ended and at least 6 s (plus up to 2 s of jitter) after it started, backs off 60 s after a 429 (longer if GDELT's Retry-After says so) and refuses rather than queue for long (the answer is then status `unavailable` with when to try again). GEV's `get_regional_brief` also uses GDELT from the same address (its news fallback): it is not delayed, but each call the gateway passes to it counts as a GDELT start in that queue. Successful answers (public news metadata) are cached 15 minutes per query; the last metro asked about is refreshed at most every 15 minutes while it was asked for in the last 30 minutes. A call makes at most two requests (the narrow local-outlet or country search, then the broad one only if the first finds nothing). Headlines and links are third-party and unvetted. |
 | U.S. Census Bureau geocoder (`geocoding.geo.census.gov`) | `local_headlines` with coordinates | none | U.S. government service, no published terms or limits. It receives the point rounded to 0.01° (about 1 km), never the exact phone fix; answers are cached in memory for a day. |
 
+### Gateway data source and licensing (radio tool)
+
+`radio_stations_near` (`src/extra/radio/`) asks the Radio Browser directory itself; GEV's
+`find_radio_stations` keeps its own catalog and settings. Only directory metadata is read: the
+gateway never fetches a stream, a homepage or a favicon, and never calls `/json/url` (Radio
+Browser counts that as a play).
+
+| Source | Tool | Key | Terms and how the gateway handles them |
+|---|---|---|---|
+| Radio Browser (`all.api.radio-browser.info/json/servers`; `/json/stations/search` on a mirror `*.api.radio-browser.info`) | `radio_stations_near` | none | The directory data is public domain (PDDL). The service is free to use, "without guarantee to work", run by volunteers, with no published rate limit. Every result credits "Radio Browser (radio-browser.info)" and lists each broadcaster's homepage with its station; each stream's own terms apply (the gateway passes on its URL only). |
+
+* **As the operator asks**: the mirror list comes from `/json/servers` (cached 6 h, shuffled;
+  names outside `*.api.radio-browser.info` are ignored); without it de1, de2 and nl1 are used and
+  the list is asked again after 30 min. A request that fails (network, timeout, 5xx, 429, a
+  redirect, a broken body) moves to the next mirror, at most 3 tries; a 4xx or an oversize body
+  is not retried. Redirects are refused, so a request never reaches another host. The User-Agent
+  is the civic tools' generic `appname/version` string; 12 s per try; body caps 64 KB (server
+  list) and 2 MB (search).
+* **One search per call at most**: `geo_lat`, `geo_long`, `geo_distance` (meters),
+  `has_geo_info=true`, `hidebroken=true`, `order=clickcount`, `reverse=true`, `limit=500`, plus
+  `is_https=true` for `https_only`. Answers are cached 30 min per grid cell, radius and
+  `https_only`. The query words are matched in the gateway and never sent. The directory orders
+  by its 24 h click count, so where more than 500 stations are in range a less popular one can be
+  missing; the result says so.
+* **Position**: the directory is asked about the nearest 0.05° grid point (at most about 4 km
+  away) with the radius enlarged by 6 km; stations are filtered, measured and sorted from the
+  exact point in the gateway. With `here: true` the phone's fix is read like `where_am_i` and
+  audited the same way (`location_read`, tool `radio_stations_near`, per grant, no coordinates),
+  and it never leaves the gateway. Results give distance and bearing, not station coordinates.
+* **Third-party text**: names, tags, places and languages are community-entered (some are wrong,
+  such as a US station filed under an Austrian state), cleaned of control and bidi characters and
+  markup, length-capped and labelled untrusted. A stream or homepage link with credentials, to a
+  loopback, private or link-local address, or to a single-label or local name is dropped (the
+  station too, when it is the stream); every other link is flagged as unvetted.
+* Quota: `RADIO_TOOL_RATE_LIMITS` (60/h and 300/d). The tool is not part of
+  `whats_happening_here`.
+
 ### Data retention
 
 * Location: only the latest fix is ever exposed; history is pruned after
@@ -379,6 +417,9 @@ or host. Results carry the attribution below and are labelled untrusted third-pa
   rounded permit coordinates (30 days). The TomTom and Nominatim daily counters hold a date and a
   count only. TomTom results are never stored, nor are the road names looked up for TomTom
   incidents. Delete the directory to forget all of it.
+* Radio: Radio Browser answers (station metadata only) are kept in memory for 30 min, keyed by
+  the 0.05° grid cell, radius and `https_only` asked about, and the mirror list for 6 h. Nothing
+  is written to disk.
 
 ### Aviation data (flights_near, aircraft_lookup)
 
@@ -550,6 +591,9 @@ Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
   only the town name to GDELT; `dpd_calls_near` sends a box around the point to the city's ArcGIS
   service; `transit_vehicles_near` downloads SMART's whole feed and filters it in the gateway, so
   Swiftly never sees the point.
+* **`radio_stations_near`** sends Radio Browser a 0.05° grid point (within about 4 km of the point
+  or the phone's fix) and the radius plus 6 km. Its directory is community-edited: a station's
+  stream or homepage link can lead anywhere public, and the user, not the gateway, opens it.
 * `docker-compose` 1.29 is end-of-life and crashes when recreating containers against Docker 29
   (`KeyError: 'ContainerConfig'`): use `down` then `up -d`, or install Compose v2.
 
