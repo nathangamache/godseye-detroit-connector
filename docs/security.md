@@ -407,9 +407,10 @@ Gateway-native tools in `src/extra/aviation/`. Terms were read on 2026-11-14.
   failure the last good copy stays.
 * **Owner disclosure** (default `private_hidden`): government registrants by name, city and
   state, always (they can't ask the FAA to withhold; flagged, with a police/sheriff hint);
-  corporations and LLCs by name only in a single-aircraft lookup, by type, city and state in
-  lists; private registrants as "private individual" / "private owners" with city and state
-  (`type_only`: the label alone; `full`: the name in single lookups, never in lists). An owner
+  corporations and LLCs by name, city and state, in `aircraft_lookup` and `flights_near` alike
+  (a list row's `owner_type` is the FAA registrant type, `owner_name` the name); private
+  registrants as "private individual" / "private owners" with city and state (`type_only`: the
+  label alone; `full`: the name in single lookups, never in lists). An owner
   the FAA leaves blank (most likely withheld under 49 U.S.C. § 44114(b)) stays blank: it is
   never filled from deregistered records, older copies or a live feed's `ownOp`.
 * **LADD** (`AIRCRAFT_LADD_WITHHOLD`, default on): an aircraft flagged LADD (live `dbFlags` bit
