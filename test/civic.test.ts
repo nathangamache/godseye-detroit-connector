@@ -636,16 +636,31 @@ function transitRoutes(
 }
 
 describe('transit_vehicles_near', () => {
-  it('is OFF without SWIFTLY_API_KEY and fetches nothing', async () => {
-    const { run, http, tool } = setup({ routes: transitRoutes() });
-    expect(tool('transit_vehicles_near').description).toMatch(
-      /^OFF: not configured \(set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env\)/,
-    );
+  it('is OFF without SWIFTLY_API_KEY: a normal not_configured answer, nothing fetched', async () => {
+    const { run, http, tool, runner } = setup({ routes: transitRoutes() });
+    expect(tool('transit_vehicles_near').needsKey).toMatchObject({ env: 'SWIFTLY_API_KEY' });
+    // Run directly (as a composite would) and through run_tool: never a tool error.
     const r = await run('transit_vehicles_near', { ...DETROIT });
-    expect(r).toMatchObject({ isError: true, errorKind: 'unavailable' });
+    expect(r.isError).toBeFalsy();
+    expect(r.errorKind).toBeUndefined();
     expect(r.summary).toMatch(
-      /^transit_vehicles_near is not configured: set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env/,
+      /^transit_vehicles_near is not configured: set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env .*Nothing was fetched\.$/,
     );
+    expect(data(r)).toMatchObject({
+      status: 'not_configured',
+      missing_key: 'SWIFTLY_API_KEY',
+      fetched: false,
+    });
+    const viaRun = await runner.run(
+      'transit_vehicles_near',
+      { ...DETROIT },
+      { signal: new AbortController().signal },
+    );
+    expect(viaRun.isError).toBeFalsy();
+    const text = viaRun.content.map((c) => c.text ?? '').join('\n');
+    expect(text).toMatch(/Nothing was fetched/);
+    expect(text).toMatch(/"status":"not_configured"/);
+    expect(text).toMatch(/"missing_key":"SWIFTLY_API_KEY"/);
     expect(http.calls).toHaveLength(0);
   });
 

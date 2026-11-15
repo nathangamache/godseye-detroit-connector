@@ -9,7 +9,8 @@
  *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
  *   gateway      -> weather_alerts (NWS, the point), road_closures (nearest 5 within 5 km, every
  *                   enabled source), border_wait_times (only within 8 km of a Detroit/Windsor or
- *                   Port Huron crossing), air_quality (only when AIRNOW_API_KEY is set)
+ *                   Port Huron crossing), air_quality ("not configured (AIRNOW_API_KEY)" without
+ *                   its key)
  *   GEV          -> get_weather, get_traffic_flow, find_cctv_cameras (shown only when a camera
  *                   is in range: none in SE Michigan today)
  * and returns one compact summary with each source's timestamp/age and error. For an explicit
@@ -107,7 +108,8 @@ export { humanAge };
 
 interface SourceReport {
   source: string;
-  status: 'ok' | 'error' | 'unavailable' | 'skipped';
+  /** not_configured: the tool's API key is missing (the line names it; nothing was fetched). */
+  status: 'ok' | 'error' | 'unavailable' | 'skipped' | 'not_configured';
   summary: string;
   retrieved_at: string;
   observed_at?: string;
@@ -300,6 +302,14 @@ export async function whatsHappeningHere(
       if (opts.optional) return undefined;
       return { source, status: 'skipped', summary: verdict.reason, retrieved_at: retrievedAt() };
     }
+    // A key-gated tool without its key: said so, never left out, and nothing is fetched.
+    if (def.needsKey)
+      return {
+        source,
+        status: 'not_configured',
+        summary: `not configured (${def.needsKey.env})`,
+        retrieved_at: retrievedAt(),
+      };
     const left = budget - (Date.now() - started);
     if (left < MIN_SECTION_MS)
       return {
@@ -392,7 +402,7 @@ export async function whatsHappeningHere(
         delete d.view;
         return { status: 'ok', summary: out.summary, data: d };
       }),
-      // Only when AIRNOW_API_KEY is set (the policy switches air_quality off without it).
+      // Without AIRNOW_API_KEY the line says "not configured (AIRNOW_API_KEY)".
       runSource(
         'air_quality',
         'air_quality',
@@ -406,7 +416,7 @@ export async function whatsHappeningHere(
                 summary: out.summary,
                 data: compact(out.data, ['note', 'observations', 'forecast', 'retrieved_at']),
               },
-        { optional: true, credit: true },
+        { credit: true },
       ),
       runSource(
         'traffic',
@@ -500,7 +510,7 @@ export async function whatsHappeningHere(
   if (phone) lines.push(phone.note);
   for (const s of sources) {
     const age = s.age_s !== undefined ? ` [data ${humanAge(s.age_s)} old]` : '';
-    const flag = s.status === 'ok' ? '' : ` (${s.status})`;
+    const flag = s.status === 'ok' || s.status === 'not_configured' ? '' : ` (${s.status})`;
     lines.push(`- ${label[s.source] ?? s.source}${flag}: ${oneLine(s.summary)}${age}`);
   }
   lines.push(`Retrieved ${retrievedAt()}. Always tell the user how old each piece of data is.`);
@@ -543,7 +553,12 @@ export async function whatsHappeningHere(
 }
 
 /** Gateway-native tools whose section says "not available" (not "GEV offline") when missing. */
-const GATEWAY_SECTIONS = new Set(['weather_alerts', 'road_closures', 'border_wait_times']);
+const GATEWAY_SECTIONS = new Set([
+  'weather_alerts',
+  'air_quality',
+  'road_closures',
+  'border_wait_times',
+]);
 /** A section that would get less than this of the budget is skipped, not started. */
 const MIN_SECTION_MS = 250;
 /** Crossings this close to the point get a border-waits section. */

@@ -194,7 +194,13 @@ function harness(
     'road_closures',
     'border_wait_times',
   ])
-    registry.register(def(n, 'gateway'));
+    registry.register({
+      ...def(n, 'gateway'),
+      // As registerWeatherTools does without AIRNOW_API_KEY.
+      ...(n === 'air_quality' && opts.airQuality === false
+        ? { needsKey: { env: 'AIRNOW_API_KEY', what: 'a free EPA AirNow API key' } }
+        : {}),
+    });
   for (const n of ['rail_activity_near', 'incidents_near']) registry.register(def(n, 'pulse'));
   registry.setGevTools(
     ['get_weather', 'get_traffic_flow', 'find_cctv_cameras'].map((name) => ({
@@ -208,8 +214,6 @@ function harness(
     },
     60_000,
   );
-  if (opts.airQuality === false)
-    policy.switchOff('air_quality', 'not configured: set AIRNOW_API_KEY');
   const runner = new ToolRunner(registry, {
     timeoutMs: 60_000,
     maxConcurrent: 4,
@@ -374,12 +378,17 @@ describe('whats_happening_here sections', () => {
     expect(border).not.toMatch(/Ambassador|Tunnel|Gordie/);
   });
 
-  it('air quality only when it is configured', async () => {
+  it('air quality: the AQI when configured, "not configured (AIRNOW_API_KEY)" without its key', async () => {
     const off = harness({}, { airQuality: false });
     const r = await off.run(DETROIT);
-    expect(sourceNames(r.data)).not.toContain('air_quality');
+    // Never dropped silently, and nothing is fetched.
     expect(off.calls.some((c) => c.name === 'air_quality')).toBe(false);
-    expect(r.text).not.toMatch(/AIRNOW_API_KEY|Air quality/);
+    expect(line(r.text, 'Air quality')).toBe(
+      '- Air quality (AirNow): not configured (AIRNOW_API_KEY)',
+    );
+    expect(r.data.sources.find((s) => s.source === 'air_quality')).toMatchObject({
+      status: 'not_configured',
+    });
     const on = await harness().run(DETROIT);
     expect(line(on.text, 'Air quality (AirNow)')).toMatch(/AQI 42 \(Good\)/);
   });

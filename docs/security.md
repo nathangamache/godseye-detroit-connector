@@ -305,7 +305,7 @@ as a location read.
 | `water_levels_near` | `api.tidesandcurrents.noaa.gov` | none | NOAA CO-OPS, public domain | station list 24 h, flood levels 24 h |
 | | `api.waterdata.usgs.gov` | `USGS_API_KEY` (header `X-Api-Key`), else the shared `DEMO_KEY` | USGS, public domain; values provisional | 10 min (DEMO_KEY limits are low); 20/h for the tool |
 | | `api.water.noaa.gov` (NWPS) | none | NOAA NWS, public domain | gauge list 10 min, flood stages 24 h |
-| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **off** without it | AirNow Data Exchange Guidelines: preliminary data, credit the agency (as AirNow names it; Michigan EGLE in Michigan) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
+| `air_quality` | `www.airnowapi.org` | `AIRNOW_API_KEY` (query `API_KEY`); **OFF** without it (listed, answers `not_configured`, fetches nothing) | AirNow Data Exchange Guidelines: preliminary data, credit the agency (as AirNow names it; Michigan EGLE in Michigan) and EPA AirNow, never alter values or advisories, make the use known to the agencies and AirNow | 30 min; 30/h |
 
 * AirNow retired its old lat/long services on 2026-09-30 (its June 2026 notice). The tool asks
   only the replacement services (`/aq/observation/current/ziplatlong/`, `/aq/forecast/current/`)

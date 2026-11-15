@@ -1,5 +1,6 @@
 /**
- * EPA AirNow (www.airnowapi.org, free key in AIRNOW_API_KEY; off without one): current AQI
+ * EPA AirNow (www.airnowapi.org, free key in AIRNOW_API_KEY; OFF without one, answering
+ * not_configured and fetching nothing): current AQI
  * observations and forecasts for the reporting area AirNow matches to a point.
  *
  * AirNow's Data Exchange Guidelines: observations are preliminary and must be shown as such;
@@ -21,7 +22,8 @@
  * answer, not an error.
  */
 import { z } from 'zod';
-import type { ToolDef, ToolOutput } from '../../tools/types.js';
+import { notConfiguredOutput } from '../../tools/keygate.js';
+import type { MissingKey, ToolDef, ToolOutput } from '../../tools/types.js';
 import {
   LOCATION_SHAPE,
   TtlCache,
@@ -40,7 +42,11 @@ import {
 import { HttpClient, UpstreamError } from './http.js';
 
 export const AIRNOW_HOST = 'www.airnowapi.org';
-export const AIRNOW_OFF_REASON = 'not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env';
+/** air_quality without a key: listed as OFF and answering not_configured (src/tools/keygate.ts). */
+export const AIRNOW_MISSING_KEY: MissingKey = {
+  env: 'AIRNOW_API_KEY',
+  what: 'a free EPA AirNow API key from docs.airnowapi.org',
+};
 export const AIRNOW_ATTRIBUTION =
   'Preliminary data, not fully verified; source: the reporting air quality agency (Michigan EGLE for Michigan) and U.S. EPA AirNow (airnow.gov)';
 const CACHE_MS = 30 * 60_000;
@@ -406,13 +412,9 @@ export function airnowTools(deps: AirnowToolDeps): ToolDef[] {
       tags: AQ_TAGS,
       attribution: AIRNOW_ATTRIBUTION,
       untrustedText: true,
+      ...(airnow.configured ? {} : { needsKey: AIRNOW_MISSING_KEY }),
       async run(args, ctx) {
-        if (!airnow.configured)
-          return {
-            summary: `air_quality is ${AIRNOW_OFF_REASON}.`,
-            isError: true,
-            errorKind: 'unavailable',
-          };
+        if (!airnow.configured) return notConfiguredOutput('air_quality', AIRNOW_MISSING_KEY);
         const a = parseArgs(AQ_ARGS, args, 'air_quality');
         if (!a.ok) return a.out;
         const r = resolvePoint('air_quality', a.value, ctx, deps.phone);

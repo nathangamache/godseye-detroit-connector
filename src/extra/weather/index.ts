@@ -3,14 +3,14 @@
  *   weather_alerts     NWS active alerts for a point           (keyless)
  *   weather_forecast   NWS 12-hour or hourly forecast          (keyless)
  *   water_levels_near  NOAA CO-OPS, USGS and NWS NWPS levels   (USGS_API_KEY optional)
- *   air_quality        EPA AirNow AQI and forecast             (AIRNOW_API_KEY; off without)
+ *   air_quality        EPA AirNow AQI and forecast             (AIRNOW_API_KEY; OFF without)
  * Every tool takes {lat, lon} or {here: true} (the latest phone fix, audited as a location read).
  */
 import { parseRateLimits, type Config } from '../../config.js';
 import type { Logger } from '../../log.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { ToolDef } from '../../tools/types.js';
-import { AIRNOW_OFF_REASON, AirnowClient, airnowTools } from './airnow.js';
+import { AirnowClient, airnowTools } from './airnow.js';
 import type { PhoneDeps } from './common.js';
 import { HttpClient, type FetchLike } from './http.js';
 import { NwsClient, nwsTools } from './nws.js';
@@ -38,7 +38,10 @@ export interface WeatherDeps {
   retryDelaysMs?: number[];
 }
 
-/** Registers the four tools, their default quotas, and switches air_quality off without a key. */
+/**
+ * Registers the four tools and their default quotas. Without AIRNOW_API_KEY, air_quality stays
+ * listed as OFF and answers not_configured (src/tools/keygate.ts) without fetching anything.
+ */
 export function registerWeatherTools(deps: WeatherDeps): ToolDef[] {
   const { config, registry } = deps;
   const now = deps.now ?? Date.now;
@@ -62,7 +65,6 @@ export function registerWeatherTools(deps: WeatherDeps): ToolDef[] {
     ...airnowTools({ airnow: new AirnowClient(http, config.AIRNOW_API_KEY, now), phone }),
   ];
   registry.policy.addDefaultLimits(parseRateLimits(config.WEATHER_TOOL_RATE_LIMITS));
-  if (!config.AIRNOW_API_KEY) registry.policy.switchOff('air_quality', AIRNOW_OFF_REASON);
   for (const t of tools) registry.register(t);
   deps.logger?.info('weather_tools', {
     tools: tools.map((t) => t.name),

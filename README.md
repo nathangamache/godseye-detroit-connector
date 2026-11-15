@@ -24,8 +24,9 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 ## Tools
 
 Claude calls the first four directly; every other tool goes through `find_tools` (search or
-list by category) and `run_tool`. A tool whose requirement is missing is hidden or answers with
-the setting to add. Gateway settings live in `deploy/secrets/gateway.env` (`.env.example` lists
+list by category) and `run_tool`. A gateway tool whose API key is missing is listed as **OFF**
+with the key it needs and answers a normal result with status `not_configured` (nothing is
+fetched); other missing requirements are hidden or answer with the setting to add. Gateway settings live in `deploy/secrets/gateway.env` (`.env.example` lists
 them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 
 | Tool | Source | What it answers | Key / requirement |
@@ -39,11 +40,11 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `rail_activity_near` | Pulse | rail voice and EOT/HOT traffic near a point, with Pulse's verdict (quiet only on Pulse's proof) | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) with its own SDR receivers |
 | `incidents_near`, `incident_detail`, `search_transcripts`, `feeds_status` | Pulse | scanner incidents, their transcripts, transcript search, feed and receiver status | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) |
 | `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
-| `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (off without) |
+| `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `local_headlines` | gateway (civic) | recent GDELT headlines for a place or point | none |
 | `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
 | `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
-| `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (off without) |
+| `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `road_closures` | gateway (roads) | closures, crashes, lane closures and work zones near a point or along a road | none for Detroit permits; `MDOT_RIDE_API_KEY`, `ONTARIO_511_API_KEY`, and `TOMTOM_API_KEY` with `ALLOW_TOMTOM_INCIDENTS=true` add their sources |
 | `geocode_place` | gateway (roads) | coordinates for a place, address or intersection | none; intersections need a self-hosted Overpass (`OVERPASS_URL`, `docs/overpass.md`) |
 | `route_avoiding_closures` | gateway (roads) | a driving route around full closures | none (`VALHALLA_URL`, FOSSGIS by default) |
@@ -208,7 +209,7 @@ every result carries its source's credit.
 | `weather_alerts` | active NWS watches, warnings and advisories for the point: event, severity, urgency, certainty, headline, description, instruction, areas, onset, ends, issuing office, link; "No active alerts for zone …" when there are none | NWS `api.weather.gov` (public domain) | none |
 | `weather_forecast` | 12-hour periods (up to 7 days) or hourly (`hourly: true`), `periods` 1-14: temperature, wind, chance of precipitation, forecast text | NWS `/points` → forecast / forecastHourly; office/grid cached per ~1 km cell for 12 h; points NWS doesn't cover are remembered for 12 h (per ~100 m) or, far from every US area, never sent | none |
 | `water_levels_near` | Great Lakes and tide stations, stream gages and NWS river gauges within `radius_km` (5-60): value, units, datum, ~3 h trend, flood stage and NWS flood category when known, update time | NOAA CO-OPS, USGS Water Data OGC API, NWS National Water Prediction Service (public domain) | `USGS_API_KEY` optional (else the shared `DEMO_KEY`) |
-| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **off** without it (`not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env`) |
+| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **OFF** without it: listed with the key it needs, and every call answers status `not_configured` (`air_quality is not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env (…). Nothing was fetched.`) |
 
 Quotas (`WEATHER_TOOL_RATE_LIMITS`, overridable per bucket in `TOOL_RATE_LIMITS`): alerts 120/h,
 forecast 60/h, water levels 20/h, air quality 30/h. Outbound requests use https only, a fixed host
@@ -226,7 +227,7 @@ generic User-Agent, caps its output, labels it untrusted third-party data and cr
 | Tool | What it answers | Source (key) | Notes |
 |---|---|---|---|
 | `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": the result says how old the newest record is; nearest intersection only, never a house address; Detroit city limits only |
-| `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **off** without it); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
+| `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **OFF** without it, answering `not_configured`); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
 | `local_headlines` | Recent headlines mentioning a place (`place`, or a point turned into the town there) | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | at most one GDELT request every 5 s per process (queued), 10-minute cache; headlines are untrusted third-party text |
 
 GEV's `get_transit_vehicles` no longer advertises DDOT, SMART or QLINE: its feed registry has no
