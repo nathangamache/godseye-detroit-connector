@@ -420,7 +420,8 @@ export function detroitRowSource(o: DetroitRowOptions): ClosureSource {
           note: `${segs} permit segment(s); street name looked up from the map${segs > 1 ? ' at the segment shown' : ''}; full_closure is inferred from the permit text`,
         });
       }
-      const age = `permit snapshot ${humanAge(Math.round(ageMs / 1000))} old (refreshed every ${Math.round(o.snapshot.refreshMs / 60_000)} min)`;
+      const howOld = ageMs < 60_000 ? 'under a minute' : humanAge(Math.round(ageMs / 1000));
+      const age = `permit snapshot ${howOld} old (refreshed every ${Math.round(o.snapshot.refreshMs / 60_000)} min)`;
       const stale = refreshError
         ? `the last refresh failed (${refreshError}), so this is the last good copy`
         : undefined;

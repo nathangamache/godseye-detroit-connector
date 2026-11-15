@@ -764,6 +764,10 @@ const CLOSED_SB: Array<[number, number]> = [
 
 describe('one item per closed stretch', () => {
   const TT_ONLY = { ...ALL_KEYS, MDOT_RIDE_API_KEY: '', ONTARIO_511_API_KEY: '' };
+  const tomtomWith = (...extra: Array<Record<string, unknown>>): [RegExp, Handler] => [
+    /api\.tomtom\.com/,
+    () => json({ incidents: [...TOMTOM.incidents, ...extra] }),
+  ];
 
   it('merges a TomTom closure reported once per direction, and counts it once', async () => {
     const x = h(
@@ -808,6 +812,63 @@ describe('one item per closed stretch', () => {
     // Counts are after merging.
     expect(sourcesOf(out).find((s) => s.source === 'tomtom')!.count).toBe(3);
     expect((out.data as { count: number }).count).toBe(itemsOf(out).length);
+  });
+
+  it('lists each stretch once in the summary: road, what, cross streets, direction, distance', async () => {
+    const x = h(
+      {
+        ...TT_ONLY,
+        OVERPASS_URL: 'http://overpass.invalid/api/interpreter',
+        DETROIT_ROW_ENABLED: 'false',
+      },
+      {
+        routes: [
+          [
+            /api\.tomtom\.com/,
+            () =>
+              json({
+                incidents: [
+                  ...TOMTOM.incidents,
+                  unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St'),
+                  unnamedClosure('tt-sb', CLOSED_SB, 'Bravo St', 'Alpha St'),
+                ],
+              }),
+          ],
+          [/overpass\.invalid/, () => json(NEAR_WAYS)],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    expect(out.summary).toContain(
+      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (1.9 km away).',
+    );
+    // Along a road, the length of the stretch stands in for the distance.
+    const byRoad = await x.run('road_closures', { road: 'Charlie Avenue' });
+    expect(byRoad.summary).toContain(
+      '1 closure, incident and work-zone item(s) on Charlie Avenue in SE Michigan and Windsor/Essex (in effect now; from 2 source reports, each stretch counted once), 1 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 334 m long).',
+    );
+  });
+
+  it('says when a road is unknown or a closure is full, and how many more are in items', async () => {
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      { routes: [tomtomWith(unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St'))] },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    expect(out.summary).toContain(
+      ': Unknown road: road closed between Alpha St and Bravo St (0.5 km away);',
+    );
+    const permits = await h().run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permits.summary).toContain(
+      '3 closure, incident and work-zone item(s) within 3 km of 42.3314, -83.0458 (in effect now), 1 full closure(s): Woodward Avenue: permit: Water Tap (Eastbound, 0.1 km away); First Street: permit: Barricade, full closure (Southbound, 0.6 km away); Woodward Avenue: permit: Dumpster (0.6 km away).',
+    );
+    expect(permits.summary).toContain(
+      'City of Detroit permits: 3 (permit snapshot under a minute old (refreshed every 15 min))',
+    );
+    const all = await h(ALL_KEYS).run('road_closures', { ...DETROIT, radius_km: 8 });
+    expect(itemsOf(all)).toHaveLength(8);
+    expect(all.summary).toMatch(/; 5 more in items\. Sources:/);
+    expect(all.summary).not.toContain('source reports');
   });
 
   it('merges reports whose lines overlap, but not a shorter stretch or other work', async () => {

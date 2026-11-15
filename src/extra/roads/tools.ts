@@ -144,20 +144,27 @@ const closuresSchema = z
   })
   .superRefine((v, c) => whereRule(v, c, true));
 
-function closureSentence(p: PublicItem): string {
-  const where = p.road
-    ? ` on ${p.road}${p.direction ? ` ${p.direction}` : ''}`
-    : p.direction
-      ? ` (${p.direction})`
-      : '';
+/** Items the road_closures summary spells out (the rest are in data.items). */
+const SUMMARY_ITEMS = 3;
+
+/** "<Road>: <what> between <A> and <B> (<direction>, <distance>)". */
+export function closureSentence(p: PublicItem): string {
+  const what = p.full_closure && !/\bclos/i.test(p.type) ? `${p.type}, full closure` : p.type;
   const cross =
     p.from_cross_street && p.to_cross_street
       ? ` between ${p.from_cross_street} and ${p.to_cross_street}`
       : p.from_cross_street
         ? ` at ${p.from_cross_street}`
         : '';
-  const dist = p.distance_km !== null ? `, ${p.distance_km} km away` : '';
-  return `${p.full_closure ? 'FULL CLOSURE: ' : ''}${p.type}${where}${cross} (${p.source}${dist})`;
+  // How far from the point asked about; for a road-only search, how long the stretch is.
+  const distance =
+    p.distance_km !== null
+      ? `${p.distance_km} km away`
+      : / long$/.test(p.geometry_summary)
+        ? p.geometry_summary
+        : null;
+  const tail = [p.direction, distance].filter(Boolean).join(', ');
+  return `${p.road ?? 'Unknown road'}: ${what}${cross}${tail ? ` (${tail})` : ''}`;
 }
 
 function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
@@ -237,11 +244,17 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
         ? `within ${radiusKm} km of ${where.phone ? "the phone's position" : `${a.lat}, ${a.lon}`}`
         : 'in SE Michigan and Windsor/Essex';
       const what = `${include.size === 2 ? 'closure, incident and work-zone' : include.has('incident') ? 'incident' : 'work-zone'} item(s)`;
+      // The count is of stretches: reports of one stretch per direction are one item.
+      const merged = ans.merged
+        ? `; from ${items.length + ans.merged} source reports, each stretch counted once`
+        : '';
+      const more =
+        items.length > SUMMARY_ITEMS ? `; ${items.length - SUMMARY_ITEMS} more in items` : '';
       const lead = items.length
-        ? `${items.length} ${what}${road ? ` on ${road.text}` : ''} ${area} (${when === 'now' ? 'in effect now' : 'planned'}), ${full} full closure(s). ${items
-            .slice(0, 3)
+        ? `${items.length} ${what}${road ? ` on ${road.text}` : ''} ${area} (${when === 'now' ? 'in effect now' : 'planned'}${merged}), ${full} full closure(s): ${items
+            .slice(0, SUMMARY_ITEMS)
             .map(closureSentence)
-            .join('; ')}.`
+            .join('; ')}${more}.`
         : `No ${what}${road ? ` on ${road.text}` : ''} found ${area} (${when === 'now' ? 'in effect now' : 'planned'}) in the sources checked. That is not proof the road is open: only the sources below were checked.`;
       const checked = `Sources: ${ans.reports.map(reportSentence).join('; ')}.`;
       const unchecked = ans.unchecked
