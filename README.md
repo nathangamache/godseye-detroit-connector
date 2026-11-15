@@ -131,9 +131,9 @@ latest fix and is audited as a location read.
 
 | Tool | What it answers | Sources (keys) |
 |---|---|---|
-| `road_closures` | Closures, crashes, lane closures and work zones near `lat`/`lon`, `here` or along a `road` (`radius_km` 1-50, `include` incidents/work_zones, `when` now/planned): source, road, direction, type, lanes and vehicle impact, description, from/to cross street, start, end, updated, distance_km, plus which sources were checked | City of Detroit right-of-way permits (keyless); MDOT RIDE work zones (WZDx v4) and traffic events (`MDOT_RIDE_API_KEY`); Ontario 511 events and construction, Windsor/Essex only (`ONTARIO_511_API_KEY`); TomTom Incident Details (`TOMTOM_API_KEY` and `ALLOW_TOMTOM_INCIDENTS=true`) |
+| `road_closures` | Closures, crashes, lane closures and work zones near `lat`/`lon`, `here` or along a `road` (`radius_km` 1-50, `include` incidents/work_zones, `when` now/planned): source, road, direction, type, lanes and vehicle impact, description, from/to cross street, start, end, updated, distance_km, plus which sources were checked | City of Detroit right-of-way permits (keyless); MDOT RIDE work zones (WZDx v4) and traffic events (`MDOT_RIDE_API_KEY`); Ontario 511 events and construction, Windsor/Essex only (`ONTARIO_511_API_KEY`); TomTom Incident Details (`TOMTOM_API_KEY` and `ALLOW_TOMTOM_INCIDENTS=true`; a road TomTom names only by its cross streets is named from the self-hosted Overpass, `OVERPASS_URL`) |
 | `geocode_place` | Coordinates for a place, street address or intersection (`near`, `limit` 1-5), biased to SE Michigan | US Census Geocoder (addresses), Photon, public Nominatim as a capped last resort; intersections through a self-hosted Overpass (`OVERPASS_URL`): a node both roads share, else (grade-separated freeway interchanges) where one road's ways pass within 30 m of the other's |
-| `route_avoiding_closures` | Driving route between places, addresses, `here` or lat/lon, around full closures (`avoid_closures`, `units`): distance, duration (no live traffic), maneuvers with street names, closures_avoided, warnings | Valhalla on FOSSGIS (`VALHALLA_URL`) with exclude_polygons from the open-data closure sources (never TomTom) |
+| `route_avoiding_closures` | Driving route between places, addresses, `here` or lat/lon, around full closures (`avoid_closures`, `units`): distance, duration (no live traffic), maneuvers with street names, closures_avoided, warnings; the summary says plainly when no closure source answered (the route then does not account for closures) and when TomTom is left out for its licence | Valhalla on FOSSGIS (`VALHALLA_URL`) with exclude_polygons from the open-data closure sources (never TomTom) |
 | `mdot_camera_link` | A Mi Drive map link with the camera layer, centred on a point, `here` or a road | Link only: no image is fetched (Michigan.gov terms) |
 | `border_wait_times` | Waits at the Ambassador Bridge, the tunnel, Gordie Howe and Blue Water (`crossing`, `direction`): delay, lanes open, lane type, updated, source | CBP Border Wait Times (U.S.-bound), CBSA CSV (Canada-bound), keyless |
 
@@ -141,9 +141,16 @@ latest fix and is audited as a location read.
   (`not configured: set MDOT_RIDE_API_KEY in deploy/secrets/gateway.env`). Each source fails on
   its own: one down never sinks the others, and "none found" is reported as "not proof the road
   is open", with the list of sources checked.
+* A stretch a source reports once per direction (between the same cross streets, in either
+  order, within 300 m, on the same named road or, unnamed, with lines that run within 60 m of
+  each other as a divided road's carriageways do; or lines that overlap by 70% or more) is one
+  item, direction "both directions". Parallel streets closed between the same cross streets stay
+  separate items. Counts are after merging, and the merged item keeps both directions' geometry
+  for routing.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
-  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; MDOT RIDE is polled at most every
-  5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
+  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; the City of Detroit permits are
+  one in-memory snapshot refreshed every 15 minutes (the last good copy is kept when a refresh
+  fails, and results say how old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
   minute; Valhalla and Nominatim get at most one request a second; Nominatim at most
   `GEOCODER_NOMINATIM_DAILY_MAX` (50) a day and the shared `nominatim` bucket; border feeds are
   cached 5 minutes.

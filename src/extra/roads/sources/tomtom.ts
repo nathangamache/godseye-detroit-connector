@@ -7,6 +7,11 @@
  * and Incident Details sends none. A hard daily cap (TOMTOM_INCIDENTS_DAILY_MAX, counted on disk
  * so a restart does not reset it) bounds use. Not used for routing (TomTom's terms exclude
  * navigation use from the free grant).
+ *
+ * An incident on a road without a route number has no road name in the API (only roadNumbers;
+ * from/to are the cross streets). Its road is then the named road nearest the incident's
+ * midpoint in our own OpenStreetMap copy (the self-hosted Overpass, never an outside geocoder),
+ * looked up only for the items a result shows and never cached.
  */
 import {
   QuotaError,
@@ -15,7 +20,16 @@ import {
   type FetchResult,
   type RoadItem,
 } from '../closures.js';
-import { clampBox, clampToWorld, round6, type BBox, type LonLat } from '../geo.js';
+import { ATTRIBUTION as GEO_ATTRIBUTION } from '../geocode.js';
+import {
+  clampBox,
+  clampToWorld,
+  lineMidpoint,
+  round6,
+  type BBox,
+  type LonLat,
+  type Point,
+} from '../geo.js';
 import type { DailyCounter, Http } from '../http.js';
 import { cleanText } from '../text.js';
 
@@ -44,12 +58,20 @@ const MAGNITUDE: Record<number, string> = {
   3: 'major delay',
 };
 
+/** How far from the incident's midpoint the road it is on may be (OpenStreetMap lookup). */
+export const TOMTOM_ROAD_RADIUS_M = 25;
+
+/** The named road at a point, from the self-hosted Overpass (uncached), or null. */
+export type RoadAt = (p: Point, radiusM: number, signal: AbortSignal) => Promise<string | null>;
+
 export interface TomTomOptions {
   http: Http;
   baseUrl: string;
   key?: string;
   allowed: boolean;
   daily: DailyCounter;
+  /** Unset (no OVERPASS_URL): an incident without a route number stays unnamed. */
+  roadAt?: RoadAt;
 }
 
 function coords(g: { type?: unknown; coordinates?: unknown } | undefined): LonLat[] {
@@ -64,7 +86,7 @@ function coords(g: { type?: unknown; coordinates?: unknown } | undefined): LonLa
     .map((p) => [p[0], p[1]] as LonLat);
 }
 
-export function parseTomTom(j: unknown): RoadItem[] {
+export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
   const list = (j as { incidents?: unknown })?.incidents;
   if (!Array.isArray(list)) return [];
   const out: RoadItem[] = [];
@@ -111,9 +133,24 @@ export function parseTomTom(j: unknown): RoadItem[] {
       end: cleanText(p.endTime, 40),
       updated: cleanText(p.lastReportTime, 40),
       lines: [line],
+      ...(roads ? {} : unnamed(line, roadAt)),
     });
   }
   return out;
+}
+
+/** An incident TomTom gives no road for: the lookup, its credit and a note saying so. */
+function unnamed(line: LonLat[], roadAt?: RoadAt): Partial<RoadItem> {
+  if (!roadAt)
+    return {
+      note: 'TomTom gives no road name here; set OVERPASS_URL to name the road from OpenStreetMap',
+    };
+  const mid = lineMidpoint(line);
+  return {
+    resolveRoad: (signal) => roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal),
+    roadCredit: GEO_ATTRIBUTION.overpass,
+    note: `TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`,
+  };
 }
 
 export function tomtomSource(o: TomTomOptions): ClosureSource {
@@ -162,7 +199,7 @@ export function tomtomSource(o: TomTomOptions): ClosureSource {
       const clipped =
         box !== world ? 'searched the 10,000 km² TomTom allows around the centre' : undefined;
       return {
-        items: parseTomTom(j),
+        items: parseTomTom(j, o.roadAt),
         note: [trimmed, clipped, `${o.daily.remaining()} of ${o.daily.max} requests left today`]
           .filter(Boolean)
           .join('; '),

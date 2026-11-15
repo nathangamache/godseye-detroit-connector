@@ -12,7 +12,7 @@ import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
 import { registerCivicTools } from './extra/civic/index.js';
-import { registerRoads } from './extra/roads/index.js';
+import { registerRoads, type RoadsHandle } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
 import { makeGevCaller } from './gev/tools.js';
@@ -66,6 +66,8 @@ export interface GatewayCore {
   gev?: GevChild;
   rail?: RailIndex;
   aviation: AviationHandle;
+  /** The roads tools' background work (the City of Detroit permit snapshot). */
+  roads: RoadsHandle;
   now: () => number;
 }
 
@@ -170,7 +172,15 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     now,
     fetchImpl: fetchOverride,
   });
-  registerRoads(registry, { config, locations, audit, tokens, logger, now, fetch: fetchOverride });
+  const roads = registerRoads(registry, {
+    config,
+    locations,
+    audit,
+    tokens,
+    logger,
+    now,
+    fetch: fetchOverride,
+  });
   registerCivicTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
@@ -205,6 +215,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     stepup,
     rail,
     aviation,
+    roads,
     now,
   };
 }
@@ -303,6 +314,7 @@ export async function startGateway(
   core.locations.prune();
   core.audit.prune();
   core.aviation.start();
+  core.roads.start();
 
   logger.info('gateway_listening', {
     public: `${config.HOST}:${port}`,
@@ -334,6 +346,7 @@ export async function startGateway(
     async close() {
       clearInterval(prune);
       core.aviation.stop();
+      core.roads.stop();
       await core.gev?.stop();
       await Promise.all([closeServer(server), closeServer(privateServer), closeServer(uiServer)]);
       core.db.close();

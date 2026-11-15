@@ -2,7 +2,8 @@
  * Roads and places (gateway-native): road_closures, geocode_place, route_avoiding_closures,
  * mdot_camera_link, border_wait_times. One call registers them all:
  *
- *   registerRoads(registry, { config, locations, audit, tokens, logger, now })
+ *   const roads = registerRoads(registry, { config, locations, audit, tokens, logger, now });
+ *   roads.start();                    // once the gateway listens: the city permit snapshot
  *
  * Sources that need a key stay off until it is in deploy/secrets/gateway.env (each result says
  * which variable to set). Disk state (the geocoder cache, daily-cap counters) lives in
@@ -20,7 +21,7 @@ import { ClosureService } from './closures.js';
 import { Geocoder } from './geocode.js';
 import { DailyCounter, DiskCache, Http, Pacer, type FetchLike } from './http.js';
 import { valhallaRouter } from './route.js';
-import { detroitRowSource } from './sources/detroitRow.js';
+import { PermitSnapshot, detroitRowSource } from './sources/detroitRow.js';
 import { mdotRideSource } from './sources/mdotRide.js';
 import { ontario511Source } from './sources/ontario511.js';
 import { tomtomSource } from './sources/tomtom.js';
@@ -28,6 +29,7 @@ import { roadsTools, type RoadsToolDeps } from './tools.js';
 
 export type RoadsConfig = Pick<
   Config,
+  | 'mode'
   | 'DATA_DIR'
   | 'LOCATION_STALE_MINUTES'
   | 'ROADS_USER_AGENT'
@@ -72,7 +74,18 @@ export interface RoadsDeps {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
-export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDeps): RoadsToolDeps {
+/** The tools' dependencies, plus the background work (the city permit snapshot). */
+export interface RoadsRuntime extends RoadsToolDeps {
+  permits: PermitSnapshot;
+}
+
+export interface RoadsHandle {
+  /** Starts the background refresh of the city permit snapshot (not in test mode). */
+  start(): void;
+  stop(): void;
+}
+
+export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDeps): RoadsRuntime {
   const c = deps.config;
   const now = deps.now ?? Date.now;
   const cacheDir = path.join(c.DATA_DIR, 'cache');
@@ -115,14 +128,17 @@ export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDe
     photonPacer: new Pacer(250, now, deps.sleep),
     nominatimBucket: registry ? () => registry.policy.consumeRate(['nominatim']).ok : undefined,
   });
+  const permits = new PermitSnapshot({
+    http,
+    baseUrl: c.DETROIT_ROW_URL,
+    now,
+    onError: (err) =>
+      deps.logger?.warn('roads_permit_snapshot_failed', {
+        error: (err as Error)?.message?.slice(0, 160),
+      }),
+  });
   const sources = [
-    detroitRowSource({
-      http,
-      baseUrl: c.DETROIT_ROW_URL,
-      enabled: c.DETROIT_ROW_ENABLED,
-      geocoder,
-      now,
-    }),
+    detroitRowSource({ enabled: c.DETROIT_ROW_ENABLED, geocoder, snapshot: permits }),
     mdotRideSource({
       http,
       baseUrl: c.MDOT_RIDE_URL,
@@ -145,6 +161,10 @@ export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDe
       baseUrl: c.TOMTOM_API_URL,
       key: c.TOMTOM_API_KEY,
       allowed: c.ALLOW_TOMTOM_INCIDENTS,
+      // Our own OpenStreetMap copy names roads TomTom leaves unnamed; never an outside geocoder.
+      roadAt: geocoder.overpassConfigured
+        ? (p, radiusM, signal) => geocoder.nearestRoad(p, radiusM, signal)
+        : undefined,
       daily: new DailyCounter(
         path.join(cacheDir, 'tomtom-incidents-usage.json'),
         c.TOMTOM_INCIDENTS_DAILY_MAX,
@@ -163,6 +183,7 @@ export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDe
       }),
   });
   return {
+    permits,
     closures,
     geocoder,
     router: valhallaRouter({
@@ -187,7 +208,16 @@ export function buildRoadsDeps(registry: ToolRegistry | undefined, deps: RoadsDe
  * Registers the roads tools and their default quotas (already in config.toolRateLimits for a
  * loaded config); a bucket the operator set in TOOL_RATE_LIMITS keeps that setting.
  */
-export function registerRoads(registry: ToolRegistry, deps: RoadsDeps): void {
+export function registerRoads(registry: ToolRegistry, deps: RoadsDeps): RoadsHandle {
   registry.policy.addDefaultLimits(parseRateLimits(deps.config.ROADS_TOOL_RATE_LIMITS));
-  for (const t of roadsTools(buildRoadsDeps(registry, deps))) registry.register(t);
+  const built = buildRoadsDeps(registry, deps);
+  for (const t of roadsTools(built)) registry.register(t);
+  return {
+    start() {
+      if (deps.config.DETROIT_ROW_ENABLED && deps.config.mode !== 'test') built.permits.start();
+    },
+    stop() {
+      built.permits.stop();
+    },
+  };
 }

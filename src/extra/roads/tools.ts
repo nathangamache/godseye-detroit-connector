@@ -144,20 +144,27 @@ const closuresSchema = z
   })
   .superRefine((v, c) => whereRule(v, c, true));
 
+/** Items the road_closures summary spells out (the rest are in data.items). */
+const SUMMARY_ITEMS = 3;
+
+/** "<Road>: <what> between <A> and <B> (<direction>, <distance>)". */
 function closureSentence(p: PublicItem): string {
-  const where = p.road
-    ? ` on ${p.road}${p.direction ? ` ${p.direction}` : ''}`
-    : p.direction
-      ? ` (${p.direction})`
-      : '';
+  const what = p.full_closure && !/\bclos/i.test(p.type) ? `${p.type}, full closure` : p.type;
   const cross =
     p.from_cross_street && p.to_cross_street
       ? ` between ${p.from_cross_street} and ${p.to_cross_street}`
       : p.from_cross_street
         ? ` at ${p.from_cross_street}`
         : '';
-  const dist = p.distance_km !== null ? `, ${p.distance_km} km away` : '';
-  return `${p.full_closure ? 'FULL CLOSURE: ' : ''}${p.type}${where}${cross} (${p.source}${dist})`;
+  // How far from the point asked about; for a road-only search, how long the stretch is.
+  const distance =
+    p.distance_km !== null
+      ? `${p.distance_km} km away`
+      : / long$/.test(p.geometry_summary)
+        ? p.geometry_summary
+        : null;
+  const tail = [p.direction, distance].filter(Boolean).join(', ');
+  return `${p.road ?? 'Unknown road'}: ${what}${cross}${tail ? ` (${tail})` : ''}`;
 }
 
 function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
@@ -237,15 +244,21 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
         ? `within ${radiusKm} km of ${where.phone ? "the phone's position" : `${a.lat}, ${a.lon}`}`
         : 'in SE Michigan and Windsor/Essex';
       const what = `${include.size === 2 ? 'closure, incident and work-zone' : include.has('incident') ? 'incident' : 'work-zone'} item(s)`;
+      // The count is of stretches: reports of one stretch per direction are one item.
+      const merged = ans.merged
+        ? `; from ${items.length + ans.merged} source reports, each stretch counted once`
+        : '';
+      const more =
+        items.length > SUMMARY_ITEMS ? `; ${items.length - SUMMARY_ITEMS} more in items` : '';
       const lead = items.length
-        ? `${items.length} ${what}${road ? ` on ${road.text}` : ''} ${area} (${when === 'now' ? 'in effect now' : 'planned'}), ${full} full closure(s). ${items
-            .slice(0, 3)
+        ? `${items.length} ${what}${road ? ` on ${road.text}` : ''} ${area} (${when === 'now' ? 'in effect now' : 'planned'}${merged}), ${full} full closure(s): ${items
+            .slice(0, SUMMARY_ITEMS)
             .map(closureSentence)
-            .join('; ')}.`
+            .join('; ')}${more}.`
         : `No ${what}${road ? ` on ${road.text}` : ''} found ${area} (${when === 'now' ? 'in effect now' : 'planned'}) in the sources checked. That is not proof the road is open: only the sources below were checked.`;
       const checked = `Sources: ${ans.reports.map(reportSentence).join('; ')}.`;
       const unchecked = ans.unchecked
-        ? ` ${ans.unchecked} nearby Detroit permit(s) were not checked against the road name (street lookups are capped per call).`
+        ? ` ${ans.unchecked} nearby item(s) without a road name were not checked against the road asked for (street lookups are capped per call).`
         : '';
       const ontario = ans.items.some((i) => i.source === 'ontario511')
         ? ` ${ONTARIO_DISCLAIMER}`
@@ -294,8 +307,9 @@ const geocodeSchema = z.strictObject({
   limit: z.number().int().min(1).max(5).optional().describe('Most matches (default 3)'),
 });
 
+/** A place as the summary shows it; which geocoder found it is in data (source, attribution). */
 function placeLine(p: Place): string {
-  return `${p.name}${p.address && p.address !== p.name ? ` (${p.address})` : ''} at ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} [${p.source}${p.distance_km !== undefined ? `, ${p.distance_km} km away` : ''}]`;
+  return `${p.name}${p.address && p.address !== p.name ? ` (${p.address})` : ''} at ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}${p.distance_km !== undefined ? `, ${p.distance_km} km away` : ''}`;
 }
 
 function geocodeTool(deps: RoadsToolDeps): ToolDef {
@@ -387,12 +401,16 @@ async function resolveEndpoint(
   ctx: ToolContext,
   near: Point | undefined,
 ): Promise<
-  { point: Point; label: string; note?: string; attribution?: string } | { error: string }
+  | { point: Point; label: string; source: string; note?: string; attribution?: string }
+  | { error: string }
 > {
-  if (typeof v !== 'string') return { point: v, label: `${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}` };
+  if (typeof v !== 'string')
+    return { point: v, label: `${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}`, source: 'coordinates' };
   if (v.trim().toLowerCase() === 'here') {
     const h = resolveHere(deps.here, 'route_avoiding_closures', ctx);
-    return h.ok ? { point: h.point, label: 'the phone', note: h.note } : { error: h.error };
+    return h.ok
+      ? { point: h.point, label: 'the phone', source: 'phone', note: h.note }
+      : { error: h.error };
   }
   const r = await deps.geocoder.search(v, { near, limit: 1 }, ctx.signal);
   const p = r.places[0];
@@ -400,9 +418,11 @@ async function resolveEndpoint(
     return {
       error: `Could not find "${cleanText(v, 80)}" (tried ${r.attempts.map((t) => `${t.source} ${t.status}`).join(', ')}). Pass {lat, lon} instead.`,
     };
+  // The label is the place's name only; the geocoder goes in data and the attribution.
   return {
     point: { lat: p.lat, lon: p.lon },
-    label: `${p.name} [${p.source}]`,
+    label: p.name,
+    source: p.source,
     attribution: p.attribution,
   };
 }
@@ -475,12 +495,14 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
           data: {
             from: from.label,
             to: to.label,
+            located_by: { from: from.source, to: to.source },
             distance: r.distance,
             units,
             duration_min: r.duration_min,
             maneuvers: r.maneuvers,
             ...(r.maneuvers_truncated ? { maneuvers_truncated: r.maneuvers_truncated } : {}),
             closures_avoided: r.closures_avoided,
+            closures_accounted_for: r.closure_data === 'used',
             warnings: r.warnings,
             ...(r.sources ? { closure_sources: r.sources } : {}),
             note: 'Durations assume free-flowing traffic (no live traffic data).',
@@ -547,6 +569,7 @@ function cameraTool(deps: RoadsToolDeps): ToolDef {
       let center = where.point;
       let located = where.phone ? 'phone' : 'coordinates';
       let attribution: string | undefined;
+      let geocoder: string | undefined;
       if (!center && a.road) {
         const r = await deps.geocoder.search(a.road, { limit: 1 }, ctx.signal);
         const p = r.places[0];
@@ -556,7 +579,8 @@ function cameraTool(deps: RoadsToolDeps): ToolDef {
             'not_found',
           );
         center = { lat: p.lat, lon: p.lon };
-        located = `${p.name} [${p.source}]`;
+        located = p.name;
+        geocoder = p.source;
         attribution = p.attribution;
       }
       const zoom = a.zoom ?? 14;
@@ -575,6 +599,7 @@ function cameraTool(deps: RoadsToolDeps): ToolDef {
           zoom,
           located_by: located,
           note,
+          ...(geocoder ? { geocoder } : {}),
           ...(attribution ? { geocoder_attribution: attribution } : {}),
         },
       };
