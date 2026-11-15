@@ -77,6 +77,7 @@ const CATEGORY_OF: Record<string, CategoryId> = {
   get_regional_brief: 'news',
   local_headlines: 'news',
   find_radio_stations: 'news',
+  radio_stations_near: 'news',
   situation_brief: 'news',
   military_awareness: 'news',
   get_hud_caption: 'news',

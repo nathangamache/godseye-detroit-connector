@@ -12,6 +12,7 @@ import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
 import { registerCivicTools } from './extra/civic/index.js';
+import { registerRadioTools } from './extra/radio/index.js';
 import { registerRoads, type RoadsHandle } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
@@ -182,6 +183,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     fetch: fetchOverride,
   });
   registerCivicTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
+  registerRadioTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
   const stepup = new StepUp(

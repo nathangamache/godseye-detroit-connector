@@ -416,6 +416,12 @@ const schema = z.object({
     'dpd_calls_near=60/h,transit_vehicles_near=120/h,local_headlines=30/h,local_headlines=200/d',
   ),
   // ---- end civic ----
+
+  // ---- radio ----
+  // radio_stations_near (src/extra/radio): the public Radio Browser directory, keyless.
+  /** Default quotas for the radio tools; a TOOL_RATE_LIMITS entry for the same bucket wins. */
+  RADIO_TOOL_RATE_LIMITS: rateLimitList('radio_stations_near=60/h,radio_stations_near=300/d'),
+  // ---- end radio ----
 });
 
 export type RawConfig = z.infer<typeof schema>;
@@ -491,6 +497,7 @@ export const FAMILY_RATE_LIMIT_SETTINGS = [
   'WEATHER_TOOL_RATE_LIMITS',
   'ROADS_TOOL_RATE_LIMITS',
   'CIVIC_TOOL_RATE_LIMITS',
+  'RADIO_TOOL_RATE_LIMITS',
 ] as const satisfies readonly (keyof RawConfig)[];
 
 /**

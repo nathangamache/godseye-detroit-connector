@@ -195,7 +195,7 @@ describe('find_tools list mode', () => {
       .all()
       .filter((t) => t.source === 'gateway' && gw.registry.isAllowed(t));
     expect(text).toContain(
-      `${gateway.length} gateway tools (rail, aviation, weather, roads, civic) and`,
+      `${gateway.length} gateway tools (rail, aviation, weather, roads, civic, radio) and`,
     );
     expect(text).toMatch(/Detroit Pulse tools \(scanner and rail radio\)/);
     // A category names only the families in it.
