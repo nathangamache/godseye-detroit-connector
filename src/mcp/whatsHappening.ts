@@ -9,11 +9,13 @@
  *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
  *   gateway      -> weather_alerts (NWS, "at your location (phone fix N old)" or "at the given
  *                   point"), road_closures (how many within 5 km, the nearest 5 with road and
- *                   cross streets, every enabled source; TomTom incidents at most every 15 min
- *                   from this summary, never cached, with the requests left today),
+ *                   cross streets, every enabled source; TomTom incidents unless this summary
+ *                   asked them in the last 5 min or fewer than TOMTOM_WHATS_HAPPENING_RESERVE
+ *                   requests are left today, never cached, with the requests left; an empty
+ *                   list notes the closed road TomTom traffic flow sees),
  *                   border_wait_times (asked only within 8 km of a Detroit/Windsor or Port Huron
  *                   crossing), air_quality ("not configured (AIRNOW_API_KEY)" without its key)
- *   GEV          -> get_weather (F and mph), get_traffic_flow, find_cctv_cameras ("none in
+ *   GEV          -> get_weather (°F and mph), get_traffic_flow, find_cctv_cameras ("none in
  *                   range" when there are none: none in SE Michigan today)
  * and returns one compact summary with each source's timestamp/age and error. No section is ever
  * left out: one that has nothing, is not configured or cannot run says so. For an explicit point
@@ -226,9 +228,7 @@ export interface WhatsHappeningDeps {
 }
 
 /** whats_happening_here asks TomTom for incidents at most this often (results are never cached). */
-export const TOMTOM_SUMMARY_INTERVAL_MS = 15 * 60_000;
-/** What the summary says when it leaves TomTom out to save the quota. */
-export const TOMTOM_SKIPPED_NOTE = 'skipped to save the daily quota; ask road_closures for them';
+export const TOMTOM_SUMMARY_INTERVAL_MS = 5 * 60_000;
 
 /**
  * At most one use per interval. take() reserves the slot at once (so concurrent calls cannot
@@ -240,9 +240,11 @@ export class IntervalGate {
 
   constructor(readonly intervalMs: number) {}
 
-  take(now: number): { ok: true; undo: () => void } | { ok: false; waitMs: number } {
+  take(
+    now: number,
+  ): { ok: true; undo: () => void } | { ok: false; waitMs: number; sinceMs: number } {
     if (this.last !== undefined && now - this.last < this.intervalMs)
-      return { ok: false, waitMs: this.intervalMs - (now - this.last) };
+      return { ok: false, waitMs: this.intervalMs - (now - this.last), sinceMs: now - this.last };
     const before = this.last;
     this.last = now;
     return {
@@ -261,6 +263,33 @@ function tomtomEnabled(
   c: Pick<Config, 'TOMTOM_API_KEY' | 'ALLOW_TOMTOM_INCIDENTS' | 'TOMTOM_INCIDENTS_DAILY_MAX'>,
 ): boolean {
   return Boolean(c.TOMTOM_API_KEY) && c.ALLOW_TOMTOM_INCIDENTS && c.TOMTOM_INCIDENTS_DAILY_MAX > 0;
+}
+
+const ASK_ROAD_CLOSURES = 'ask road_closures for TomTom incidents';
+
+/**
+ * Whether this summary asks TomTom for incidents: yes, unless fewer than the reserve of today's
+ * requests are left (they stay for road_closures) or this summary asked in the last 5 min.
+ * Nothing is cached either way. When it does not ask, the note says why, with the requests left.
+ */
+export function tomtomDecision(
+  quota: { remaining: number; max: number } | undefined,
+  reserve: number,
+  gate: IntervalGate,
+  now: number,
+): { use: { undo: () => void } } | { skip: string } {
+  const left = quota ? `${quota.remaining} of ${quota.max} requests left today` : undefined;
+  if (quota && quota.remaining < reserve)
+    return {
+      skip: `skipped: ${left}, below the ${reserve} this summary leaves for road_closures (TOMTOM_WHATS_HAPPENING_RESERVE); ${ASK_ROAD_CLOSURES}`,
+    };
+  const t = gate.take(now);
+  if (t.ok) return { use: t };
+  const ago = humanAge(Math.max(1, Math.round(t.sinceMs / 1000)));
+  const every = humanAge(Math.round(gate.intervalMs / 1000));
+  return {
+    skip: `skipped: this summary asked TomTom ${ago} ago and asks it at most every ${every}${left ? `; ${left}` : ''}; ${ASK_ROAD_CLOSURES}`,
+  };
 }
 
 export interface WhatsHappeningArgs {
@@ -385,14 +414,23 @@ export async function whatsHappeningHere(
     return r;
   };
 
-  // TomTom incidents at most every 15 min from this summary (never cached: when skipped, the
-  // line says so and road_closures has them).
+  // TomTom incidents unless the day's requests are down to the reserve or this summary asked in
+  // the last 5 min (never cached: when skipped, the line says why and road_closures has them).
   let tomtomUse: { undo: () => void } | undefined;
+  let tomtomSkip: string | undefined;
   let roadsCtx = ctx;
   if (tomtomEnabled(deps.config)) {
-    const t = (deps.tomtomGate ?? defaultTomTomGate).take(now());
-    if (t.ok) tomtomUse = t;
-    else roadsCtx = { ...ctx, skipRoadSources: { tomtom: TOMTOM_SKIPPED_NOTE } };
+    const d = tomtomDecision(
+      registry.get('road_closures')?.quotas?.().tomtom,
+      deps.config.TOMTOM_WHATS_HAPPENING_RESERVE,
+      deps.tomtomGate ?? defaultTomTomGate,
+      now(),
+    );
+    if ('use' in d) tomtomUse = d.use;
+    else {
+      tomtomSkip = d.skip;
+      roadsCtx = { ...ctx, skipRoadSources: { tomtom: d.skip } };
+    }
   }
 
   // Rail is local and fast; its subdivision feeds the Pulse rail query.
@@ -501,7 +539,7 @@ export async function whatsHappeningHere(
         'road_closures',
         { lat, lon, radius_km: CLOSURES_RADIUS_KM, limit: CLOSURES_SHOWN },
         12_000,
-        (out) => closuresReport(out, credits),
+        (out) => closuresReport(out, credits, tomtomSkip),
         { ctx: roadsCtx },
       ),
       nearCrossings.length
@@ -548,6 +586,7 @@ export async function whatsHappeningHere(
     ((cameras.data as { cameras?: unknown[] } | undefined)?.cameras?.length ?? 0) > 0;
   // A reserved TomTom slot that went unused (not asked, or refused for its cap) is given back.
   if (tomtomUse && !tomtomAsked(closures)) tomtomUse.undo();
+  noteFlowClosures(closures, traffic, Math.min(radius, 10));
 
   // Every section is listed, even when it has nothing or cannot run (it says why).
   const sources: SourceReport[] = [
@@ -684,11 +723,14 @@ function closureItemText(i: ClosureItemData, label: string): string {
   return `${i.full_closure ? 'FULL CLOSURE: ' : ''}${i.type ?? 'item'}${where}${cross} (${label}${dist})`;
 }
 
-/** "City of Detroit permits: 4", "TomTom incidents: 2 (57 of 60 requests left today)". */
-function closureSourceText(r: ClosureSourceData): string {
+/**
+ * "City of Detroit permits: 4", "TomTom incidents: 2 (57 of 60 requests left today)", or
+ * "TomTom incidents skipped: …" with the note this summary left it out with.
+ */
+function closureSourceText(r: ClosureSourceData, tomtomSkip?: string): string {
   const label = r.label ?? r.source ?? '?';
-  if (r.source === 'tomtom' && r.status === 'skipped' && r.note === TOMTOM_SKIPPED_NOTE)
-    return `${label} ${TOMTOM_SKIPPED_NOTE}`;
+  if (r.source === 'tomtom' && r.status === 'skipped' && tomtomSkip && r.note === tomtomSkip)
+    return `${label} ${tomtomSkip}`;
   const left =
     r.quota && r.status !== 'quota'
       ? ` (${r.quota.remaining} of ${r.quota.max} requests left today)`
@@ -725,6 +767,7 @@ function alertsAt(summary: string, at: string): string {
 function closuresReport(
   out: ToolOutput,
   credits: string[],
+  tomtomSkip?: string,
 ): Omit<SourceReport, 'source' | 'retrieved_at'> {
   if (out.isError) return { status: 'error', summary: out.summary };
   const d = (out.data ?? {}) as {
@@ -747,7 +790,7 @@ function closuresReport(
   // Sources that are off (no key, licence switch) aren't "checked"; the tool itself says so.
   const enabled = reports.filter((r) => r.status !== 'off' && r.status !== 'not_configured');
   const checked = enabled.length
-    ? enabled.map(closureSourceText).join('; ')
+    ? enabled.map((r) => closureSourceText(r, tomtomSkip)).join('; ')
     : 'none (no road source is enabled)';
   const within = `within ${CLOSURES_RADIUS_KM} km`;
   if (!items.length)
@@ -796,6 +839,28 @@ function closuresReport(
       ...disclaimer,
     },
   };
+}
+
+/** Closed road km in GEV's traffic flow answer (data.closed_km, else "N km closed" in its text). */
+function flowClosedKm(traffic: SourceReport): number {
+  if (traffic.status !== 'ok') return 0;
+  const v = (traffic.data as { closed_km?: unknown } | undefined)?.closed_km;
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.max(0, v);
+  const m = /(\d+(?:\.\d+)?) km closed\b/.exec(traffic.summary);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * No closure found, yet TomTom's traffic flow shows closed road: say so on the closures line
+ * (flow sees closed segments that may not be listed as incidents).
+ */
+function noteFlowClosures(closures: SourceReport, traffic: SourceReport, radiusKm: number): void {
+  const d = closures.data as { total?: number } | undefined;
+  if (closures.status !== 'ok' || (d?.total ?? 0) > 0) return;
+  const km = flowClosedKm(traffic);
+  if (!(km > 0)) return;
+  closures.summary += ` TomTom traffic flow sees ${km} km of closed road segments within ${radiusKm} km that may not be listed as incidents.`;
+  closures.data = { ...(closures.data as object), flow_closed_km: km };
 }
 
 /** border_wait_times, for the crossings near the point only. */

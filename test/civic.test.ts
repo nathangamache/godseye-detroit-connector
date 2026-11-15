@@ -18,13 +18,22 @@ import { DPD_CALLS_LAYER } from '../src/extra/civic/dpd.js';
 import { decodeFeed, ProtobufError } from '../src/extra/civic/gtfsrt.js';
 import { parseCsv, readZipMembers, SMART_STATIC_GTFS_URL } from '../src/extra/civic/gtfsStatic.js';
 import {
+  GDELT_MIN_GAP_MS,
+  newGdeltQueue,
+  RateLimitedError,
+  retryAfterSeconds,
+  SpacedQueue,
+  withGdeltNote,
+  type Clock,
+} from '../src/extra/civic/gdelt.js';
+import {
   CENSUS_COORDINATES_API,
   GDELT_DOC_API,
-  GDELT_MIN_GAP_MS,
+  HEADLINES_CACHE_MS,
   normalizeTitle,
   placeQuery,
-  SpacedQueue,
-  type Clock,
+  WARM_IDLE_MS,
+  type Schedule,
 } from '../src/extra/civic/headlines.js';
 import { civicTools } from '../src/extra/civic/index.js';
 import { metroForPlace } from '../src/extra/civic/outlets.js';
@@ -93,6 +102,8 @@ function setup(
     routes?: Array<[string, Handler]>;
     now?: () => number;
     clock?: Clock & { t: number };
+    /** local_headlines' warm refresh: the test runs what it schedules. */
+    schedule?: Schedule;
   } = {},
 ) {
   const now = opts.now ?? (() => NOW);
@@ -101,10 +112,19 @@ function setup(
   const locations = new LocationStore(db, { retentionHours: 24 }, now);
   const audit = new Audit(db, nullLogger, now);
   const clock = opts.clock ?? fakeClock();
-  const queue = new SpacedQueue(GDELT_MIN_GAP_MS, { maxPending: 4, maxWaitMs: 45_000, clock });
+  // GDELT's queue as production builds it, without the jitter (tests of jitter set their own).
+  const queue = newGdeltQueue(clock, () => 0);
   // Requests are stamped with the queue's clock (it only moves when the queue sleeps).
   const http = mockFetch(opts.routes ?? [], () => clock.now());
-  const tools = civicTools({ config, locations, audit, now, fetch: http.fetch, gdeltQueue: queue });
+  const tools = civicTools({
+    config,
+    locations,
+    audit,
+    now,
+    fetch: http.fetch,
+    gdeltQueue: queue,
+    headlinesSchedule: opts.schedule ?? (() => ({ cancel: () => undefined })),
+  });
   const registry = new ToolRegistry(new ToolPolicy(config));
   for (const t of tools) registry.register(t);
   const runner = new ToolRunner(registry, {
@@ -893,8 +913,31 @@ describe('local_headlines', () => {
     const out = await runner.run('local_headlines', { place: 'Lansing, Michigan' }, ctx());
     expect(out.content[0]!.text).toMatch(/Attribution: GDELT Project \(gdeltproject\.org\)/);
     expect(out.content[0]!.text).toMatch(/third-party links \(news\.example\)/);
-    // The second call came from the 10-minute cache.
+    // The second call came from the cache.
     expect(http.calls.filter((c) => c.url.startsWith(GDELT_DOC_API))).toHaveLength(1);
+  });
+
+  it('caches a successful answer per query for 15 minutes, then asks GDELT again', async () => {
+    const clock = fakeClock();
+    const { run, http } = setup({
+      clock,
+      now: () => clock.now(),
+      routes: [[GDELT_DOC_API, () => json(gdeltBody(2))]],
+    });
+    const gdelt = () => http.calls.filter((c) => c.url.startsWith(GDELT_DOC_API)).length;
+    const first = await run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(data(first)).toMatchObject({ status: 'ok', retrieved_at: new Date(NOW).toISOString() });
+    expect(HEADLINES_CACHE_MS).toBe(15 * 60_000);
+    clock.t += 14 * 60_000;
+    const cached = await run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(gdelt()).toBe(1);
+    expect(data(cached).retrieved_at).toBe(new Date(NOW).toISOString());
+    // Another query is its own entry.
+    await run('local_headlines', { place: 'Toledo, Ohio', hours: 6 });
+    expect(gdelt()).toBe(2);
+    clock.t += 60_000 + 1;
+    await run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(gdelt()).toBe(3);
   });
 
   it('coordinates become the town there via the Census geocoder (rounded to ~1 km)', async () => {
@@ -945,8 +988,8 @@ describe('local_headlines', () => {
     expect(queries).toHaveLength(2);
     expect(queries[0]).toMatch(/^"Dearborn" \(domain:freep\.com OR /);
     expect(queries[1]).toBe('"Dearborn"');
-    // Still one GDELT request every 5 s.
-    expect(http.calls[1]!.at - http.calls[0]!.at).toBeGreaterThanOrEqual(GDELT_MIN_GAP_MS);
+    // Still one GDELT request every 6 s.
+    expect(http.calls[1]!.at - http.calls[0]!.at).toBeGreaterThanOrEqual(6_000);
     expect(r.summary).toMatch(
       /search: broad \(any outlet GDELT indexes; national stories that only mention the place can dominate\).* Local outlets in Metro Detroit .* found nothing in the last 24 h, so this is the broad search\./,
     );
@@ -1099,7 +1142,7 @@ describe('local_headlines', () => {
     });
   });
 
-  it('spaces GDELT requests at least 5 s apart across concurrent calls', async () => {
+  it('spaces GDELT requests at least 6 s apart across concurrent calls', async () => {
     const { run, http } = setup({ routes: [[GDELT_DOC_API, () => json(gdeltBody(1))]] });
     const out = await Promise.all(
       ['Detroit', 'Dearborn', 'Hamtramck'].map((place) => run('local_headlines', { place })),
@@ -1107,13 +1150,13 @@ describe('local_headlines', () => {
     expect(out.every((o) => !o.isError)).toBe(true);
     const at = http.calls.map((c) => c.at);
     expect(at).toHaveLength(3);
-    for (let i = 1; i < at.length; i++)
-      expect(at[i]! - at[i - 1]!).toBeGreaterThanOrEqual(GDELT_MIN_GAP_MS);
+    expect(GDELT_MIN_GAP_MS).toBe(6_000);
+    for (let i = 1; i < at.length; i++) expect(at[i]! - at[i - 1]!).toBeGreaterThanOrEqual(6_000);
   });
 
-  it('after a 429 it backs off and refuses rather than retrying hot', async () => {
+  it('a 429 is a normal result: status unavailable, the reason and when to try again', async () => {
     const clock = fakeClock();
-    const { run, http } = setup({
+    const { run, http, runner } = setup({
       clock,
       routes: [
         [
@@ -1125,14 +1168,144 @@ describe('local_headlines', () => {
         ],
       ],
     });
-    expect(await run('local_headlines', { place: 'Detroit' })).toMatchObject({
-      isError: true,
-      errorKind: 'retry_later',
+    const first = await run('local_headlines', { place: 'Detroit' });
+    expect(first.isError).toBeFalsy();
+    expect(data(first)).toMatchObject({
+      status: 'unavailable',
+      place: 'Detroit',
+      reason: 'GDELT asked this gateway to slow down (HTTP 429)',
+      // GDELT's own rule is 5 s; the gateway then waits 60 s before its next request.
+      gdelt_asked_s: 5,
+      retry_after_s: 60,
+      fetched: false,
     });
+    expect(first.summary).toBe(
+      'Headlines for Detroit are unavailable right now: GDELT asked this gateway to slow down (HTTP 429). GDELT allows one request every 5 s per address, and other tools here use it too; this gateway now waits 60 s before asking again. Try again in 60 s.',
+    );
+    // The next call does not retry hot: answered at once, saying how long is left.
+    clock.t += 20_000;
     const again = await run('local_headlines', { place: 'Dearborn' });
-    expect(again).toMatchObject({ isError: true, errorKind: 'retry_later' });
-    expect(again.summary).toMatch(/try again in about \d+ s/);
+    expect(again.isError).toBeFalsy();
+    expect(data(again)).toMatchObject({ status: 'unavailable', retry_after_s: 40 });
+    expect(again.summary).toBe(
+      'Headlines for Dearborn are unavailable right now: this gateway pauses GDELT requests for 60 s after GDELT refuses one. Try again in 40 s.',
+    );
     expect(http.calls).toHaveLength(1);
+    // Over MCP too: a normal result, not a tool error.
+    const viaRunner = await runner.run('local_headlines', { place: 'Hamtramck' }, ctx());
+    expect(viaRunner.isError).toBeFalsy();
+    expect(viaRunner.content.map((c) => c.text ?? '').join('\n')).toContain(
+      '"status":"unavailable"',
+    );
+    // Once the pause is over, GDELT is asked again.
+    clock.t += 41_000;
+    await run('local_headlines', { place: 'Detroit' });
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it("GDELT's Retry-After sets the pause when it is longer than 60 s", async () => {
+    const clock = fakeClock();
+    const { run } = setup({
+      clock,
+      routes: [
+        [
+          GDELT_DOC_API,
+          () => new Response('slow down', { status: 429, headers: { 'retry-after': '120' } }),
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Detroit' });
+    expect(r.isError).toBeFalsy();
+    expect(data(r)).toMatchObject({
+      status: 'unavailable',
+      gdelt_asked_s: 120,
+      retry_after_s: 120,
+    });
+    expect(r.summary).toMatch(
+      /GDELT asked for a 120 s wait; this gateway waits 120 s before asking again\. Try again in 120 s\.$/,
+    );
+    expect(retryAfterSeconds('7', 0)).toBe(7);
+    expect(retryAfterSeconds(new Date(NOW + 30_000).toUTCString(), NOW)).toBe(30);
+    expect(retryAfterSeconds('soon', NOW)).toBeUndefined();
+  });
+
+  it('shares one GDELT queue with GEV calls that may use GDELT (the regional brief)', async () => {
+    const clock = fakeClock();
+    const { run, http, queue } = setup({
+      clock,
+      routes: [[GDELT_DOC_API, () => json(gdeltBody(1))]],
+    });
+    const gev = withGdeltNote(async (name) => ({ summary: `${name} ok` }), queue);
+    const at = clock.now();
+    // Not delayed itself, but the gateway's next GDELT request keeps its distance from it.
+    expect((await gev('get_regional_brief', {}, { ...ctx(), timeoutMs: 1000 })).summary).toBe(
+      'get_regional_brief ok',
+    );
+    expect(clock.now()).toBe(at);
+    await run('local_headlines', { place: 'Detroit' });
+    expect(http.calls[0]!.at - at).toBeGreaterThanOrEqual(6_000);
+    // Other GEV tools are not counted.
+    const q2 = newGdeltQueue(fakeClock(), () => 0);
+    await withGdeltNote(async () => ({ summary: 'x' }), q2)(
+      'get_weather',
+      {},
+      {
+        ...ctx(),
+        timeoutMs: 1000,
+      },
+    );
+    expect(q2.waitMs()).toBe(0);
+  });
+
+  it('keeps the last metro asked about warm: refreshed at most every 15 min while it is used', async () => {
+    const clock = fakeClock();
+    const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
+    const schedule: Schedule = (fn, ms) => {
+      const t = { fn, ms, cancelled: false };
+      timers.push(t);
+      return { cancel: () => (t.cancelled = true) };
+    };
+    const { run, http } = setup({
+      clock,
+      now: () => clock.now(),
+      schedule,
+      routes: [[GDELT_DOC_API, () => json(gdeltBody(2))]],
+    });
+    const gdelt = () => http.calls.length;
+    const fire = async () => {
+      const t = timers.at(-1)!;
+      clock.t += t.ms;
+      t.fn();
+      // Let the refresh's queue and fetch settle.
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    };
+    await run('local_headlines', { place: 'Dearborn' });
+    expect(gdelt()).toBe(1);
+    expect(timers).toHaveLength(1);
+    // Just past the cached answer's 15 minutes.
+    expect(timers[0]!.ms).toBe(HEADLINES_CACHE_MS + 1_000);
+    await fire();
+    expect(gdelt()).toBe(2);
+    expect(timers).toHaveLength(2);
+    // Asked for again: answered from the refreshed cache, no request.
+    clock.t += 60_000;
+    const hit = await run('local_headlines', { place: 'Dearborn' });
+    expect(data(hit).status).toBe('ok');
+    expect(gdelt()).toBe(2);
+    await fire();
+    expect(gdelt()).toBe(3);
+    // Not asked for within WARM_IDLE_MS: the refresh stops.
+    expect(WARM_IDLE_MS).toBe(30 * 60_000);
+    await fire();
+    expect(gdelt()).toBe(3);
+    const armed = timers.length;
+    // A place outside the listed metros is not kept warm; another metro replaces the last one.
+    await run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(timers).toHaveLength(armed);
+    await run('local_headlines', { place: 'Dearborn' });
+    await run('local_headlines', { place: 'Lansing, Michigan' });
+    expect(timers.at(-2)!.cancelled).toBe(true);
+    expect(timers.at(-1)!.cancelled).toBe(false);
   });
 
   it('GDELT plain-text query errors are reported, not parsed', async () => {
@@ -1185,6 +1358,28 @@ describe('SpacedQueue', () => {
     release();
     await Promise.all([a, b]);
     q.backOff(60_000);
-    await expect(q.run(async () => undefined)).rejects.toMatchObject({ kind: 'rate_limited' });
+    const refused = await q.run(async () => undefined).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(RateLimitedError);
+    expect(refused).toMatchObject({ kind: 'rate_limited', reason: 'paused', retryAfterS: 60 });
+  });
+
+  it('adds jitter to the spacing and the back-off', async () => {
+    const clock = fakeClock(0);
+    const q = new SpacedQueue(6000, {
+      maxPending: 5,
+      maxWaitMs: 120_000,
+      clock,
+      jitterMs: 2000,
+      random: () => 0.5,
+    });
+    const starts: number[] = [];
+    const job = async () => {
+      starts.push(clock.now());
+    };
+    await Promise.all([q.run(job), q.run(job), q.run(job)]);
+    expect(starts).toEqual([0, 7000, 14000]);
+    // 60 s plus the same 1 s of jitter, from the last start.
+    q.backOff(60_000);
+    expect(q.waitMs()).toBe(61_000);
   });
 });

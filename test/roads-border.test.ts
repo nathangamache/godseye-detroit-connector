@@ -296,6 +296,7 @@ describe('roads family in the gateway', () => {
     expect(c.OVERPASS_URL).toBeUndefined();
     expect(c.ALLOW_TOMTOM_INCIDENTS).toBe(false);
     expect(c.TOMTOM_INCIDENTS_DAILY_MAX).toBe(60);
+    expect(c.TOMTOM_WHATS_HAPPENING_RESERVE).toBe(20);
     expect(c.VALHALLA_URL).toBe('https://valhalla1.openstreetmap.de');
   });
 

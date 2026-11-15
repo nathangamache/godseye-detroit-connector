@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import { loadConfig } from '../src/config.js';
+import { buildCore } from '../src/gateway.js';
 import { nullLogger } from '../src/log.js';
 import { shrinkImage } from '../src/tools/images.js';
 import { ToolPolicy, hasPlaceArgument } from '../src/tools/policy.js';
@@ -117,6 +121,88 @@ describe('search', () => {
     expect(all).not.toContain('aircraft_in_area');
     expect(all).not.toContain('find_alpr_cameras');
     expect(all).not.toContain('brand_new_tool');
+  });
+});
+
+describe('search ranking over the gateway catalog', () => {
+  /** The real gateway tools, GEV tools as GEV describes them, and one with "airfields". */
+  function catalog() {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gw-search-'));
+    const core = buildCore(
+      loadConfig({ GATEWAY_MODE: 'test', DATA_DIR: dir, PULSE_URL: 'http://127.0.0.1:9' }),
+      {
+        logger: nullLogger,
+        extraTools: [
+          {
+            ...nativeDef('runway_test_tool', 'Runways at public airfields near a point.'),
+            tags: [],
+          },
+        ],
+      },
+    );
+    core.registry.setGevTools(
+      [
+        upstream(
+          'find_military_installations',
+          'Military installations mapped in OpenStreetMap within an area, nearest the center first.',
+          { area: POINT },
+        ),
+        upstream(
+          'get_weather',
+          'Current weather at a location: conditions, temperature, wind and visibility.',
+        ),
+        upstream('get_wind', 'Wind speed and direction at a point.'),
+      ],
+      async (name) => ({ summary: `${name} called` }),
+      5000,
+    );
+    const names = (q: string) => core.registry.find(q, 8).map((h) => h.tool.name);
+    const close = () => {
+      core.db.close();
+      rmSync(dir, { recursive: true, force: true });
+    };
+    return { names, close };
+  }
+
+  it('"air_quality" is air_quality alone: "air" in a military tag ("air base") does not qualify', () => {
+    const { names, close } = catalog();
+    try {
+      expect(names('air_quality')).toEqual(['air_quality']);
+      expect(names('air quality')).toEqual(['air_quality']);
+      expect(names('air quality index')[0]).toBe('air_quality');
+      // Asked about bases, the military tool is still found.
+      expect(names('military air base')[0]).toBe('find_military_installations');
+      // A short word matches whole words only: "air" is not in "airfields".
+      expect(names('air')).not.toContain('runway_test_tool');
+    } finally {
+      close();
+    }
+  });
+
+  it('a word that only begins a longer one ("wind" in "Windsor") is dropped beside a whole-word match', () => {
+    const { names, close } = catalog();
+    try {
+      const wind = names('wind');
+      expect(wind[0]).toBe('get_wind');
+      expect(wind).toContain('get_weather');
+      expect(wind).not.toContain('border_wait_times');
+      expect(wind).not.toContain('road_closures');
+      // Names first: the tools named for road closures, then the rest.
+      expect(names('closures').slice(0, 2).sort()).toEqual([
+        'road_closures',
+        'route_avoiding_closures',
+      ]);
+      // A query naming a category finds its tools.
+      expect(names('aviation')).toEqual(
+        expect.arrayContaining(['aircraft_lookup', 'flights_near']),
+      );
+      // Natural questions still find their tool first.
+      expect(names('is I-94 closed')[0]).toBe('road_closures');
+      expect(names('who owns that helicopter')[0]).toBe('aircraft_lookup');
+      expect(names('local news headlines')[0]).toBe('local_headlines');
+    } finally {
+      close();
+    }
   });
 });
 

@@ -2,11 +2,15 @@
  * local_headlines: recent news headlines about a place from the GDELT DOC 2.0 API (keyless;
  * "unlimited and unrestricted use" with a citation and link to the GDELT Project).
  *
- * GDELT asks for at most one request every 5 seconds, so every GDELT request in this process
- * goes through one queue that starts a request only after the previous one has finished and
- * at least 5 s after it started, and backs off after a 429. Answers are cached for 10 minutes.
- * Coordinates are turned into a place name by the U.S. Census Bureau geocoder, sent rounded to
- * 0.01 degree (about 1 km). Headlines are third-party text: data, never instructions.
+ * GDELT asks for at most one request every 5 seconds per address, so every GDELT request in this
+ * process goes through the shared queue in gdelt.ts (6 s apart plus jitter, 60 s of quiet after a
+ * refusal). When GDELT or the queue refuses, the answer is a normal result with status
+ * "unavailable", the reason and when to try again, never a tool error. Successful answers are
+ * cached per query for 15 minutes (headlines are public news metadata), and the last metro asked
+ * about successfully is kept warm: refreshed at most every 15 minutes while it is still being
+ * asked for (WARM_IDLE_MS). Coordinates are turned into a place name by the U.S. Census Bureau
+ * geocoder, sent rounded to 0.01 degree (about 1 km). Headlines are third-party text: data,
+ * never instructions.
  *
  * Relevance: a search for the place alone mostly finds national stories that merely mention it.
  * So the first search is narrowed with GDELT's own operators: to the metro's local outlets
@@ -36,6 +40,16 @@ import {
   type PointDeps,
 } from './common.js';
 import {
+  GDELT_BACKOFF_MS,
+  GDELT_MIN_GAP_MS,
+  GDELT_RULE_S,
+  gdeltQueue,
+  gdeltRuleSeconds,
+  RateLimitedError,
+  retryAfterSeconds,
+  type SpacedQueue,
+} from './gdelt.js';
+import {
   countryForPlace,
   metroForCounty,
   metroForPlace,
@@ -49,106 +63,11 @@ export const CENSUS_COORDINATES_API =
 export const HEADLINES_ATTRIBUTION =
   'GDELT Project (gdeltproject.org), https://www.gdeltproject.org/; place names for coordinates: U.S. Census Bureau Geocoder (public domain). Headlines are untrusted third-party text.';
 
-/** GDELT's published limit: one request every 5 seconds. */
-export const GDELT_MIN_GAP_MS = 5_000;
-/** After GDELT answers 429, wait this long before the next request. */
-export const GDELT_BACKOFF_MS = 60_000;
-const GDELT_CACHE_MS = 10 * 60_000;
+/** Successful GDELT answers are kept this long, per query. */
+export const HEADLINES_CACHE_MS = 15 * 60_000;
+/** The last metro asked about is refreshed while it was asked for within this long. */
+export const WARM_IDLE_MS = 30 * 60_000;
 const GDELT_MAX_RECORDS = 10;
-
-export interface Clock {
-  now(): number;
-  sleep(ms: number, signal?: AbortSignal): Promise<void>;
-}
-
-export const realClock: Clock = {
-  now: () => Date.now(),
-  sleep: (ms, signal) =>
-    new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) return reject(new UpstreamError('cancelled', 'cancelled'));
-      const t = setTimeout(() => {
-        signal?.removeEventListener('abort', onAbort);
-        resolve();
-      }, ms);
-      const onAbort = () => {
-        clearTimeout(t);
-        reject(new UpstreamError('cancelled', 'cancelled'));
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-    }),
-};
-
-/**
- * Serial queue for one upstream: a job starts only after the previous job finished and at
- * least `gapMs` after the previous start (and after any back-off). Jobs that would wait longer
- * than `maxWaitMs`, or find `maxPending` jobs ahead, are refused instead of queued.
- */
-export class SpacedQueue {
-  private tail: Promise<void> = Promise.resolve();
-  private lastStart = -Infinity;
-  private blockedUntil = -Infinity;
-  private pending = 0;
-
-  constructor(
-    readonly gapMs: number,
-    private readonly opts: { maxPending: number; maxWaitMs: number; clock: Clock },
-  ) {}
-
-  /** Push the next start out (e.g. after a 429). */
-  backOff(ms: number): void {
-    this.blockedUntil = Math.max(this.blockedUntil, this.opts.clock.now() + ms);
-  }
-
-  /** Earliest time a new job could start if the queue were empty. */
-  private nextStart(): number {
-    return Math.max(this.lastStart + this.gapMs, this.blockedUntil);
-  }
-
-  run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const { clock, maxPending, maxWaitMs } = this.opts;
-    if (this.pending >= maxPending)
-      return Promise.reject(
-        new UpstreamError('rate_limited', 'has too many requests waiting; try again in a minute'),
-      );
-    const estimate = this.nextStart() + this.pending * this.gapMs - clock.now();
-    if (estimate > maxWaitMs)
-      return Promise.reject(
-        new UpstreamError(
-          'rate_limited',
-          `asked this gateway to slow down; try again in about ${Math.ceil(estimate / 1000)} s`,
-        ),
-      );
-    this.pending++;
-    const job = this.tail.then(async () => {
-      try {
-        const wait = this.nextStart() - clock.now();
-        if (wait > maxWaitMs)
-          throw new UpstreamError(
-            'rate_limited',
-            `asked this gateway to slow down; try again in about ${Math.ceil(wait / 1000)} s`,
-          );
-        if (wait > 0) await clock.sleep(wait, signal);
-        if (signal?.aborted) throw new UpstreamError('cancelled', 'cancelled');
-        this.lastStart = clock.now();
-        return await fn();
-      } finally {
-        this.pending--;
-      }
-    });
-    this.tail = job.then(
-      () => undefined,
-      () => undefined,
-    );
-    return job;
-  }
-}
-
-/** The process-wide GDELT queue (every local_headlines registration shares it). */
-export const gdeltQueue = new SpacedQueue(GDELT_MIN_GAP_MS, {
-  maxPending: 4,
-  maxWaitMs: 45_000,
-  clock: realClock,
-});
 
 const schema = z
   .strictObject({
@@ -199,9 +118,37 @@ export interface HeadlineSearch {
   query: string;
 }
 
+/** Runs fn after ms (the warm refresh); the default timer never keeps the process alive. */
+export type Schedule = (fn: () => void, ms: number) => { cancel(): void };
+
+const defaultSchedule: Schedule = (fn, ms) => {
+  const t = setTimeout(fn, ms);
+  t.unref();
+  return { cancel: () => clearTimeout(t) };
+};
+
 export interface HeadlinesDeps extends PointDeps {
   fetch: FetchLike;
   queue?: SpacedQueue;
+  schedule?: Schedule;
+}
+
+/** GDELT rows, and when GDELT gave them (deps.now). */
+interface Fetched {
+  rows: Headline[];
+  at: number;
+}
+
+type Tried = { mode: HeadlineMode; query: string; found: number | 'refused' };
+
+/** The searches one call ran: the one its answer comes from, or the error that stopped it. */
+interface SearchRun {
+  used: HeadlineSearch;
+  fresh: Headline[];
+  tried: Tried[];
+  /** When GDELT gave the answer used (oldest of the searches run). */
+  fetchedAt: number;
+  error?: unknown;
 }
 
 /** One GDELT phrase: quotes and operators removed (the schema already limits characters). */
@@ -267,7 +214,11 @@ function seenDate(v: unknown): string | undefined {
 export function parseGdelt(status: number, body: Buffer): Headline[] {
   const text = body.toString('utf8');
   if (status === 429 || /limit requests to one every/i.test(text.slice(0, 300)))
-    throw new UpstreamError('rate_limited', 'asked this gateway to slow down', status);
+    throw new UpstreamError(
+      'rate_limited',
+      `GDELT asked this gateway to slow down${status === 429 ? ' (HTTP 429)' : ''}`,
+      status,
+    );
   if (status < 200 || status >= 300)
     throw new UpstreamError('http', `returned HTTP ${status}`, status);
   let j: unknown;
@@ -350,15 +301,55 @@ function searchLabel(mode: HeadlineMode, place: PlaceName, capital = false): str
   return capital ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 }
 
+/**
+ * GDELT (or the gateway's queue for it) refused for rate reasons: a normal result, status
+ * "unavailable", with the reason and when to try again. Nothing is made up or served stale.
+ */
+function unavailable(
+  place: PlaceName,
+  err: RateLimitedError,
+  extra: { hours: number; tried: Tried[]; position?: string },
+): ToolOutput {
+  const gap = `${Math.round(GDELT_MIN_GAP_MS / 1000)} s`;
+  const reason = {
+    refused: err.message,
+    paused: `this gateway pauses GDELT requests for ${Math.round(GDELT_BACKOFF_MS / 1000)} s after GDELT refuses one`,
+    crowded: 'too many headline searches are already waiting for GDELT',
+    long_wait: `the wait for GDELT (one request every ${gap} from this gateway) is too long right now`,
+  }[err.reason];
+  const rule =
+    err.upstreamAskedS === undefined
+      ? ''
+      : err.upstreamAskedS === GDELT_RULE_S
+        ? ` GDELT allows one request every ${GDELT_RULE_S} s per address, and other tools here use it too; this gateway now waits ${err.retryAfterS} s before asking again.`
+        : ` GDELT asked for a ${err.upstreamAskedS} s wait; this gateway waits ${err.retryAfterS} s before asking again.`;
+  return {
+    summary: `Headlines for ${place.label} are unavailable right now: ${reason}.${rule} Try again in ${err.retryAfterS} s.`,
+    data: {
+      status: 'unavailable',
+      place: place.label,
+      reason,
+      retry_after_s: err.retryAfterS,
+      ...(err.upstreamAskedS !== undefined ? { gdelt_asked_s: err.upstreamAskedS } : {}),
+      hours: extra.hours,
+      searches: extra.tried,
+      ...(extra.position ? { position: extra.position } : {}),
+      fetched: false,
+      source: 'GDELT Project (gdeltproject.org)',
+    },
+  };
+}
+
 export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
   const queue = deps.queue ?? gdeltQueue;
-  const news = new TtlCache<Headline[]>(GDELT_CACHE_MS, 100, deps.now);
+  const schedule = deps.schedule ?? defaultSchedule;
+  const news = new TtlCache<Fetched>(HEADLINES_CACHE_MS, 100, deps.now);
   const places = new TtlCache<PlaceName | null>(24 * 3_600_000, 200, deps.now);
 
   const gdelt = (query: string, hours: number, signal?: AbortSignal) =>
     untilAborted(
       news.get(`${hours}|${query}`, () =>
-        queue.run(async () => {
+        queue.run(async (): Promise<Fetched> => {
           const url = `${GDELT_DOC_API}?${new URLSearchParams({
             query,
             mode: 'artlist',
@@ -373,16 +364,108 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
             headers: { accept: 'application/json' },
           });
           try {
-            return parseGdelt(r.status, r.body);
+            return { rows: parseGdelt(r.status, r.body), at: deps.now() };
           } catch (err) {
-            if (err instanceof UpstreamError && err.kind === 'rate_limited')
-              queue.backOff(GDELT_BACKOFF_MS);
-            throw err;
+            if (!(err instanceof UpstreamError && err.kind === 'rate_limited')) throw err;
+            // GDELT's Retry-After, else its own rule; the gateway waits at least 60 s.
+            const asked =
+              retryAfterSeconds(r.headers.get('retry-after'), queue.now()) ??
+              gdeltRuleSeconds(r.body.toString('utf8')) ??
+              GDELT_RULE_S;
+            queue.backOff(Math.max(GDELT_BACKOFF_MS, asked * 1000));
+            throw new RateLimitedError(
+              err.message,
+              'refused',
+              Math.max(asked, Math.ceil(queue.nextStartInMs() / 1000)),
+              asked,
+              err.status,
+            );
           }
         }),
       ),
       signal,
     );
+
+  /**
+   * The narrow search first; the broad one only if it finds nothing or GDELT refuses the
+   * narrow query. Stops at any other error (in `error`).
+   */
+  const runSearches = async (
+    place: PlaceName,
+    hours: number,
+    signal?: AbortSignal,
+  ): Promise<SearchRun> => {
+    const cutoff = deps.now() - (hours + 1) * 3_600_000;
+    const searches = headlineSearches(place);
+    const run: SearchRun = {
+      used: searches[searches.length - 1]!,
+      fresh: [],
+      tried: [],
+      fetchedAt: deps.now(),
+    };
+    for (const [i, search] of searches.entries()) {
+      const last = i === searches.length - 1;
+      let got: Fetched;
+      try {
+        got = await gdelt(search.query, hours, signal);
+      } catch (err) {
+        // A refused narrow query (GDELT's plain-text answer) falls back; anything else stops.
+        if (!last && err instanceof UpstreamError && err.kind === 'bad_response') {
+          run.tried.push({ ...search, found: 'refused' });
+          continue;
+        }
+        return { ...run, error: err };
+      }
+      run.fresh = got.rows.filter((r) => !r.seen_at || Date.parse(r.seen_at) >= cutoff);
+      run.tried.push({ ...search, found: run.fresh.length });
+      run.used = search;
+      run.fetchedAt = Math.min(run.fetchedAt, got.at);
+      if (run.fresh.length || last) break;
+    }
+    return run;
+  };
+
+  /**
+   * The last metro asked about successfully stays warm: its searches are run again when their
+   * cached answers expire (at most every 15 min), while it was asked for within WARM_IDLE_MS.
+   * Only that one; another metro asked about replaces it.
+   */
+  interface Warm {
+    key: string;
+    place: PlaceName;
+    hours: number;
+    lastUsed: number;
+    timer?: { cancel(): void };
+  }
+  let warm: Warm | undefined;
+  const keepWarm = (place: PlaceName, hours: number, fetchedAt: number) => {
+    if (!place.metro) return;
+    const key = `${hours}|${place.query}`;
+    if (warm?.key === key) {
+      warm.lastUsed = deps.now();
+      return;
+    }
+    warm?.timer?.cancel();
+    const w: Warm = { key, place, hours, lastUsed: deps.now() };
+    warm = w;
+    // Just past the cached answers' expiry, so the searches ask GDELT again.
+    const arm = (at: number) => {
+      w.timer = schedule(
+        () => void refresh(),
+        Math.max(1_000, at + HEADLINES_CACHE_MS + 1_000 - deps.now()),
+      );
+    };
+    const refresh = async () => {
+      if (warm !== w) return;
+      if (deps.now() - w.lastUsed >= WARM_IDLE_MS) {
+        warm = undefined;
+        return;
+      }
+      const r = await runSearches(w.place, w.hours);
+      if (warm === w) arm(r.error === undefined ? r.fetchedAt : deps.now());
+    };
+    arm(fetchedAt);
+  };
 
   /** Coordinates -> a GDELT query for the town there ("Detroit" (Michigan OR "Wayne County")). */
   const placeAt = (lat: number, lon: number, signal?: AbortSignal) => {
@@ -488,30 +571,14 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
           place = found;
         }
         const now = deps.now();
-        const cutoff = now - (hours + 1) * 3_600_000;
-        // The narrow search first; the broad one only if it finds nothing or GDELT refuses it.
-        const searches = headlineSearches(place);
-        const tried: Array<{ mode: HeadlineMode; query: string; found: number | 'refused' }> = [];
-        let used = searches[searches.length - 1]!;
-        let fresh: Headline[] = [];
-        for (const [i, search] of searches.entries()) {
-          const last = i === searches.length - 1;
-          let rows: Headline[];
-          try {
-            rows = await gdelt(search.query, hours, ctx.signal);
-          } catch (err) {
-            // A refused narrow query (GDELT's plain-text answer) falls back; anything else stops.
-            if (!last && err instanceof UpstreamError && err.kind === 'bad_response') {
-              tried.push({ ...search, found: 'refused' });
-              continue;
-            }
-            return upstreamFailure(err, 'GDELT news search');
-          }
-          fresh = rows.filter((r) => !r.seen_at || Date.parse(r.seen_at) >= cutoff);
-          tried.push({ ...search, found: fresh.length });
-          used = search;
-          if (fresh.length || last) break;
+        const run = await runSearches(place, hours, ctx.signal);
+        const { used, fresh, tried } = run;
+        if (run.error !== undefined) {
+          if (run.error instanceof RateLimitedError)
+            return unavailable(place, run.error, { hours, tried, position });
+          return upstreamFailure(run.error, 'GDELT news search');
         }
+        keepWarm(place, hours, run.fetchedAt);
         const listed = fresh.slice(0, max);
         const lines = listed.map((h, i) => {
           const age = h.seen_at
@@ -530,6 +597,7 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
         return {
           summary,
           data: {
+            status: 'ok',
             place: place.label,
             mode: used.mode,
             ...(place.metro ? { metro: place.metro.label } : {}),
@@ -539,6 +607,7 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
             ...(position ? { position } : {}),
             count: listed.length,
             headlines: listed,
+            retrieved_at: new Date(run.fetchedAt).toISOString(),
             source: 'GDELT Project (gdeltproject.org)',
           },
           observedAt: listed[0]?.seen_at,

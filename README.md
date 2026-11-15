@@ -6,11 +6,12 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 
 ## Why a gateway
 
-* Claude gets **four** tools instead of 40+: `find_tools` (BM25 search with hand-written
-  synonyms; with no query it lists every tool the policy allows, by category, paginated),
+* Claude gets **four** tools instead of 40+: `find_tools` (search with hand-written synonyms,
+  ranked by whole-word matches in a tool's name, then its tags, category and description, weak
+  matches dropped; with no query it lists every tool the policy allows, by category, paginated),
   `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
   `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, NWS alerts,
-  weather in F and mph, traffic, how many road closures are near and the nearest with road and
+  weather in °F and mph, traffic, how many road closures are near and the nearest with road and
   cross streets, border waits near a crossing, air quality and cameras, in parallel, each with a
   short timeout inside one overall budget and its data age; every section is listed, saying so
   when it has nothing, is not configured or can't run). The server instructions give the live tool count instead of
@@ -53,7 +54,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `border_wait_times` | gateway (roads) | waits at the Ambassador Bridge, tunnel, Gordie Howe and Blue Water bridges | none |
 | `flights_near` | gateway (aviation) | aircraft near a point or the phone, with registry and LADD/PIA flags | none (adsb.fi, personal non-commercial use; adsb.lol fallback, `ADSBLOL_DAILY_MAX`) |
 | `aircraft_lookup` | gateway (aviation) | one aircraft by hex or N-number from the FAA registry | the daily FAA registry copy (`AIRCRAFT_REGISTRY_SYNC`, or `scripts/aircraft-registry-sync.ts`) |
-| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind (in F and mph: the gateway converts GEV's C and km/h, keeping both in data) | GEV running (`GEV_URL`); none |
+| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind (in °F and mph: the gateway converts GEV's °C and km/h, keeping both in data) | GEV running (`GEV_URL`); none |
 | `get_earthquakes`, `get_cyclones`, `get_fire_perimeters` | GEV | earthquakes, tropical cyclones, wildfire perimeters | GEV; none |
 | `get_active_fires` | GEV | satellite fire detections (NASA FIRMS) | `FIRMS_MAP_KEY` in GEV |
 | `get_traffic_flow` | GEV | TomTom speed vs free flow in an area | `TOMTOM_API_KEY` in GEV (quota 20/h, 150/d) |
@@ -151,8 +152,10 @@ latest fix and is audited as a location read.
   for routing.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
   `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk, and `whats_happening_here` asks
-  it at most every 15 minutes (otherwise its line says TomTom was skipped to save the quota and
-  `road_closures` has the incidents); the City of Detroit permits are one in-memory snapshot
+  it unless it asked in the last 5 minutes or fewer than `TOMTOM_WHATS_HAPPENING_RESERVE` (20)
+  of the day's calls are left (then its line says which, with the calls left, and that
+  `road_closures` has the incidents; with no closure found it also says when TomTom's traffic
+  flow shows closed road nearby); the City of Detroit permits are one in-memory snapshot
   refreshed every 15 minutes (the last good copy is kept when a refresh fails, and results say how
   old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are
   cached 1-5 minutes and calls stay under 10 a
@@ -239,7 +242,7 @@ generic User-Agent, caps its output, labels it untrusted third-party data and cr
 |---|---|---|---|
 | `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": when the newest published call is an hour or more old, the result opens with its age, how much of the window is published and an `hours` value that covers published calls; nearest intersection only, never a house address; Detroit city limits only |
 | `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **OFF** without it, answering `not_configured`); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
-| `local_headlines` | Recent headlines about a place (`place`, or a point turned into the town there): first from the metro's local outlets (GDELT `domain:`, `src/extra/civic/outlets.ts`) or, elsewhere, outlets in the place's country (`sourcecountry:`, town `near20:` its state), then a broad search only if that finds nothing; `data.mode` and the summary say which; titles tidied | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | at most one GDELT request every 5 s per process (queued; at most two per call), 10-minute cache; headlines are untrusted third-party text |
+| `local_headlines` | Recent headlines about a place (`place`, or a point turned into the town there): first from the metro's local outlets (GDELT `domain:`, `src/extra/civic/outlets.ts`) or, elsewhere, outlets in the place's country (`sourcecountry:`, town `near20:` its state), then a broad search only if that finds nothing; `data.mode` and the summary say which; titles tidied | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | one GDELT queue for the whole gateway: requests at least 6 s apart plus jitter (at most two per call), 60 s of quiet after a refusal; when GDELT or the queue refuses, a normal result with status `unavailable`, the reason and "try again in N s"; 15-minute cache per query, and the last metro asked about is kept warm (refreshed at most every 15 minutes while it is asked for); headlines are untrusted third-party text |
 
 GEV's `get_transit_vehicles` no longer advertises DDOT, SMART or QLINE: its feed registry has no
 Michigan feed.

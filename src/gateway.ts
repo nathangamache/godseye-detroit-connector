@@ -11,6 +11,7 @@ import { StepUp, deriveStepUpKey, parseStepUpKey } from './auth/stepup.js';
 import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
+import { withGdeltNote } from './extra/civic/gdelt.js';
 import { registerCivicTools } from './extra/civic/index.js';
 import { registerRoads, type RoadsHandle } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
@@ -250,9 +251,9 @@ export async function startGateway(
       opts = { ...spec, args };
     }
     const child = new GevChild({ ...opts, logger: logger.child({ component: 'gev' }) });
-    child.on('catalog', (tools) =>
-      core.registry.setGevTools(tools, makeGevCaller(child), config.TOOL_TIMEOUT_MS),
-    );
+    // GEV's regional brief may ask GDELT from this address: the gateway's GDELT queue counts it.
+    const call = withGdeltNote(makeGevCaller(child));
+    child.on('catalog', (tools) => core.registry.setGevTools(tools, call, config.TOOL_TIMEOUT_MS));
     core.gev = child;
     void child.start();
   }

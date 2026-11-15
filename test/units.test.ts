@@ -1,5 +1,5 @@
 /**
- * US units: GEV's weather (Open-Meteo, C and km/h) reaches the user as "39 F (4 C)" and mph,
+ * US units: GEV's weather (Open-Meteo, °C and km/h) reaches the user as "39°F (4°C)" and mph,
  * with imperial fields added beside the metric ones; a GEV tool that ever takes a units argument
  * is asked for imperial by default; GEV itself is not changed.
  */
@@ -35,22 +35,27 @@ const GEV_WEATHER: ToolOutput = {
 };
 
 describe('unit conversion', () => {
-  it('converts temperatures to F (with C) and speeds to mph', () => {
+  it('converts temperatures to °F (with °C) and speeds to mph', () => {
     expect(cToF(0)).toBe(32);
     expect(cToF(-40)).toBe(-40);
     expect(kphToMph(100)).toBeCloseTo(62.14, 2);
-    expect(tempText(4)).toBe('39 F (4 C)');
-    expect(tempText(-5)).toBe('23 F (-5 C)');
+    expect(tempText(4)).toBe('39°F (4°C)');
+    expect(tempText(-5)).toBe('23°F (-5°C)');
     expect(windText(12)).toBe('7 mph');
-    expect(imperialText('clear, 3 °C, wind 20 km/h')).toBe('clear, 37 F (3 C), wind 12 mph');
+    expect(imperialText('clear, 3 °C, wind 20 km/h')).toBe('clear, 37°F (3°C), wind 12 mph');
     // The unrounded value from data wins when it rounds to the number shown.
-    expect(imperialText('4°C', { tempsC: [4.4] })).toBe('40 F (4 C)');
+    expect(imperialText('4°C', { tempsC: [4.4] })).toBe('40°F (4°C)');
     expect(imperialText('nothing metric here, 5 C')).toBe('nothing metric here, 5 C');
+    // Already converted text is left as it is (the °C in "(4°C)" is not converted again).
+    expect(imperialText('overcast, 40°F (4°C), wind 8 mph')).toBe(
+      'overcast, 40°F (4°C), wind 8 mph',
+    );
+    expect(imperialText(imperialText('-1°C and 3 °C'))).toBe('30°F (-1°C) and 37°F (3°C)');
   });
 
-  it('get_weather: summary in F and mph, imperial fields beside the metric ones', () => {
+  it('get_weather: summary in °F and mph, imperial fields beside the metric ones', () => {
     const out = imperialGevOutput('get_weather', GEV_WEATHER);
-    expect(out.summary).toBe('Weather at 42.3314, -83.0458: overcast, 40 F (4 C), wind 8 mph.');
+    expect(out.summary).toBe('Weather at 42.3314, -83.0458: overcast, 40°F (4°C), wind 8 mph.');
     expect((out.data as { weather: Record<string, unknown> }).weather).toMatchObject({
       temperature_c: 4.4,
       temperature_f: 39.9,
@@ -70,7 +75,7 @@ describe('unit conversion', () => {
       summary: 'Detroit: clear sky, -2°C, wind 9 km/h; 3 recent headlines.',
       data: { weather: { temperature_c: -2, wind_kph: 9 } },
     });
-    expect(brief.summary).toBe('Detroit: clear sky, 28 F (-2 C), wind 6 mph; 3 recent headlines.');
+    expect(brief.summary).toBe('Detroit: clear sky, 28°F (-2°C), wind 6 mph; 3 recent headlines.');
     const err = { summary: 'GEV error 4°C', isError: true };
     expect(imperialGevOutput('get_weather', err)).toBe(err);
     const other = { summary: 'Recent image, 4°C' };
@@ -112,7 +117,7 @@ describe('unit conversion', () => {
     const w = await registry
       .get('get_weather')!
       .run({ location: { lat: 42.33, lon: -83.05 } }, ctx);
-    expect(w.summary).toMatch(/40 F \(4 C\), wind 8 mph/);
+    expect(w.summary).toMatch(/40°F \(4°C\), wind 8 mph/);
     // GEV's get_weather takes no units argument: none is added.
     expect(seen[0]!.args).toEqual({ location: { lat: 42.33, lon: -83.05 } });
     await registry.get('get_wind')!.run({ location: { lat: 42.33, lon: -83.05 } }, ctx);

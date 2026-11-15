@@ -2,7 +2,8 @@
  * Civic tools (gateway-native, family "civic"):
  *   dpd_calls_near         City of Detroit Police Serviced 911 Calls (keyless, delayed hours)
  *   transit_vehicles_near  SMART buses and alerts via Swiftly GTFS-Realtime (SWIFTLY_API_KEY)
- *   local_headlines        GDELT DOC 2.0 news headlines for a place (keyless, 1 request / 5 s)
+ *   local_headlines        GDELT DOC 2.0 news headlines for a place (keyless; the shared GDELT
+ *                          queue, 1 request / 6 s plus jitter; 15-minute cache)
  * Registered through the normal registry, so policy, validation, quotas (CIVIC_TOOL_RATE_LIMITS
  * in toolRateLimits) and post-processing apply as for every other tool.
  */
@@ -14,7 +15,8 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import type { ToolDef } from '../../tools/types.js';
 import type { FetchLike } from './common.js';
 import { dpdTools } from './dpd.js';
-import { headlinesTools, type SpacedQueue } from './headlines.js';
+import type { SpacedQueue } from './gdelt.js';
+import { headlinesTools, type Schedule } from './headlines.js';
 import { transitTools } from './transit.js';
 
 export interface CivicDeps {
@@ -27,6 +29,8 @@ export interface CivicDeps {
   fetch?: FetchLike;
   /** Tests inject their own GDELT queue; production shares the process-wide one. */
   gdeltQueue?: SpacedQueue;
+  /** Tests run local_headlines' warm refresh themselves. */
+  headlinesSchedule?: Schedule;
 }
 
 export function civicTools(deps: CivicDeps): ToolDef[] {
@@ -45,7 +49,7 @@ export function civicTools(deps: CivicDeps): ToolDef[] {
       apiKey: deps.config.SWIFTLY_API_KEY,
       staticGtfs: deps.config.SMART_STATIC_GTFS,
     }),
-    ...headlinesTools({ ...base, queue: deps.gdeltQueue }),
+    ...headlinesTools({ ...base, queue: deps.gdeltQueue, schedule: deps.headlinesSchedule }),
   ];
 }
 

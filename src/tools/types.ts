@@ -27,7 +27,7 @@ export interface ToolContext {
   familyId?: string;
   /**
    * Road sources to leave out of this call, each with the note its report gives. Set only by a
-   * gateway composite (whats_happening_here saving the TomTom daily quota), never by a request.
+   * gateway composite (whats_happening_here sparing the TomTom daily quota), never by a request.
    */
   skipRoadSources?: Readonly<Record<string, string>>;
 }
@@ -57,5 +57,10 @@ export interface ToolDef {
    * the key, and run_tool answers a normal result with status not_configured (nothing fetched).
    */
   needsKey?: MissingKey;
+  /**
+   * What is left today of the daily caps of the metered sources this tool may ask, by source
+   * (road_closures: tomtom). A composite reads it to decide whether to leave one out.
+   */
+  quotas?(): Readonly<Record<string, { remaining: number; max: number }>>;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutput>;
 }

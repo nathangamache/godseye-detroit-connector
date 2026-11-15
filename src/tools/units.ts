@@ -1,7 +1,7 @@
 /**
- * US units for the user: temperatures in F (with C alongside, "39 F (4 C)") and wind in mph in
+ * US units for the user: temperatures in °F (with °C alongside, "39°F (4°C)") and wind in mph in
  * every text the gateway composes or passes on from God's Eye View's weather tools. GEV reports
- * Open-Meteo values in C and km/h and its tools take no units argument, so the gateway converts
+ * Open-Meteo values in °C and km/h and its tools take no units argument, so the gateway converts
  * their results (adding *_f / *_mph fields next to the metric ones) instead of changing GEV.
  * Should a GEV tool ever accept a units argument, imperial is asked for by default.
  */
@@ -10,9 +10,9 @@ import type { JsonSchema, ToolOutput } from './types.js';
 export const cToF = (c: number): number => (c * 9) / 5 + 32;
 export const kphToMph = (kph: number): number => kph / 1.609344;
 
-/** "39 F (4 C)". */
+/** "39°F (4°C)". */
 export function tempText(c: number): string {
-  return `${Math.round(cToF(c))} F (${Math.round(c)} C)`;
+  return `${Math.round(cToF(c))}°F (${Math.round(c)}°C)`;
 }
 
 /** "7 mph". */
@@ -20,7 +20,8 @@ export function windText(kph: number): string {
   return `${Math.round(kphToMph(kph))} mph`;
 }
 
-const TEMP_C = /(-?\d+(?:\.\d+)?)\s?°\s?C\b/g;
+/** A converted pair ("39°F (4°C)", left alone) or a temperature in °C alone (converted). */
+const TEMP_C = /-?\d+(?:\.\d+)?\s?°\s?F \(-?\d+(?:\.\d+)?\s?°\s?C\)|(-?\d+(?:\.\d+)?)\s?°\s?C\b/g;
 const SPEED_KPH = /(\d+(?:\.\d+)?)\s?km\/h\b/g;
 
 /** The precise value behind a rounded number in a text, when one rounds to it. */
@@ -29,16 +30,19 @@ function precise(shown: number, hints: number[]): number {
 }
 
 /**
- * Metric temperatures and wind speeds in a text, in US units: "4°C" -> "39 F (4 C)",
+ * Metric temperatures and wind speeds in a text, in US units: "4°C" -> "39°F (4°C)",
  * "12 km/h" -> "7 mph". A hint (the unrounded value from the tool's data) that rounds to the
- * number shown is converted instead, so 4.4 C reads 40 F rather than 39 F.
+ * number shown is converted instead, so 4.4°C reads 40°F rather than 39°F. Text converted
+ * already is left as it is.
  */
 export function imperialText(
   text: string,
   hints: { tempsC?: number[]; windsKph?: number[] } = {},
 ): string {
   return text
-    .replace(TEMP_C, (_m, n: string) => tempText(precise(Number(n), hints.tempsC ?? [])))
+    .replace(TEMP_C, (m: string, n: string | undefined) =>
+      n === undefined ? m : tempText(precise(Number(n), hints.tempsC ?? [])),
+    )
     .replace(SPEED_KPH, (_m, n: string) => windText(precise(Number(n), hints.windsKph ?? [])));
 }
 
@@ -71,7 +75,7 @@ function imperialRow(row: Record<string, unknown>): {
 export const GEV_WEATHER_TOOLS = new Set(['get_weather', 'get_regional_brief', 'get_wind']);
 
 /**
- * A GEV weather result in US units: the summary converted (F with C, mph) and imperial fields
+ * A GEV weather result in US units: the summary converted (°F with °C, mph) and imperial fields
  * added beside the metric ones in data (data.weather for get_weather / get_regional_brief,
  * speed_mph for get_wind). Other tools, and errors, pass through unchanged.
  */
