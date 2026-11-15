@@ -1143,9 +1143,41 @@ describe('City of Detroit permit snapshot', () => {
       'permit snapshot 16 min old (refreshed every 15 min); the last refresh failed (City of Detroit permits returned HTTP 500), so this is the last good copy',
     );
     expect(itemsOf(out)).toHaveLength(3);
-    // Tried again a minute later, not on every call.
+    // Tried again a minute later, not on every call; then two minutes after that, and so on.
     expect(layer4(x)).toBe(2);
     x.clock.now += 61_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    await vi.waitFor(() => expect(layer4(x)).toBe(3));
+    x.clock.now += 61_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(layer4(x)).toBe(3);
+    x.clock.now += 60_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    await vi.waitFor(() => expect(layer4(x)).toBe(4));
+  });
+
+  it('says when a failed first load will be tried again, backing off', async () => {
+    const x = h({}, { routes: [[/FeatureServer\/4\/query/, () => json({ error: 'busy' }, 503)]] });
+    const first = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permitReport(first)).toMatchObject({
+      status: 'error',
+      note: 'City of Detroit permits returned HTTP 503',
+    });
+    x.clock.now += 30_000;
+    const soon = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permitReport(soon).note).toBe(
+      'City of Detroit permits returned HTTP 503; the permit list will be fetched again within 1 min',
+    );
+    expect(layer4(x)).toBe(1);
+    x.clock.now += 31_000;
+    await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(layer4(x)).toBe(2);
+    // Two failures in a row: the next try is two minutes after the last.
+    x.clock.now += 61_000;
+    const later = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    expect(permitReport(later).note).toContain('fetched again within 1 min');
+    expect(layer4(x)).toBe(2);
+    x.clock.now += 60_000;
     await x.run('road_closures', { ...DETROIT, radius_km: 3 });
     expect(layer4(x)).toBe(3);
   });

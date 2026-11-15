@@ -38,7 +38,7 @@ export const DETROIT_REFRESH_MS = 15 * 60_000;
 export const DETROIT_PAGE_TIMEOUT_MS = 120_000;
 /** The layers' maxRecordCount: one page. */
 export const DETROIT_PAGE_SIZE = 1000;
-/** After a failed refresh, the next try comes this much later. */
+/** After a failed refresh, the next try comes this much later, doubling up to the refresh time. */
 const RETRY_MS = 60_000;
 /** Pages per layer per refresh (a bound on memory, far above today's count). */
 const MAX_PAGES = 40;
@@ -190,6 +190,8 @@ export class PermitSnapshot {
   private inflight: Promise<PermitSnapshotData> | undefined;
   private lastError: { at: number; message: string } | undefined;
   private lastAttempt = -Infinity;
+  /** Refreshes failed in a row (the retry waits 1, 2, 4 ... minutes, at most refreshMs). */
+  private failures = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private abort = new AbortController();
@@ -200,11 +202,13 @@ export class PermitSnapshot {
     return this.o.refreshMs ?? DETROIT_REFRESH_MS;
   }
 
+  /** How long after a failed refresh the next one may start. */
   private get retryMs(): number {
-    return this.o.retryMs ?? RETRY_MS;
+    const base = this.o.retryMs ?? RETRY_MS;
+    return Math.min(this.refreshMs, base * 2 ** Math.max(0, Math.min(10, this.failures - 1)));
   }
 
-  /** Background refresh: soon after start, then every refreshMs (a minute after a failure). */
+  /** Background refresh: soon after start, then every refreshMs (sooner after a failure). */
   start(): void {
     if (this.timer || this.stopped) return;
     this.schedule(this.o.startupDelayMs ?? STARTUP_DELAY_MS);
@@ -238,9 +242,11 @@ export class PermitSnapshot {
       (s) => {
         this.snap = s;
         this.lastError = undefined;
+        this.failures = 0;
         return s;
       },
       (err: unknown) => {
+        this.failures++;
         this.lastError = { at: this.o.now(), message: errorText(err) };
         this.o.onError?.(err);
         throw err;
@@ -326,10 +332,12 @@ export class PermitSnapshot {
         ...(failed ? { refreshError: this.lastError!.message } : {}),
       };
     }
-    if (!this.inflight && !due && this.lastError)
+    if (!this.inflight && !due && this.lastError) {
+      const wait = Math.max(1, Math.ceil((this.lastAttempt + this.retryMs - t) / 60_000));
       throw new Error(
-        `${this.lastError.message}; the permit list will be fetched again within a minute`,
+        `${this.lastError.message}; the permit list will be fetched again within ${wait} min`,
       );
+    }
     const p = this.inflight ?? this.refresh();
     const snap = await new Promise<PermitSnapshotData>((resolve, reject) => {
       const onAbort = () =>
