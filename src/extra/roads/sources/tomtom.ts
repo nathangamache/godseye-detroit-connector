@@ -3,6 +3,9 @@
  * licence decision) and TOMTOM_API_KEY is set. One bbox request (at most 10,000 km², the API's
  * limit) returns the incidents with their details, so the POST-by-id step is not needed.
  *
+ * An incident's direction is the one its text names, else the way its line heads: TomTom draws
+ * an incident in the direction of travel it affects (both directions come as two incidents).
+ *
  * Never cached: TomTom's terms allow caching only as the response's Cache-Control headers say,
  * and Incident Details sends none. A hard daily cap (TOMTOM_INCIDENTS_DAILY_MAX, counted on disk
  * so a restart does not reset it) bounds use. Not used for routing (TomTom's terms exclude
@@ -26,6 +29,7 @@ import {
   clampToWorld,
   lineMidpoint,
   round6,
+  travelDirection,
   type BBox,
   type LonLat,
   type Point,
@@ -122,7 +126,7 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
       kind: cat === 9 ? 'work_zone' : 'incident',
       type: TYPE[cat] ?? 'incident',
       road: roads || null,
-      direction: null,
+      direction: directionOf(desc, line),
       lanes: cat === 7 ? 'lane(s) closed' : cat === 8 ? 'all lanes' : null,
       vehicle_impact: cat === 8 ? 'road closed' : impact || null,
       full_closure: cat === 8,
@@ -137,6 +141,16 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
     });
   }
   return out;
+}
+
+/**
+ * The direction an incident is in: as TomTom's text says it ("Closed northbound"), else the way
+ * its line heads (TomTom draws an incident in the direction of travel it affects), else null.
+ */
+export function directionOf(text: string, line: LonLat[]): string | null {
+  if (/\bboth directions\b/i.test(text)) return 'both directions';
+  const m = /\b(north|south|east|west)[ -]?bound\b/i.exec(text);
+  return m ? `${m[1]!.toLowerCase()}bound` : travelDirection(line);
 }
 
 /**

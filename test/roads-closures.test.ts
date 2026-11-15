@@ -28,7 +28,7 @@ import {
 import { ToolPolicy } from '../src/tools/policy.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ontario511Source, parseOntario } from '../src/extra/roads/sources/ontario511.js';
-import { TOMTOM_ATTRIBUTION } from '../src/extra/roads/sources/tomtom.js';
+import { TOMTOM_ATTRIBUTION, parseTomTom } from '../src/extra/roads/sources/tomtom.js';
 import { parseRideRecord, recordsOf } from '../src/extra/roads/sources/mdotRide.js';
 import { Http } from '../src/extra/roads/http.js';
 import { mentionsRoad, normRoad, roadQuery, cleanText } from '../src/extra/roads/text.js';
@@ -894,6 +894,59 @@ describe('TomTom road names', () => {
     );
   });
 
+  it("fills each item's direction: as TomTom's text says, else the way its line heads", () => {
+    const withText = (id: string, text: string) => {
+      const f = unnamedClosure(id, CLOSED_NB, 'Alpha St', 'Bravo St');
+      (f.properties as Record<string, unknown>).events = [{ description: text, code: 401 }];
+      return f;
+    };
+    const items = parseTomTom({
+      incidents: [
+        ...TOMTOM.incidents,
+        unnamedClosure(
+          'east',
+          [
+            [-83.06, 42.34],
+            [-83.05, 42.3402],
+          ],
+          'Alpha St',
+          'Bravo St',
+        ),
+        unnamedClosure(
+          'west',
+          [
+            [-83.05, 42.35],
+            [-83.06, 42.3499],
+          ],
+          'Bravo St',
+          'Alpha St',
+        ),
+        // The text names a direction: it wins over the line.
+        withText('said-sb', 'Closed southbound'),
+        withText('said-both', 'Closed in both directions'),
+        // Too short to tell.
+        unnamedClosure(
+          'short',
+          [
+            [-83.05, 42.34],
+            [-83.05, 42.3401],
+          ],
+          'Alpha St',
+          'Bravo St',
+        ),
+      ],
+    });
+    expect(items.map((i) => [i.id, i.direction])).toEqual([
+      ['tomtom:tt-closed-1', 'northbound'],
+      ['tomtom:tt-jam-2', null],
+      ['tomtom:east', 'eastbound'],
+      ['tomtom:west', 'westbound'],
+      ['tomtom:said-sb', 'southbound'],
+      ['tomtom:said-both', 'both directions'],
+      ['tomtom:short', null],
+    ]);
+  });
+
   it('labels a way by its name and route numbers', () => {
     expect(roadLabel({ name: 'Woodward Avenue', ref: 'M 1' })).toBe('Woodward Avenue (M-1)');
     expect(roadLabel({ ref: 'I 94;US 12' })).toBe('I-94 / US-12');
@@ -1008,7 +1061,7 @@ describe('one item per closed stretch', () => {
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     expect(out.summary).toContain(
-      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (1.9 km away).',
+      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (northbound, 1.9 km away).',
     );
     // Along a road, the length of the stretch stands in for the distance.
     const byRoad = await x.run('road_closures', { road: 'Charlie Avenue' });
@@ -1099,16 +1152,16 @@ describe('one item per closed stretch', () => {
     expect(tt.filter((i) => i.merged_reports !== undefined)).toEqual([]);
     expect(tt.find((i) => i.road === 'Charlie Avenue')).toMatchObject({
       from_cross_street: 'Alpha St',
-      direction: null,
+      direction: 'northbound',
       full_closure: true,
     });
     expect(tt.find((i) => i.road === 'Delta Street')).toMatchObject({
       from_cross_street: 'Bravo St',
-      direction: null,
+      direction: 'southbound',
       full_closure: true,
     });
     expect(out.summary).toContain(
-      '4 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now), 3 full closure(s): Charlie Avenue: road closed between Alpha St and Bravo St (0.5 km away); Delta Street: road closed between Bravo St and Alpha St (0.6 km away);',
+      '4 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now), 3 full closure(s): Charlie Avenue: road closed between Alpha St and Bravo St (northbound, 0.5 km away); Delta Street: road closed between Bravo St and Alpha St (southbound, 0.6 km away);',
     );
   });
 
@@ -1119,7 +1172,7 @@ describe('one item per closed stretch', () => {
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     expect(out.summary).toContain(
-      ': Unknown road: road closed between Alpha St and Bravo St (0.5 km away);',
+      ': Unknown road: road closed between Alpha St and Bravo St (northbound, 0.5 km away);',
     );
     const permits = await h().run('road_closures', { ...DETROIT, radius_km: 3 });
     expect(permits.summary).toContain(
