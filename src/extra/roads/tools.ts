@@ -20,9 +20,12 @@ import {
   type Kind,
   type PublicItem,
 } from './closures.js';
+import { haversineM } from '../../util/geo.js';
 import {
   ATTRIBUTION as GEO_ATTRIBUTION,
   OSM_ATTRIBUTION,
+  looksLikeAddress,
+  parseIntersection,
   type Geocoder,
   type Place,
 } from './geocode.js';
@@ -315,7 +318,9 @@ const geocodeSchema = z.strictObject({
   near: z
     .union([z.literal('here'), point])
     .optional()
-    .describe('"here" (the phone) or {lat, lon}: nearest matches first'),
+    .describe(
+      '"here" (the phone) or {lat, lon}: among places that match the name equally well, the nearest first',
+    ),
   limit: z.number().int().min(1).max(5).optional().describe('Most matches (default 3)'),
 });
 
@@ -330,7 +335,7 @@ function geocodeTool(deps: RoadsToolDeps): ToolDef {
     name: 'geocode_place',
     title: 'Geocode a place, address or intersection',
     description:
-      'Coordinates for a place name, street address or intersection, biased to SE Michigan: US Census Geocoder for street addresses, then Photon (OpenStreetMap), then public Nominatim as a capped last resort; intersections ("I-94 and M-10") need a self-hosted Overpass. Use it to turn names into lat/lon for the other tools.',
+      'Coordinates for a place name, street address or intersection, biased to SE Michigan: US Census Geocoder for street addresses, then Photon (OpenStreetMap), then public Nominatim as a capped last resort; intersections ("I-94 and M-10") need a self-hosted Overpass. Best name match first (name_match, 0 to 1); "near" only orders equally good matches. Use it to turn names into lat/lon for the other tools.',
     source: 'gateway',
     family: 'roads',
     inputSchema: schema,
@@ -407,15 +412,45 @@ const routeSchema = z.strictObject({
   units: z.enum(['mi', 'km']).optional().describe('Distance units (default mi)'),
 });
 
+/** A named place a route goes to must match the name asked for at least this well (0 to 1). */
+export const MIN_NAME_MATCH = 0.5;
+/** The two best matches are this close or closer: the route names the other one too. */
+export const CLOSE_MATCH = 0.1;
+
+/** "5200 Woodward Avenue, Detroit": a place's street and city, not its name again. */
+function shortAddress(p: Place): string | null {
+  if (!p.address || p.address === p.name) return null;
+  const name = p.name.toLowerCase();
+  const parts = p.address
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && s.toLowerCase() !== name);
+  return parts.slice(0, 2).join(', ') || null;
+}
+
+/** "Detroit Institute of Arts, 5200 Woodward Avenue, Detroit". */
+function placeText(p: Place): string {
+  const a = shortAddress(p);
+  return a ? `${p.name}, ${a}` : p.name;
+}
+
+interface Endpoint {
+  point: Point;
+  label: string;
+  source: string;
+  note?: string;
+  attribution?: string;
+  /** A geocoded place: what was found, and a close second match when there is one. */
+  place?: Place;
+  alternative?: Place;
+}
+
 async function resolveEndpoint(
   deps: RoadsToolDeps,
   v: string | Point,
   ctx: ToolContext,
   near: Point | undefined,
-): Promise<
-  | { point: Point; label: string; source: string; note?: string; attribution?: string }
-  | { error: string }
-> {
+): Promise<Endpoint | { error: string }> {
   if (typeof v !== 'string')
     return { point: v, label: `${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}`, source: 'coordinates' };
   if (v.trim().toLowerCase() === 'here') {
@@ -424,18 +459,66 @@ async function resolveEndpoint(
       ? { point: h.point, label: 'the phone', source: 'phone', note: h.note }
       : { error: h.error };
   }
-  const r = await deps.geocoder.search(v, { near, limit: 1 }, ctx.signal);
-  const p = r.places[0];
+  // geocode_place's own ranking: the name first, the start point only among equal matches.
+  const r = await deps.geocoder.search(v, { near, limit: 5 }, ctx.signal);
+  const asked = cleanText(v, 80);
+  // A place name must be matched by name; an address or an intersection by its parts.
+  const named = !looksLikeAddress(v) && !parseIntersection(v);
+  const fit = named ? r.places.filter((p) => (p.name_match ?? 0) >= MIN_NAME_MATCH) : r.places;
+  const p = fit[0];
+  if (!p && r.places.length)
+    return {
+      error: `No place named "${asked}" was found: the closest match, ${placeText(r.places[0]!)}, has a different name. Give the place's full name or its street address, or pass {lat, lon}.`,
+    };
   if (!p)
     return {
-      error: `Could not find "${cleanText(v, 80)}" (tried ${r.attempts.map((t) => `${t.source} ${t.status}`).join(', ')}). Pass {lat, lon} instead.`,
+      error: `Could not find "${asked}" (tried ${r.attempts.map((t) => `${t.source} ${t.status}`).join(', ')}). Pass {lat, lon} instead.`,
     };
+  const second = fit[1];
+  const alternative =
+    second && (p.name_match ?? 0) - (second.name_match ?? 0) <= CLOSE_MATCH ? second : undefined;
   // The label is the place's name only; the geocoder goes in data and the attribution.
   return {
     point: { lat: p.lat, lon: p.lon },
     label: p.name,
     source: p.source,
     attribution: p.attribution,
+    place: p,
+    ...(alternative ? { alternative } : {}),
+  };
+}
+
+/** "Destination: Detroit Institute of Arts, 5200 Woodward Avenue, Detroit." (geocoded only). */
+function endpointLine(role: 'Start' | 'Destination', e: Endpoint, from?: Point): string {
+  if (!e.place) return '';
+  const away = (p: Place) =>
+    from
+      ? `, ${Math.round(haversineM(from.lat, from.lon, p.lat, p.lon) / 100) / 10} km from the start`
+      : '';
+  const alt = e.alternative
+    ? ` (another close match: ${placeText(e.alternative)}${away(e.alternative)})`
+    : '';
+  return `${role}: ${placeText(e.place)}${alt}.`;
+}
+
+/** What data says about a geocoded endpoint. */
+function endpointData(e: Endpoint): Record<string, unknown> | undefined {
+  if (!e.place) return undefined;
+  const p = e.place;
+  return {
+    name: p.name,
+    address: p.address,
+    kind: p.kind,
+    name_match: p.name_match,
+    ...(e.alternative
+      ? {
+          alternative: {
+            name: e.alternative.name,
+            address: e.alternative.address,
+            name_match: e.alternative.name_match,
+          },
+        }
+      : {}),
   };
 }
 
@@ -449,7 +532,7 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
     name: 'route_avoiding_closures',
     title: 'Driving route that avoids road closures',
     description:
-      'Driving directions between two places ("here", a place name or address, or lat/lon) on OpenStreetMap data (Valhalla), routed around full road closures reported by City of Detroit permits, MDOT RIDE and Ontario 511: distance, duration (no live traffic), maneuvers with street names, closures_avoided and warnings for lane closures on the way.',
+      'Driving directions between two places ("here", a place name or address, or lat/lon) on OpenStreetMap data (Valhalla), routed around full road closures reported by City of Detroit permits, MDOT RIDE and Ontario 511: distance, duration (no live traffic), maneuvers with street names, closures_avoided and warnings for lane closures on the way. Place names are found as geocode_place ranks them (the best name match, never a nearer place with a different name); the summary names the start and destination found, and a close second match.',
     source: 'gateway',
     family: 'roads',
     inputSchema: schema,
@@ -487,7 +570,14 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
           { units, avoid: a.avoid_closures ?? true },
           ctx.signal,
         );
-        const notes = [from.note, to.note].filter(Boolean).join(' ');
+        const notes = [
+          from.note,
+          to.note,
+          endpointLine('Start', from),
+          endpointLine('Destination', to, from.point),
+        ]
+          .filter(Boolean)
+          .join(' ');
         const extra =
           r.closures_avoided.length || r.warnings.length
             ? ' Closure descriptions are third-party text.'
@@ -508,6 +598,14 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
             from: from.label,
             to: to.label,
             located_by: { from: from.source, to: to.source },
+            ...(from.place || to.place
+              ? {
+                  places: {
+                    ...(from.place ? { from: endpointData(from) } : {}),
+                    ...(to.place ? { to: endpointData(to) } : {}),
+                  },
+                }
+              : {}),
             distance: r.distance,
             units,
             duration_min: r.duration_min,

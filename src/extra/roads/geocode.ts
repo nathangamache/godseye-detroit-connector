@@ -6,7 +6,9 @@
  *   4. public Nominatim, last resort: at most 1 request/s and GEOCODER_NOMINATIM_DAILY_MAX a day
  * Answers are cached on disk in the gateway data volume (Nominatim's policy requires caching).
  * The cache key is the query only: a caller's "near" point only re-ranks cached answers, so the
- * cache never holds the user's position. Also: reverse lookups of street names (cached).
+ * cache never holds the user's position. Answers are ranked by how well the name matches the
+ * query; "near" only orders places that match equally well (rankPlaces). Also: reverse lookups
+ * of street names (cached).
  */
 import { haversineM } from '../../util/geo.js';
 import type { DailyCounter, DiskCache, Http, Pacer } from './http.js';
@@ -57,6 +59,8 @@ export interface Place {
   /** Inside the south-east Michigan box results are biased to. */
   in_region: boolean;
   distance_km?: number;
+  /** How well the name (or, for an address, the address) matches the query: 0 to 1. */
+  name_match?: number;
 }
 
 export interface GeocodeAttempt {
@@ -122,6 +126,139 @@ export function parseIntersection(q: string): [string, string] | undefined {
   const a = m[1]!.trim();
   const b = m[2]!.trim();
   return a && b && !/[;"\\]/.test(a + b) ? [a, b] : undefined;
+}
+
+// ---------------------------------------------------------------- name matching
+
+/** Words that say nothing about which place is meant. */
+const STOPWORDS = new Set(['the', 'of', 'a', 'an', 'and', 'at', 'in', 'for']);
+/** Spellings of one word (street suffixes and directions are normRoad's). */
+const PLACE_WORDS: Record<string, string> = {
+  saint: 'st',
+  mount: 'mt',
+  fort: 'ft',
+  michigan: 'mi',
+  centre: 'center',
+  theatre: 'theater',
+};
+
+/** A text's words, normalised: lower case, no accents, "Avenue" -> "ave", "Eight" -> "8". */
+function words(s: string): string[] {
+  const plain = s.normalize('NFKD').replace(/[̀-ͯ]/g, '');
+  return normRoad(plain)
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => PLACE_WORDS[w] ?? w);
+}
+
+/** The words that tell places apart (no "the", "of", ...), each once. */
+function contentWords(s: string): string[] {
+  return [...new Set(words(s).filter((w) => !STOPWORDS.has(w)))];
+}
+
+const stem = (w: string) => (w.length > 3 && w.endsWith('s') && !/\d/.test(w) ? w.slice(0, -1) : w);
+
+/** a and b differ by at most one inserted, deleted or changed letter (a no longer than b). */
+function oneEdit(a: string, b: string): boolean {
+  if (b.length - a.length > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (a.length === b.length) i++;
+    j++;
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+/**
+ * How well two words match: 1 the same (or a plural), 0.85 a prefix of 4+ letters ("metro",
+ * "metropolitan") or one typo in 5+ letters, else 0. Numbers match only exactly.
+ */
+function wordMatch(a: string, b: string): number {
+  if (a === b || stem(a) === stem(b)) return 1;
+  if (/\d/.test(a) || /\d/.test(b)) return 0;
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
+  if (s.length >= 4 && l.startsWith(s)) return 0.85;
+  if (s.length >= 5 && oneEdit(s, l)) return 0.85;
+  return 0;
+}
+
+const bestMatch = (w: string, list: string[]) =>
+  list.reduce((m, x) => Math.max(m, wordMatch(w, x)), 0);
+
+/** "dia" for "Detroit Institute of Arts" (with or without the small words). */
+function isAcronym(q: string, name: string): boolean {
+  if (!/^[a-z]{2,6}$/.test(q)) return false;
+  const all = words(name);
+  if (all.length < 2) return false;
+  const initials = (ws: string[]) => ws.map((w) => w[0]).join('');
+  return initials(all) === q || initials(all.filter((w) => !STOPWORDS.has(w))) === q;
+}
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
+
+/**
+ * How well a place matches what was asked for, 0 to 1 (1: the same words).
+ *
+ * A place name: the words asked for, found in the place's name (full credit) or only in its
+ * address (half credit, "Detroit" in "Detroit Institute of Arts" found in a city), weighed 3 to 1
+ * against the name's own words found in the query, so an exact name beats a longer one that
+ * merely contains some of the words. Words after a comma ("Comerica Park, Detroit") qualify the
+ * place and are looked for in its name or address. A street address or an intersection: the
+ * share of the words asked for that the name or address has.
+ */
+export function nameMatch(query: string, p: Pick<Place, 'name' | 'address'>): number {
+  const whole = contentWords(query);
+  if (!whole.length) return 0;
+  const name = contentWords(p.name);
+  const addr = contentWords(p.address ?? '');
+  if (looksLikeAddress(query) || parseIntersection(query)) {
+    const hay = [...name, ...addr];
+    return round2(whole.reduce((m, w) => m + bestMatch(w, hay), 0) / whole.length);
+  }
+  if (!name.length) return 0;
+  const comma = query.indexOf(',');
+  const head = comma > 0 ? contentWords(query.slice(0, comma)) : [];
+  const q = head.length ? head : whole;
+  const quals = head.length ? contentWords(query.slice(comma + 1)) : [];
+  const cov =
+    q.reduce((m, w) => m + Math.max(bestMatch(w, name), bestMatch(w, addr) * 0.5), 0) / q.length;
+  const prec = name.reduce((m, w) => m + bestMatch(w, q), 0) / name.length;
+  let score = 0.75 * cov + 0.25 * prec;
+  if (q.length === 1 && isAcronym(q[0]!, p.name)) score = Math.max(score, 0.9);
+  if (quals.length) {
+    const hay = [...name, ...addr];
+    score *= 0.85 + (0.15 * quals.reduce((m, w) => m + bestMatch(w, hay), 0)) / quals.length;
+  }
+  return round2(score);
+}
+
+/**
+ * Best first: the better name match (nameMatch), always; among places that match equally well,
+ * the nearer to `near` when given, else those in SE Michigan; then the geocoder's own order.
+ * Proximity never puts a worse name match ahead of a better one.
+ */
+export function rankPlaces(query: string, places: Place[], near?: Point): Place[] {
+  const rows = places.map((p, i) => {
+    const d = near ? haversineM(near.lat, near.lon, p.lat, p.lon) : 0;
+    const out: Place = { ...p, name_match: nameMatch(query, p) };
+    if (near) out.distance_km = Math.round(d / 100) / 10;
+    return { p: out, i, d };
+  });
+  rows.sort(
+    (a, b) =>
+      b.p.name_match! - a.p.name_match! ||
+      (near ? a.d - b.d : Number(b.p.in_region) - Number(a.p.in_region)) ||
+      a.i - b.i,
+  );
+  return rows.map((r) => r.p);
 }
 
 const SUFFIX_TOKENS = new Set([
@@ -264,15 +401,8 @@ export class Geocoder {
       const ttl = cacheTtl(hit);
       if (ttl) this.o.cache.set(key, hit, ttl);
     }
-    let places = hit.places.map((p) => ({ ...p }));
-    if (opts.near) {
-      const near = opts.near;
-      for (const p of places)
-        p.distance_km = Math.round(haversineM(near.lat, near.lon, p.lat, p.lon) / 100) / 10;
-      places.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
-    } else {
-      places = [...places.filter((p) => p.in_region), ...places.filter((p) => !p.in_region)];
-    }
+    // The name first, then proximity (or the region) among equally good matches.
+    const places = rankPlaces(q, hit.places, opts.near);
     return { places: places.slice(0, opts.limit), attempts: hit.attempts, cached };
   }
 
