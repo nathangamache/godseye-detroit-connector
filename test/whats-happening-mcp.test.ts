@@ -1,8 +1,8 @@
 /**
  * whats_happening_here over MCP spares the TomTom daily quota: the connector builds a fresh MCP
- * server per request, yet two summaries a minute apart make one TomTom request between them
- * (the pacing lives with the HTTP handler, not the per-request server), and the second says it
- * skipped TomTom. All HTTP is mocked.
+ * server per request, yet two summaries in a row (within 5 minutes) make one TomTom request
+ * between them (the pacing lives with the HTTP handler, not the per-request server), and the
+ * second says why it skipped TomTom, with the requests left. All HTTP is mocked.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -80,8 +80,8 @@ describe('whats_happening_here and the TomTom quota', () => {
       await client.callTool({ name: 'whats_happening_here', arguments: { ...DETROIT } }),
     );
     expect(tomtom).toHaveLength(1);
-    expect(second).toContain(
-      'TomTom incidents skipped to save the daily quota; ask road_closures for them',
+    expect(second).toMatch(
+      /TomTom incidents skipped: this summary asked TomTom \d+ s ago and asks it at most every 5 min; 59 of 60 requests left today; ask road_closures for TomTom incidents\./,
     );
     // road_closures through run_tool still asks TomTom (nothing is cached).
     const rc = await client.callTool({

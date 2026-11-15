@@ -177,6 +177,8 @@ function harness(
     fixAgeS?: number;
     /** A real tool in place of the fake road_closures. */
     roadClosures?: ToolDef;
+    /** What the fake road_closures says is left of its metered sources' daily caps. */
+    quotas?: ToolDef['quotas'];
     tomtomGate?: IntervalGate;
   } = {},
 ): Harness {
@@ -228,6 +230,7 @@ function harness(
   ])
     registry.register({
       ...(n === 'road_closures' && opts.roadClosures ? opts.roadClosures : def(n, 'gateway')),
+      ...(n === 'road_closures' && opts.quotas ? { quotas: opts.quotas } : {}),
       // As registerWeatherTools does without AIRNOW_API_KEY.
       ...(n === 'air_quality' && opts.airQuality === false
         ? { needsKey: { env: 'AIRNOW_API_KEY', what: 'a free EPA AirNow API key' } }
@@ -524,12 +527,11 @@ describe('whats_happening_here sections', () => {
     );
   });
 
-  it('asks TomTom at most every 15 min (no caching) and shows the requests left when it does', async () => {
-    const TOMTOM_ON = { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true' };
-    let left = 60;
-    const closures: Behaviour = async (_a, ctx) => {
+  /** road_closures as it answers with TomTom asked (one request spent) or left out (its note). */
+  function tomtomClosures(state: { left: number }): Behaviour {
+    return async (_a, ctx) => {
       const skip = ctx.skipRoadSources?.tomtom;
-      if (!skip) left--;
+      if (!skip) state.left--;
       return {
         summary: 'road_closures',
         data: {
@@ -552,45 +554,81 @@ describe('whats_happening_here sections', () => {
                   status: 'ok',
                   count: 0,
                   found: 2,
-                  quota: { remaining: left, max: 60 },
+                  quota: { remaining: state.left, max: 60 },
                 },
           ],
         },
       };
     };
-    const h = harness({ road_closures: closures }, { env: TOMTOM_ON });
+  }
+  const TOMTOM_ON = { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true' };
+  const skipsOf = (h: Harness) =>
+    h.calls.filter((c) => c.name === 'road_closures').map((c) => c.ctx.skipRoadSources?.tomtom);
+
+  it('asks TomTom unless this summary asked it in the last 5 min (never cached), with the requests left', async () => {
+    const state = { left: 54 };
+    const h = harness(
+      { road_closures: tomtomClosures(state) },
+      { env: TOMTOM_ON, quotas: () => ({ tomtom: { remaining: state.left, max: 60 } }) },
+    );
+    // 54 of 60 left is well above the reserve: TomTom is asked.
     const first = await h.run(DETROIT);
     expect(line(first.text, 'Road closures')).toMatch(
-      /TomTom incidents: 2 \(59 of 60 requests left today\)/,
+      /TomTom incidents: 2 \(53 of 60 requests left today\)/,
     );
-    // Within 15 min: TomTom is left out of the call (not served from a cache) and the line says so.
-    h.clock.now += 14 * 60_000;
+    // 4 min later: left out of the call (not served from a cache), and the line says why.
+    h.clock.now += 4 * 60_000;
     const second = await h.run(DETROIT);
     expect(line(second.text, 'Road closures')).toContain(
-      'TomTom incidents skipped to save the daily quota; ask road_closures for them',
+      'TomTom incidents skipped: this summary asked TomTom 4 min ago and asks it at most every 5 min; 53 of 60 requests left today; ask road_closures for TomTom incidents.',
     );
-    expect(left).toBe(59);
-    const ctxs = h.calls.filter((c) => c.name === 'road_closures').map((c) => c.ctx);
-    expect(ctxs[0]!.skipRoadSources).toBeUndefined();
-    expect(ctxs[1]!.skipRoadSources).toEqual({
-      tomtom: 'skipped to save the daily quota; ask road_closures for them',
-    });
-    // 15 min after the last use: asked again.
+    expect(state.left).toBe(53);
+    // 5 min after the last request: asked again.
     h.clock.now += 60_000;
     const third = await h.run(DETROIT);
     expect(line(third.text, 'Road closures')).toMatch(
-      /TomTom incidents: 2 \(58 of 60 requests left today\)/,
+      /TomTom incidents: 2 \(52 of 60 requests left today\)/,
     );
+    expect(skipsOf(h).map((x) => x === undefined)).toEqual([true, false, true]);
     // Without TomTom configured nothing is held back.
-    const off = harness({ road_closures: closures });
+    const off = harness({ road_closures: tomtomClosures({ left: 60 }) });
     await off.run(DETROIT);
     await off.run(DETROIT);
-    expect(
-      off.calls.filter((c) => c.name === 'road_closures').map((c) => c.ctx.skipRoadSources),
-    ).toEqual([undefined, undefined]);
+    expect(skipsOf(off)).toEqual([undefined, undefined]);
   });
 
-  it('a slot TomTom did not use (daily cap reached) is given back', async () => {
+  it('leaves TomTom out when fewer than the reserve are left today (TOMTOM_WHATS_HAPPENING_RESERVE, 20)', async () => {
+    const state = { left: 19 };
+    const quotas = () => ({ tomtom: { remaining: state.left, max: 60 } });
+    const h = harness({ road_closures: tomtomClosures(state) }, { env: TOMTOM_ON, quotas });
+    const low = await h.run(DETROIT);
+    expect(line(low.text, 'Road closures')).toContain(
+      'TomTom incidents skipped: 19 of 60 requests left today, below the 20 this summary leaves for road_closures (TOMTOM_WHATS_HAPPENING_RESERVE); ask road_closures for TomTom incidents.',
+    );
+    expect(state.left).toBe(19);
+    // Leaving TomTom out is not a use: with 20 left the next summary asks at once.
+    state.left = 20;
+    h.clock.now += 60_000;
+    const at = await h.run(DETROIT);
+    expect(line(at.text, 'Road closures')).toMatch(
+      /TomTom incidents: 2 \(19 of 60 requests left today\)/,
+    );
+    expect(skipsOf(h).map((x) => x === undefined)).toEqual([false, true]);
+    // A smaller reserve lets it ask with fewer left.
+    const few = { left: 6 };
+    const h2 = harness(
+      { road_closures: tomtomClosures(few) },
+      {
+        env: { ...TOMTOM_ON, TOMTOM_WHATS_HAPPENING_RESERVE: '5' },
+        quotas: () => ({ tomtom: { remaining: few.left, max: 60 } }),
+      },
+    );
+    await h2.run(DETROIT);
+    expect(skipsOf(h2)).toEqual([undefined]);
+    expect(few.left).toBe(5);
+  });
+
+  it('a slot TomTom did not use (refused for its daily cap) is given back', async () => {
     const env = { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true' };
     let capped = true;
     const h = harness(
@@ -615,7 +653,7 @@ describe('whats_happening_here sections', () => {
                     label: 'TomTom incidents',
                     status: 'ok',
                     count: 0,
-                    quota: { remaining: 12, max: 60 },
+                    quota: { remaining: 32, max: 60 },
                   },
             ],
           },
@@ -629,34 +667,93 @@ describe('whats_happening_here sections', () => {
     h.clock.now += 60_000;
     const again = await h.run(DETROIT);
     expect(line(again.text, 'Road closures')).toMatch(
-      /TomTom incidents: 0 \(12 of 60 requests left today\)/,
+      /TomTom incidents: 0 \(32 of 60 requests left today\)/,
     );
   });
 
-  it('with the real road_closures: one TomTom request across calls 5 min apart, two after 15 min', async () => {
-    const roads = roadsHarness(ALL_KEYS);
+  it('with the real road_closures: one TomTom request for calls 4 min apart, another after 5 min, none below the reserve', async () => {
+    const env = { ...ALL_KEYS, TOMTOM_INCIDENTS_DAILY_MAX: '22' };
+    const roads = roadsHarness(env);
     try {
-      const h = harness({}, { env: ALL_KEYS, roadClosures: roads.tools.road_closures });
+      const h = harness({}, { env, roadClosures: roads.tools.road_closures });
       const a = await h.run(DETROIT);
       expect(roads.mock.count(/tomtom/)).toBe(1);
       expect(line(a.text, 'Road closures')).toMatch(
-        /TomTom incidents: \d+ \(59 of 60 requests left today\)/,
+        /TomTom incidents: \d+ \(21 of 22 requests left today\)/,
       );
-      h.clock.now += 5 * 60_000;
+      h.clock.now += 4 * 60_000;
       const b = await h.run(DETROIT);
       expect(roads.mock.count(/tomtom/)).toBe(1);
       expect(line(b.text, 'Road closures')).toContain(
-        'TomTom incidents skipped to save the daily quota; ask road_closures for them',
+        'TomTom incidents skipped: this summary asked TomTom 4 min ago and asks it at most every 5 min; 21 of 22 requests left today; ask road_closures for TomTom incidents.',
       );
       // road_closures itself still asks TomTom (never answered from a cache).
       await roads.run('road_closures', { ...DETROIT, radius_km: 5 });
       expect(roads.mock.count(/tomtom/)).toBe(2);
-      h.clock.now += 15 * 60_000;
+      // 20 left is not below the reserve of 20: asked.
+      h.clock.now += 5 * 60_000;
       await h.run(DETROIT);
       expect(roads.mock.count(/tomtom/)).toBe(3);
+      // 19 left is: not asked, and the line says how many are left.
+      h.clock.now += 5 * 60_000;
+      const d = await h.run(DETROIT);
+      expect(roads.mock.count(/tomtom/)).toBe(3);
+      expect(line(d.text, 'Road closures')).toContain(
+        'TomTom incidents skipped: 19 of 22 requests left today, below the 20 this summary leaves for road_closures (TOMTOM_WHATS_HAPPENING_RESERVE); ask road_closures for TomTom incidents.',
+      );
     } finally {
       rmSync(roads.dir, { recursive: true, force: true });
     }
+  });
+
+  it('an empty closure section notes the closed road TomTom traffic flow sees', async () => {
+    const none: ToolOutput = {
+      summary: 'road_closures',
+      data: {
+        count: 0,
+        total: 0,
+        items: [],
+        sources: [
+          {
+            source: 'detroit_row',
+            label: 'City of Detroit permits',
+            status: 'ok',
+            count: 0,
+            found: 0,
+          },
+        ],
+      },
+    };
+    const flow =
+      (closedKm: number): Behaviour =>
+      async () => ({
+        summary: `Traffic in the area: 81% of free-flow speed on average; 1.2 km congested of 40.3 km measured${closedKm ? `; ${closedKm} km closed.` : '.'}`,
+        data: { congested_km: 1.2, closed_km: closedKm },
+      });
+    const NOTE =
+      'TomTom traffic flow sees 0.9 km of closed road segments within 3 km that may not be listed as incidents.';
+    const r = await harness({ road_closures: async () => none, get_traffic_flow: flow(0.9) }).run(
+      DETROIT,
+    );
+    const roadsLine = line(r.text, 'Road closures')!;
+    expect(roadsLine).toMatch(
+      /^- Road closures: No closures, incidents or work zones found within 5 km/,
+    );
+    expect(roadsLine).toContain(NOTE);
+    expect(
+      (r.data.sources.find((s) => s.source === 'road_closures')!.data as Record<string, unknown>)
+        .flow_closed_km,
+    ).toBe(0.9);
+    // Nothing closed in the flow, or closures listed: no note.
+    const open = await harness({ road_closures: async () => none, get_traffic_flow: flow(0) }).run(
+      DETROIT,
+    );
+    expect(line(open.text, 'Road closures')).not.toMatch(/traffic flow sees/);
+    const listed = await harness({ get_traffic_flow: flow(0.9) }).run(DETROIT);
+    expect(line(listed.text, 'Road closures')).toMatch(
+      /^- Road closures: 11 closures within 5 km; 5 nearest shown/,
+    );
+    expect(line(listed.text, 'Road closures')).not.toMatch(/traffic flow sees/);
   });
 
   it('with the real road_closures: a stretch reported per direction is one closure, counted once', async () => {

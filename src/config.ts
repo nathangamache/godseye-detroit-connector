@@ -339,6 +339,8 @@ const schema = z.object({
   TOMTOM_API_KEY: optionalString,
   ALLOW_TOMTOM_INCIDENTS: bool(false),
   TOMTOM_INCIDENTS_DAILY_MAX: int(60, 0, 2_500),
+  /** whats_happening_here leaves TomTom out once fewer than this many requests are left today. */
+  TOMTOM_WHATS_HAPPENING_RESERVE: int(20, 0, 2_500),
   TOMTOM_API_URL: z
     .url({ protocol: /^https?$/ })
     .default('https://api.tomtom.com')

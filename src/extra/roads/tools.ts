@@ -212,6 +212,13 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
     ],
     attribution: labels.join('; '),
     untrustedText: true,
+    // TomTom's daily cap, for whats_happening_here (only sources that are on).
+    quotas: () =>
+      Object.fromEntries(
+        deps.closures.sources
+          .filter((src) => src.quota && !src.unavailable())
+          .map((src) => [src.id, src.quota!()]),
+      ),
     async run(args, ctx) {
       const parsed = closuresSchema.safeParse(args);
       if (!parsed.success) return invalid(parsed.error, schema);

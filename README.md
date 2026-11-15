@@ -152,8 +152,10 @@ latest fix and is audited as a location read.
   for routing.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
   `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk, and `whats_happening_here` asks
-  it at most every 15 minutes (otherwise its line says TomTom was skipped to save the quota and
-  `road_closures` has the incidents); the City of Detroit permits are one in-memory snapshot
+  it unless it asked in the last 5 minutes or fewer than `TOMTOM_WHATS_HAPPENING_RESERVE` (20)
+  of the day's calls are left (then its line says which, with the calls left, and that
+  `road_closures` has the incidents; with no closure found it also says when TomTom's traffic
+  flow shows closed road nearby); the City of Detroit permits are one in-memory snapshot
   refreshed every 15 minutes (the last good copy is kept when a refresh fails, and results say how
   old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are
   cached 1-5 minutes and calls stay under 10 a
