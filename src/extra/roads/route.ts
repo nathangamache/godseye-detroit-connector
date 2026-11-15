@@ -5,12 +5,14 @@
  * second to the server, from every caller together.
  */
 import { haversineM } from '../../util/geo.js';
-import type {
-  ClosureQuery,
-  ClosureService,
-  ClosureSource,
-  RoadItem,
-  SourceId,
+import {
+  reportSentence,
+  type ClosureQuery,
+  type ClosureService,
+  type ClosureSource,
+  type RoadItem,
+  type SourceId,
+  type SourceReport,
 } from './closures.js';
 import {
   COVERAGE,
@@ -213,7 +215,15 @@ export interface RouteAnswer {
     source: string;
   }>;
   warnings: string[];
-  sources?: unknown;
+  sources?: SourceReport[];
+  /**
+   * "used": at least one closure source answered (the route accounts for what it reported);
+   * "none": closures were to be avoided but no source answered (down, excluded, not
+   * configured or not covering the route); "not_checked": avoid_closures=false.
+   */
+  closure_data: 'used' | 'none' | 'not_checked';
+  /** TomTom is on but left out, its licence excluding navigation use. */
+  tomtom_excluded: boolean;
   /** The closure sources whose items (or counts of them) the answer reports. */
   closureSources: SourceId[];
   /** Their attribution lines, in source order. */
@@ -269,7 +279,7 @@ export async function routeAvoidingClosures(
   const first = await deps.router.route(from, to, opts.units, [], signal);
   let trip = first;
   const avoided: RouteAnswer['closures_avoided'] = [];
-  let sources: unknown;
+  let sources: SourceReport[] | undefined;
   let attributions: string[] = [];
   const used = new Set<SourceId>();
   if (opts.avoid && deps.closures && first.shape.length > 1) {
@@ -347,6 +357,11 @@ export async function routeAvoidingClosures(
     warnings.push('Closures were not checked (avoid_closures=false).');
   }
   const maneuvers = trip.maneuvers.slice(0, MAX_MANEUVERS);
+  const closure_data = !opts.avoid
+    ? 'not_checked'
+    : sources?.some((r) => r.status === 'ok')
+      ? 'used'
+      : 'none';
   return {
     distance: trip.distance,
     units: opts.units,
@@ -358,6 +373,8 @@ export async function routeAvoidingClosures(
     closures_avoided: avoided,
     warnings,
     ...(sources ? { sources } : {}),
+    closure_data,
+    tomtom_excluded: Boolean(sources?.some((r) => r.source === 'tomtom' && r.status === 'skipped')),
     closureSources: [...used],
     attributions,
   };
@@ -365,6 +382,18 @@ export async function routeAvoidingClosures(
 
 export function routeSummary(r: RouteAnswer, fromLabel: string, toLabel: string): string {
   const dist = `${r.distance} ${r.units}`;
+  // Said plainly when the route could not take closures into account, and why.
+  const why = (r.sources ?? [])
+    .filter((x) => !(x.source === 'tomtom' && x.status === 'skipped'))
+    .map(reportSentence)
+    .join('; ');
+  const none =
+    r.closure_data === 'none'
+      ? ` No closure data was available to avoid, so this route does not account for closures${why ? ` (${why})` : ''}.`
+      : '';
+  const tomtom = r.tomtom_excluded
+    ? " Closures from TomTom are not used for routing (TomTom's licence excludes navigation use)."
+    : '';
   const avoided = r.closures_avoided.length
     ? ` Avoids ${r.closures_avoided.length} closure(s): ${r.closures_avoided
         .slice(0, 3)
@@ -374,5 +403,5 @@ export function routeSummary(r: RouteAnswer, fromLabel: string, toLabel: string)
   const warn = r.warnings.length
     ? ` ${r.warnings.length} warning(s): ${r.warnings.slice(0, 2).join(' ')}`
     : '';
-  return `Driving route from ${fromLabel} to ${toLabel}: ${dist}, about ${Math.round(r.duration_min)} min without live traffic, ${r.maneuvers.length} step(s).${avoided}${warn}`;
+  return `Driving route from ${fromLabel} to ${toLabel}: ${dist}, about ${Math.round(r.duration_min)} min without live traffic, ${r.maneuvers.length} step(s).${none}${tomtom}${avoided}${warn}`;
 }

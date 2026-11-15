@@ -102,6 +102,10 @@ describe('geocode_place', () => {
     });
     expect(ps[0]!.attribution).toContain('© OpenStreetMap contributors (ODbL)');
     expect(ps[1]!.in_region).toBe(false);
+    // The summary names the place, not the geocoder (that is in data and the attribution).
+    expect(out.summary).toContain(
+      'Best: Comerica Park (2100 Woodward Avenue, Detroit, MI, 48201, United States) at 42.33922, -83.04886.',
+    );
     // Biased to SE Michigan, not to anything about the user.
     const q = x.mock.last(/photon\.komoot\.io\/api/)!.url.searchParams;
     expect(Number(q.get('lat'))).toBeCloseTo(42.45, 2);
@@ -118,6 +122,9 @@ describe('geocode_place', () => {
     });
     expect(placesOf(out).map((p) => p.name)).toEqual(['Comerica', 'Comerica Park']);
     expect(placesOf(out)[0]!.distance_km).toBe(0.4);
+    expect(out.summary).toContain(
+      'Best: Comerica (Grand Rapids, Michigan) at 42.96000, -85.67000, 0.4 km away.',
+    );
     const again = await x.run('geocode_place', { query: 'comerica park', near: DETROIT });
     expect(again.summary).toContain('(cached answer)');
     expect(placesOf(again)[0]!.name).toBe('Comerica Park');
@@ -590,6 +597,56 @@ describe('route_avoiding_closures', () => {
     const src = (out.data as { closure_sources: Array<{ source: string; status: string }> })
       .closure_sources;
     expect(src.find((s) => s.source === 'tomtom')!.status).toBe('skipped');
+    // The summary says so, and that this route does account for the other sources.
+    expect(out.summary).toContain(
+      "Closures from TomTom are not used for routing (TomTom's licence excludes navigation use).",
+    );
+    expect(out.summary).not.toContain('No closure data');
+    expect((out.data as { closures_accounted_for: boolean }).closures_accounted_for).toBe(true);
+  });
+
+  it('says plainly when no closure data was available to avoid', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    // The city permits fail and every other source is off: the route ignores closures.
+    const x = h({}, { routes: [...valhallaRoutes(seen), [/arcgis/, () => json({}, 500)]] });
+    const out = await x.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    expect(out.isError).toBeFalsy();
+    expect(seen).toHaveLength(1);
+    expect(out.summary).toContain(
+      'No closure data was available to avoid, so this route does not account for closures (City of Detroit permits: City of Detroit permits returned HTTP 500; MDOT RIDE: not configured: set MDOT_RIDE_API_KEY in deploy/secrets/gateway.env;',
+    );
+    expect(out.summary).not.toContain('TomTom are not used');
+    expect((out.data as { closures_accounted_for: boolean }).closures_accounted_for).toBe(false);
+    // TomTom on but excluded for routing, everything else off: both are said.
+    const y = h(
+      { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true', DETROIT_ROW_ENABLED: 'false' },
+      { routes: valhallaRoutes([]) },
+    );
+    const out2 = await y.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    expect(out2.summary).toContain(
+      'No closure data was available to avoid, so this route does not account for closures (City of Detroit permits: off (DETROIT_ROW_ENABLED=false); MDOT RIDE: not configured',
+    );
+    expect(out2.summary).toContain(
+      "Closures from TomTom are not used for routing (TomTom's licence excludes navigation use).",
+    );
+    expect(out2.summary).not.toContain('TomTom incidents:');
+    expect(y.mock.count(/tomtom/)).toBe(0);
+  });
+
+  it('does not claim missing closure data when a source answered with none', async () => {
+    const x = h(
+      { MDOT_RIDE_API_KEY: 'k', DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          ...valhallaRoutes([]),
+          [/work_zone_information/, () => json({ type: 'FeatureCollection', features: [] })],
+          [/traffic_events/, () => json({ data: [] })],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    expect(out.summary).not.toContain('No closure data');
+    expect((out.data as { closures_accounted_for: boolean }).closures_accounted_for).toBe(true);
   });
 
   it('keeps the first route, with a warning, when no way around exists', async () => {
@@ -705,7 +762,13 @@ describe('route_avoiding_closures', () => {
     expect(out.isError).toBeFalsy();
     const locs = seen[0]!.locations as Array<{ lat: number; lon: number }>;
     expect(locs[0]!.lat).toBeCloseTo(COMERICA_PARK.lat, 3);
-    expect(out.summary).toContain('Comerica Park [photon]');
+    // The label is the place's name; which geocoder found it is in data and the attribution.
+    expect(out.summary).toContain('Driving route from Comerica Park to 42.3405, -82.9850:');
+    expect(out.summary).not.toMatch(/\[(photon|census|nominatim|overpass)\]/);
+    expect(out.data).toMatchObject({
+      from: 'Comerica Park',
+      located_by: { from: 'photon', to: 'coordinates' },
+    });
     // The geocoder that placed an endpoint is credited too.
     expect((out.data as { attribution: string[] }).attribution).toEqual([
       VALHALLA_ATTRIBUTION,
@@ -917,7 +980,12 @@ describe('mdot_camera_link', () => {
     const x = h();
     const out = await x.run('mdot_camera_link', { road: 'Comerica Park' });
     expect(x.mock.count(/photon/)).toBe(1);
-    expect((out.data as { located_by: string }).located_by).toBe('Comerica Park [photon]');
+    expect(out.data).toMatchObject({
+      located_by: 'Comerica Park',
+      geocoder: 'photon',
+      geocoder_attribution: GEO_ATTRIBUTION.photon,
+    });
+    expect(out.summary).toContain('Mi Drive map centred on Comerica Park, with cameras');
     const none = await x.run('mdot_camera_link', { road: 'Nowhere Atall' });
     expect(none.isError).toBe(true);
     const bad = await x.run('mdot_camera_link', {});
