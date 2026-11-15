@@ -187,7 +187,9 @@ const latest = (vals: Array<string | null>) =>
 
 function combine(c: RoadItem[]): RoadItem {
   const first = c[0]!;
-  const named = c.find((m) => m.resolveRoad);
+  // A road one report names (the source's own) needs no lookup, nor a note about one.
+  const road = c.find((m) => m.road)?.road ?? null;
+  const named = road ? undefined : c.find((m) => m.resolveRoad);
   const direction = mergedDirection(c);
   const why =
     direction === BOTH_DIRECTIONS
@@ -196,7 +198,7 @@ function combine(c: RoadItem[]): RoadItem {
   return {
     ...first,
     id: c.map((m) => m.id).join('+'),
-    road: c.find((m) => m.road)?.road ?? null,
+    road,
     direction,
     lanes: joined(c.map((m) => m.lanes)),
     vehicle_impact: joined(c.map((m) => m.vehicle_impact)),
@@ -210,6 +212,7 @@ function combine(c: RoadItem[]): RoadItem {
     primaryLines: first.primaryLines ?? first.lines,
     resolveRoad: named?.resolveRoad,
     roadCredit: named?.roadCredit,
+    roadNote: road ? undefined : (named ?? first).roadNote,
     merged: c.reduce((n, m) => n + (m.merged ?? 1), 0),
     note: [first.note, why].filter(Boolean).join('; '),
   };

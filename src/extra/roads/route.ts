@@ -6,6 +6,7 @@
  */
 import { haversineM } from '../../util/geo.js';
 import {
+  lookUpRoad,
   reportSentence,
   type ClosureQuery,
   type ClosureService,
@@ -256,12 +257,7 @@ function describe(it: RoadItem): string {
 /** Street names for the items a route reports (Detroit permits have none), a few at a time. */
 async function nameAll(items: RoadItem[], signal: AbortSignal): Promise<void> {
   const todo = items.filter((it) => !it.road && it.resolveRoad).slice(0, 8);
-  await Promise.all(
-    todo.map(async (it) => {
-      it.road = await it.resolveRoad!(signal).catch(() => null);
-      if (it.road) it.roadLookedUp = true;
-    }),
-  );
+  await Promise.all(todo.map((it) => lookUpRoad(it, signal)));
 }
 
 /** Warnings shown per route for open-road work on the way (city permits are many downtown). */
@@ -316,7 +312,7 @@ export async function routeAvoidingClosures(
     await nameAll([...kept, ...atEnds, ...dropped, ...shown], signal);
     // A street name looked up on a map carries that map's credit.
     for (const it of [...kept, ...atEnds, ...dropped, ...shown])
-      if (it.roadLookedUp && it.roadCredit && !attributions.includes(it.roadCredit))
+      if (it.roadLookup === 'found' && it.roadCredit && !attributions.includes(it.roadCredit))
         attributions.push(it.roadCredit);
     for (const it of atEnds)
       warnings.push(`Closure at the start or end of the trip, can't be avoided: ${describe(it)}`);

@@ -16,7 +16,7 @@ import {
   type Point,
 } from './geo.js';
 import { mergeDirections } from './merge.js';
-import { mentionsRoad, type RoadQuery } from './text.js';
+import { cleanText, mentionsRoad, type RoadQuery } from './text.js';
 
 export type SourceId = 'detroit_row' | 'tomtom' | 'mdot_ride' | 'ontario511';
 export type Kind = 'incident' | 'work_zone';
@@ -51,9 +51,35 @@ export interface RoadItem {
   resolveRoad?: (signal: AbortSignal) => Promise<string | null>;
   /** Credit for the map a looked-up name comes from (shown once a name was found). */
   roadCredit?: string;
-  /** Set when road came from resolveRoad. */
-  roadLookedUp?: boolean;
+  /** How the lookup went (lookUpRoad): unset while no lookup was made. */
+  roadLookup?: RoadLookup;
+  /**
+   * The source's words on an item it gives no road for, by what the lookup did ("skipped": no
+   * lookup was made). Shown in the item's note only while the road is not the source's own.
+   */
+  roadNote?: Partial<Record<RoadLookup | 'skipped', string>>;
   note?: string;
+}
+
+/** found: road is the lookup's answer; none: nothing in range; failed: the lookup errored. */
+export type RoadLookup = 'found' | 'none' | 'failed';
+
+/** Looks up the road of an item its source gave none, and says how that went. */
+export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<void> {
+  if (it.road || !it.resolveRoad) return;
+  try {
+    const name = cleanText(await it.resolveRoad(signal), 120);
+    it.road = name;
+    it.roadLookup = name ? 'found' : 'none';
+  } catch {
+    it.roadLookup = 'failed';
+  }
+}
+
+/** The item's note on its road name, if the road is not the source's own. */
+function roadNoteOf(it: RoadItem): string | undefined {
+  if (!it.roadNote || (it.road && it.roadLookup !== 'found')) return undefined;
+  return it.roadNote[it.roadLookup ?? 'skipped'];
 }
 
 export interface ClosureQuery {
@@ -176,6 +202,7 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
     at = { lat: round4(m.lat), lon: round4(m.lon) };
   }
   const len = shape.reduce((m, l) => m + lineLengthM(l), 0);
+  const note = [roadNoteOf(it), it.note].filter(Boolean).join('; ');
   const geometry_summary =
     verts <= shape.length
       ? shape.length > 1
@@ -201,7 +228,7 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
     at,
     geometry_summary,
     ...(it.merged && it.merged > 1 ? { merged_reports: it.merged } : {}),
-    ...(it.note ? { note: it.note } : {}),
+    ...(note ? { note } : {}),
   };
 }
 
@@ -224,7 +251,10 @@ export interface ClosureServiceOptions {
   sources: ClosureSource[];
   /** Per-source time budget (ms). */
   sourceTimeoutMs: number;
-  /** Most street-name lookups one call may make. */
+  /**
+   * Most street-name lookups one call may make for each source, so the many city permits near
+   * a point never use up the lookups that name TomTom's incidents.
+   */
   maxLookups?: number;
   onSourceError?: (source: SourceId, err: unknown) => void;
 }
@@ -310,7 +340,7 @@ export class ClosureService {
     );
 
     const out: RoadItem[] = [];
-    let lookups = 0;
+    const lookups = new Map<SourceId, number>();
     let unchecked = 0;
     // Routing looks up names only for the closures it actually avoids.
     const maxLookups = q.purpose === 'route' ? 0 : (this.o.maxLookups ?? 8);
@@ -320,16 +350,15 @@ export class ClosureService {
     while (i < all.length && out.length < limit) {
       const batch = all.slice(i, i + Math.min(BATCH, limit - out.length));
       i += batch.length;
-      const need = batch.filter((it) => !it.road && it.resolveRoad);
-      const take = need.slice(0, Math.max(0, maxLookups - lookups));
-      lookups += take.length;
+      const take = batch.filter((it) => {
+        if (it.road || !it.resolveRoad) return false;
+        const n = lookups.get(it.source) ?? 0;
+        if (n >= maxLookups) return false;
+        lookups.set(it.source, n + 1);
+        return true;
+      });
       if (take.length && !signal.aborted)
-        await Promise.all(
-          take.map(async (it) => {
-            it.road = await it.resolveRoad!(signal).catch(() => null);
-            if (it.road) it.roadLookedUp = true;
-          }),
-        );
+        await Promise.all(take.map((it) => lookUpRoad(it, signal)));
       for (const it of batch) {
         if (out.length >= limit) break;
         if (
@@ -346,7 +375,7 @@ export class ClosureService {
     const attributions = this.o.sources.filter((s) => used.has(s.id)).map((s) => s.attribution);
     // A street name looked up on a map carries that map's credit (ODbL for OpenStreetMap).
     for (const it of out)
-      if (it.roadLookedUp && it.roadCredit && !attributions.includes(it.roadCredit))
+      if (it.roadLookup === 'found' && it.roadCredit && !attributions.includes(it.roadCredit))
         attributions.push(it.roadCredit);
     for (const r of reports)
       if (r.status === 'ok') r.count = out.filter((i) => i.source === r.source).length;

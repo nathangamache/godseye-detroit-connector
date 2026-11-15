@@ -139,17 +139,27 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
   return out;
 }
 
-/** An incident TomTom gives no road for: the lookup, its credit and a note saying so. */
+/**
+ * An incident TomTom gives no road for: the lookup, its credit, and what its note says (the road
+ * comes from OpenStreetMap only when the lookup found one).
+ */
 function unnamed(line: LonLat[], roadAt?: RoadAt): Partial<RoadItem> {
+  const none = 'TomTom gives no road name here';
   if (!roadAt)
     return {
-      note: 'TomTom gives no road name here; set OVERPASS_URL to name the road from OpenStreetMap',
+      roadNote: { skipped: `${none}; set OVERPASS_URL to name the road from OpenStreetMap` },
     };
   const mid = lineMidpoint(line);
+  const within = `within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`;
   return {
     resolveRoad: (signal) => roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal),
     roadCredit: GEO_ATTRIBUTION.overpass,
-    note: `TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`,
+    roadNote: {
+      found: `${none}; the road is the nearest named road in OpenStreetMap ${within}`,
+      none: `${none}, and OpenStreetMap has no named road ${within}`,
+      failed: `${none}; the OpenStreetMap lookup of its road failed`,
+      skipped: `${none}; not looked up in OpenStreetMap (street-name lookups are capped per call)`,
+    },
   };
 }
 
