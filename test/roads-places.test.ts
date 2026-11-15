@@ -3,7 +3,16 @@
  * route_avoiding_closures (Valhalla with exclude_polygons from road_closures geometry) and
  * mdot_camera_link (a Mi Drive link, nothing fetched). All HTTP is mocked.
  */
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RoadItem } from '../src/extra/roads/closures.js';
@@ -27,6 +36,7 @@ import {
   ALL_KEYS,
   COMERICA_PARK,
   MDOT_WORK_ZONES,
+  NOW,
   ONTARIO_CONSTRUCTION,
   encodePolyline,
   harness,
@@ -298,7 +308,10 @@ describe('geocode_place', () => {
     );
     const out = await x.run('geocode_place', { query: 'I-94 and M-10' });
     const p = placesOf(out)[0]!;
-    expect(p.kind).toMatch(/^interchange \(grade-separated: the roads pass within \d+ m\)$/);
+    // The roads cross (one over the other): no distance worth giving.
+    expect(p).toMatchObject({ name: 'interchange of I-94 and M-10', kind: 'interchange' });
+    expect(out.summary).toContain('Best: interchange of I-94 and M-10 at 42.36');
+    expect(JSON.stringify(out)).not.toMatch(/within \d+ m/);
     expect(p.lat).toBeCloseTo(42.364, 2);
     expect(p.lon).toBeCloseTo(-83.06, 2);
     const qs = overpassQueries(x);
@@ -307,6 +320,91 @@ describe('geocode_place', () => {
     expect(qs[1]).toMatch(PROXIMITY);
     expect(qs[1]).toContain('["ref"~"(^|;) *I[ -]?94( |;|$)",i]');
     expect(qs[1]).toMatch(/way\.b\(around\.a:30\)/);
+  });
+
+  it('gives the closest approach of an interchange only when it is more than 10 m', async () => {
+    // Road B ends 18 m short of road A (a ramp that never meets it).
+    const a = line({ lat: 42.4, lon: -83.1 }, { lat: 42.4, lon: -83.05 }, 10).map(([lon, lat]) => ({
+      lat,
+      lon,
+    }));
+    const b = [
+      { lat: 42.40016, lon: -83.075 },
+      { lat: 42.45, lon: -83.075 },
+    ];
+    const x = h(
+      { OVERPASS_URL: 'http://overpass.invalid/api/interpreter' },
+      {
+        routes: [
+          [
+            /overpass\.invalid/,
+            (_u, init) =>
+              SHARED_NODE.test(new URLSearchParams(String(init.body)).get('data')!)
+                ? json({ elements: [] })
+                : json({
+                    elements: [
+                      {
+                        type: 'way',
+                        tags: { highway: 'primary', name: 'Alpha Road' },
+                        geometry: a,
+                      },
+                      {
+                        type: 'way',
+                        tags: { highway: 'primary', name: 'Bravo Road' },
+                        geometry: b,
+                      },
+                    ],
+                  }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('geocode_place', { query: 'Alpha Road and Bravo Road' });
+    expect(placesOf(out)[0]).toMatchObject({
+      name: 'interchange of Alpha Road and Bravo Road',
+      kind: 'interchange (the roads come within 18 m of each other)',
+    });
+  });
+
+  it('does not serve an intersection answer cached with the old wording', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gw-roads-'));
+    mkdirSync(path.join(dir, 'cache'), { recursive: true, mode: 0o700 });
+    const old = {
+      places: [
+        {
+          name: 'I-94 & M-10',
+          address: null,
+          lat: 42.364,
+          lon: -83.06,
+          kind: 'interchange (grade-separated: the roads pass within 0 m)',
+          source: 'overpass',
+          attribution: GEO_ATTRIBUTION.overpass,
+          in_region: true,
+        },
+      ],
+      attempts: [{ source: 'overpass', status: 'ok' }],
+    };
+    writeFileSync(
+      path.join(dir, 'cache', 'geocode.json'),
+      JSON.stringify({ 'v2|op|i-94 and m-10': { v: old, exp: NOW + 86_400_000 } }),
+      { mode: 0o600 },
+    );
+    const x = h(
+      { OVERPASS_URL: 'http://overpass.invalid/api/interpreter' },
+      {
+        dir,
+        routes: [
+          [
+            /overpass\.invalid/,
+            () => json({ elements: [{ type: 'node', id: 1, lat: 42.3641, lon: -83.0601 }] }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('geocode_place', { query: 'I-94 and M-10' });
+    expect(out.summary).not.toContain('(cached answer)');
+    expect(x.mock.count(/overpass\.invalid/)).toBe(1);
+    expect(JSON.stringify(out)).not.toContain('pass within');
   });
 
   it('roads that never come within 30 m are no intersection: the other geocoders are tried', async () => {

@@ -30,6 +30,12 @@ import { cleanText, normRoad } from './text.js';
  */
 export const INTERCHANGE_M = 30;
 
+/**
+ * Two roads that come this close cross (one over the other); only a wider gap is worth saying.
+ * Road A is sampled every 10 m, so roads that cross can measure a few metres apart.
+ */
+export const CROSSING_M = 10;
+
 export const OSM_ATTRIBUTION = '© OpenStreetMap contributors (ODbL), openstreetmap.org/copyright';
 export const ATTRIBUTION = {
   census: 'U.S. Census Bureau Geocoder (public domain)',
@@ -247,8 +253,9 @@ export class Geocoder {
     const q = cleanText(query, 200) ?? '';
     if (q.length < 2) return { places: [], attempts: [], cached: false };
     // The query alone (never a caller's point); intersections answer differently with Overpass
-    // (v2: shared node, then ways within INTERCHANGE_M).
-    const key = `${this.o.overpassUrl ? 'v2|op|' : 'v1|'}${q.toLowerCase()}`;
+    // (v2: shared node, then ways within INTERCHANGE_M; v3: interchanges named "interchange of
+    // A and B", so a v2 answer with the old wording is not served again).
+    const key = `${this.o.overpassUrl ? 'v3|op|' : 'v1|'}${q.toLowerCase()}`;
     let cached = true;
     let hit = this.o.cache.get(key);
     if (!hit) {
@@ -442,8 +449,9 @@ export class Geocoder {
     const head = `[out:json][timeout:25][bbox:${s},${w},${n},${e}];`;
     const wayA = `way["highway"]${skip}${fa.ql}`;
     const wayB = `way["highway"]${skip}${fb.ql}`;
-    const name = `${cleanText(pair[0], 60)} & ${cleanText(pair[1], 60)}`;
-    const hits: Array<{ p: LonLat; kind: string }> = [];
+    const ra = cleanText(pair[0], 60);
+    const rb = cleanText(pair[1], 60);
+    const hits: Array<{ p: LonLat; kind: string; name: string }> = [];
 
     const shared = await this.overpass(
       `${head}${wayA}->.a;${wayB}->.b;node(w.a)->.na;node(w.b)->.nb;node.na.nb;out skel;`,
@@ -453,7 +461,7 @@ export class Geocoder {
       const lat = num(nd.lat);
       const lon = num(nd.lon);
       if (nd.type === 'node' && lat !== undefined && lon !== undefined)
-        hits.push({ p: [lon, lat], kind: 'intersection' });
+        hits.push({ p: [lon, lat], kind: 'intersection', name: `${ra} & ${rb}` });
     }
 
     if (!hits.length) {
@@ -484,10 +492,15 @@ export class Geocoder {
             });
         }
       close.sort((x, y) => x.d - y.d);
+      // Grade-separated: the roads cross on a bridge, or (wider than CROSSING_M) come close.
       for (const c of close)
         hits.push({
           p: c.p,
-          kind: `interchange (grade-separated: the roads pass within ${Math.round(c.d)} m)`,
+          name: `interchange of ${ra} and ${rb}`,
+          kind:
+            c.d > CROSSING_M
+              ? `interchange (the roads come within ${Math.round(c.d)} m of each other)`
+              : 'interchange',
         });
     }
     // One answer per place where they meet (points within 500 m are the same junction).
@@ -496,7 +509,7 @@ export class Geocoder {
       if (out.some((o) => haversineM(o.lat, o.lon, h.p[1], h.p[0]) < 500)) continue;
       out.push(
         place({
-          name,
+          name: h.name,
           address: null,
           lat: round4(h.p[1]),
           lon: round4(h.p[0]),
