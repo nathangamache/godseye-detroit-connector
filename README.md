@@ -10,9 +10,10 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
   synonyms; with no query it lists every tool the policy allows, by category, paginated),
   `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
   `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, NWS alerts,
-  weather, traffic, the nearest road closures, border waits near a crossing, air quality when
-  configured and cameras when one is in range, in parallel, each with a short timeout inside one
-  overall budget and its data age). The server instructions give the live tool count instead of
+  weather in F and mph, traffic, how many road closures are near and the nearest with road and
+  cross streets, border waits near a crossing, air quality and cameras, in parallel, each with a
+  short timeout inside one overall budget and its data age; every section is listed, saying so
+  when it has nothing, is not configured or can't run). The server instructions give the live tool count instead of
   a fixed number.
 * GEV's own MCP server is local-only and its UI assumes the owner is local. The gateway adds
   OAuth, licensing policy, quotas, result shrinking and link rewriting, and keeps every
@@ -34,7 +35,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `find_tools` | gateway | search the catalog, or list it by category (no argument needed) | none |
 | `run_tool` | gateway | runs any tool `find_tools` shows, validated against its schema | that tool's own |
 | `where_am_i` | gateway | the phone's latest fix (never history), its age and staleness | a phone posting fixes (OwnTracks or `/locate`, `docs/phone-setup.md`) |
-| `whats_happening_here` | gateway | one summary around a point or the phone: rail, rail radio, incidents, NWS alerts, weather, traffic, road closures within 5 km, border waits near a crossing, air quality, cameras in range | a point or a phone fix; each section needs its tool's requirement and is left out or marked when it can't run |
+| `whats_happening_here` | gateway | one summary around a point or the phone: rail, rail radio, incidents, NWS alerts ("at your location (phone fix N old)" or "at the given point"), weather (F, mph), traffic, road closures within 5 km (total, nearest 5 with road and cross streets), border waits near a crossing, air quality, cameras | a point or a phone fix; each section needs its tool's requirement and says so ("not configured (AIRNOW_API_KEY)", "none in range") rather than being left out; TomTom incidents at most every 15 min, with the requests left today |
 | `nearest_rail` | gateway (rail) | nearest line (owner, every FRA/NARN name, track count) plus the nearest crossing of any kind and the nearest at-grade one, labelled | bundled FRA/NARN data (`data/rail`, `npm run rail:build`) |
 | `crossings_near` | gateway (rail) | crossings in a radius: at grade or road over/under the tracks, warning devices, trains/day, FRA vs NARN track counts | bundled FRA/NARN data |
 | `rail_activity_near` | Pulse | rail voice and EOT/HOT traffic near a point, with Pulse's verdict (quiet only on Pulse's proof) | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) with its own SDR receivers |
@@ -143,7 +144,9 @@ latest fix and is audited as a location read.
   its own: one down never sinks the others, and "none found" is reported as "not proof the road
   is open", with the list of sources checked.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
-  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; MDOT RIDE is polled at most every
+  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk, and `whats_happening_here` asks
+  it at most every 15 minutes (otherwise its line says TomTom was skipped to save the quota and
+  `road_closures` has the incidents); MDOT RIDE is polled at most every
   5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
   minute; Valhalla and Nominatim get at most one request a second; Nominatim at most
   `GEOCODER_NOMINATIM_DAILY_MAX` (50) a day and the shared `nominatim` bucket; border feeds are

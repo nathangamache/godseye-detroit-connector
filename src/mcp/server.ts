@@ -22,7 +22,12 @@ import {
 } from '../tools/tags.js';
 import { keyFields, offLabel } from '../tools/keygate.js';
 import type { ToolContext, ToolDef } from '../tools/types.js';
-import { whatsHappeningHere, whereAmI } from './whatsHappening.js';
+import {
+  IntervalGate,
+  TOMTOM_SUMMARY_INTERVAL_MS,
+  whatsHappeningHere,
+  whereAmI,
+} from './whatsHappening.js';
 
 /**
  * Server instructions. Only links on the globe's own origin are described as the
@@ -79,7 +84,7 @@ const DIRECT_TOOLS = [
   {
     name: 'whats_happening_here',
     description:
-      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather, traffic, road closures, border waits near a crossing, air quality when configured, cameras when any are in range (call directly).",
+      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather (F and mph), traffic, road closures, border waits near a crossing, air quality, cameras; every section is listed, saying so when it has nothing or is not configured (call directly).",
   },
 ];
 
@@ -90,6 +95,8 @@ export interface McpDeps {
   /** Location reads are audited (review MCP-2; never with coordinates). */
   audit?: Audit;
   tokens?: TokenStore;
+  /** Paces whats_happening_here's TomTom requests across calls (createMcpHttpHandler makes one). */
+  tomtomGate?: IntervalGate;
 }
 
 const readOnly = {
@@ -374,7 +381,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       title: "What's happening here",
       description:
-        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather, traffic, road closures within about 5 km, border waits when a Detroit/Windsor or Port Huron crossing is near, air quality when configured and public cameras when any are in range, each with its data age.",
+        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather (F and mph), traffic, road closures within about 5 km (how many, the nearest 5 with road and cross streets; TomTom incidents at most every 15 minutes, otherwise ask road_closures), border waits when a Detroit/Windsor or Port Huron crossing is near, air quality and public cameras, each with its data age. Every section is listed: one with nothing to report, not configured or unable to run says so.",
       inputSchema: z.object({
         lat: z.number().min(-90).max(90).optional(),
         lon: z.number().min(-180).max(180).optional(),
@@ -394,6 +401,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             runner,
             locations,
             phoneCheck: (p) => phoneCheck('whats_happening_here', tc, p),
+            tomtomGate: deps.tomtomGate,
           },
           args,
           tc,
@@ -445,7 +453,12 @@ export function withNote(r: McpToolResult, note: string): McpToolResult {
 }
 
 export function createMcpHttpHandler(deps: McpDeps): McpHttpHandler {
-  return createMcpHandler(() => buildMcpServer(deps), {
+  // One server per request, so state that spans calls lives here.
+  const shared: McpDeps = {
+    ...deps,
+    tomtomGate: deps.tomtomGate ?? new IntervalGate(TOMTOM_SUMMARY_INTERVAL_MS),
+  };
+  return createMcpHandler(() => buildMcpServer(shared), {
     responseMode: 'sse',
     keepAliveMs: 15_000,
     maxRequestBodySize: 256 * 1024,

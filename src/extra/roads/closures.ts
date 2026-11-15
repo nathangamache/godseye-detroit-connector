@@ -57,6 +57,8 @@ export interface ClosureQuery {
   now: number;
   /** "route": sources whose terms don't allow navigation use are skipped (TomTom). */
   purpose: 'list' | 'route';
+  /** Sources a composite leaves out of this query, each with the note its report gives. */
+  skip?: Readonly<Partial<Record<SourceId, string>>>;
 }
 
 export type SourceStatus =
@@ -66,10 +68,15 @@ export interface SourceReport {
   source: SourceId;
   label: string;
   status: SourceStatus;
+  /** Items of this source in the answer (after the limit). */
   count: number;
+  /** Items of this source in range before the limit (point searches without a road only). */
+  found?: number;
   note?: string;
   retrieved_at?: string;
   cache_age_s?: number;
+  /** A metered source that was asked (or refused for its cap): requests left today. */
+  quota?: { remaining: number; max: number };
 }
 
 export interface FetchResult {
@@ -90,6 +97,8 @@ export interface ClosureSource {
   unavailable(): { status: 'not_configured' | 'off'; note: string } | undefined;
   /** Skip for this query (e.g. TomTom for routing), with the reason. */
   skip?(q: ClosureQuery): string | undefined;
+  /** A source with a daily request cap: what is left of it. */
+  quota?(): { remaining: number; max: number };
   fetch(q: ClosureQuery, signal: AbortSignal): Promise<FetchResult>;
 }
 
@@ -178,6 +187,8 @@ export function toPublic(it: RoadItem, center?: Point): PublicItem {
 
 export interface ClosureAnswer {
   items: RoadItem[];
+  /** Items in range before the limit; undefined for a road search (names are checked lazily). */
+  total?: number;
   reports: SourceReport[];
   /** Detroit permits near the point that were not checked against the road name (lookup cap). */
   unchecked: number;
@@ -209,7 +220,7 @@ export class ClosureService {
         reports.push({ ...base, ...off });
         return [];
       }
-      const skip = src.skip?.(q);
+      const skip = q.skip?.[src.id] ?? src.skip?.(q);
       if (skip) {
         reports.push({ ...base, status: 'skipped', note: skip });
         return [];
@@ -227,20 +238,24 @@ export class ClosureService {
           ...base,
           status: 'ok',
           count: kept.length,
+          ...(q.road ? {} : { found: kept.length }),
           retrieved_at: new Date(q.now - (r.cacheAgeMs ?? 0)).toISOString(),
           ...(r.cacheAgeMs ? { cache_age_s: Math.round(r.cacheAgeMs / 1000) } : {}),
           ...(r.note ? { note: r.note } : {}),
+          ...(src.quota ? { quota: src.quota() } : {}),
         });
         return kept;
       } catch (err) {
+        const quota = src.quota ? { quota: src.quota() } : {};
         if (err instanceof QuotaError) {
-          reports.push({ ...base, status: 'quota', note: err.message });
+          reports.push({ ...base, status: 'quota', note: err.message, ...quota });
         } else {
           this.o.onSourceError?.(src.id, err);
           reports.push({
             ...base,
             status: 'error',
             note: timeout.aborted ? `${src.label} timed out` : errorText(err),
+            ...quota,
           });
         }
         return [];
@@ -296,7 +311,13 @@ export class ClosureService {
     const attributions = this.o.sources.filter((s) => used.has(s.id)).map((s) => s.attribution);
     for (const r of reports)
       if (r.status === 'ok') r.count = out.filter((i) => i.source === r.source).length;
-    return { items: out, reports, unchecked, attributions };
+    return {
+      items: out,
+      ...(q.road ? {} : { total: all.length }),
+      reports,
+      unchecked,
+      attributions,
+    };
   }
 
   private keep(it: RoadItem, q: ClosureQuery): boolean {

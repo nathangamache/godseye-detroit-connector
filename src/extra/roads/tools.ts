@@ -144,7 +144,12 @@ const closuresSchema = z
   })
   .superRefine((v, c) => whereRule(v, c, true));
 
-function closureSentence(p: PublicItem): string {
+/**
+ * One item in words, with its road and cross streets: "FULL CLOSURE: Road closed on Woodward
+ * Ave NB between Adams Ave and Grand River Ave (City of Detroit permits, 0.4 km away)".
+ * `label` names the source (its id when not given).
+ */
+export function closureSentence(p: PublicItem, label: string = p.source): string {
   const where = p.road
     ? ` on ${p.road}${p.direction ? ` ${p.direction}` : ''}`
     : p.direction
@@ -157,7 +162,7 @@ function closureSentence(p: PublicItem): string {
         ? ` at ${p.from_cross_street}`
         : '';
   const dist = p.distance_km !== null ? `, ${p.distance_km} km away` : '';
-  return `${p.full_closure ? 'FULL CLOSURE: ' : ''}${p.type}${where}${cross} (${p.source}${dist})`;
+  return `${p.full_closure ? 'FULL CLOSURE: ' : ''}${p.type}${where}${cross} (${label}${dist})`;
 }
 
 function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
@@ -167,7 +172,7 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
     name: 'road_closures',
     title: 'Road closures, incidents and work zones',
     description:
-      'Road closures, crashes, lane closures and work zones near a point, the phone ("here") or along a named road (e.g. I-696, M-10, Woodward, Hwy 401), merged from City of Detroit right-of-way permits, MDOT RIDE (state trunklines), Ontario 511 (Windsor/Essex) and TomTom when enabled. Each item: source, road, direction, type, lanes and vehicle impact, description, from/to cross streets, start, end, updated, distance_km. Says which sources were checked; none found is not proof a road is open.',
+      'Road closures, crashes, lane closures and work zones near a point, the phone ("here") or along a named road (e.g. I-696, M-10, Woodward, Hwy 401), merged from City of Detroit right-of-way permits, MDOT RIDE (state trunklines), Ontario 511 (Windsor/Essex) and TomTom when enabled. Says how many are in range and lists the nearest (limit). Each item: text (one line with the road and cross streets), source, road, direction, type, lanes and vehicle impact, description, from/to cross streets, start, end, updated, distance_km. Says which sources were checked; none found is not proof a road is open.',
     source: 'gateway',
     family: 'roads',
     inputSchema: schema,
@@ -227,20 +232,27 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
           include,
           now,
           purpose: 'list',
+          ...(ctx.skipRoadSources ? { skip: ctx.skipRoadSources } : {}),
         },
         limit,
         ctx.signal,
       );
-      const items = ans.items.map((it) => toPublic(it, where.point));
+      const labelOf = new Map(deps.closures.sources.map((src) => [src.id, src.label]));
+      const items = ans.items.map((it) => {
+        const p = toPublic(it, where.point);
+        return { ...p, text: closureSentence(p, labelOf.get(p.source)) };
+      });
       const full = items.filter((i) => i.full_closure).length;
+      const total = ans.total ?? items.length;
       const area = where.point
         ? `within ${radiusKm} km of ${where.phone ? "the phone's position" : `${a.lat}, ${a.lon}`}`
         : 'in SE Michigan and Windsor/Essex';
       const what = `${include.size === 2 ? 'closure, incident and work-zone' : include.has('incident') ? 'incident' : 'work-zone'} item(s)`;
+      const listed = total > items.length ? ` (the nearest ${items.length} listed)` : '';
       const lead = items.length
-        ? `${items.length} ${what}${road ? ` on ${road.text}` : ''} ${area} (${when === 'now' ? 'in effect now' : 'planned'}), ${full} full closure(s). ${items
+        ? `${total} ${what}${road ? ` on ${road.text}` : ''} ${area}${listed} (${when === 'now' ? 'in effect now' : 'planned'}), ${full} full closure(s). ${items
             .slice(0, 3)
-            .map(closureSentence)
+            .map((i) => i.text)
             .join('; ')}.`
         : `No ${what}${road ? ` on ${road.text}` : ''} found ${area} (${when === 'now' ? 'in effect now' : 'planned'}) in the sources checked. That is not proof the road is open: only the sources below were checked.`;
       const checked = `Sources: ${ans.reports.map(reportSentence).join('; ')}.`;
@@ -266,6 +278,7 @@ function roadClosuresTool(deps: RoadsToolDeps): ToolDef {
             include: [...include].map((k) => (k === 'incident' ? 'incidents' : 'work_zones')),
           },
           count: items.length,
+          total: ans.total ?? null,
           items,
           sources: ans.reports,
           attribution: ans.attributions,

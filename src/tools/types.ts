@@ -25,6 +25,11 @@ export interface ToolContext {
   clientId?: string;
   /** The OAuth grant (token family) making the call. */
   familyId?: string;
+  /**
+   * Road sources to leave out of this call, each with the note its report gives. Set only by a
+   * gateway composite (whats_happening_here saving the TomTom daily quota), never by a request.
+   */
+  skipRoadSources?: Readonly<Record<string, string>>;
 }
 
 /** The API key a key-gated tool needs, when it is missing. */
