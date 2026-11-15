@@ -681,7 +681,9 @@ describe('TomTom road names', () => {
       to_cross_street: 'Bravo St',
       full_closure: true,
     });
-    expect(tt.note).toContain('nearest named road in OpenStreetMap within 25 m');
+    expect(tt.note).toBe(
+      "TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within 25 m of the incident's midpoint",
+    );
     // One bounded Overpass query at the midpoint, for the unnamed item only (M-10 has its
     // route number from TomTom), and no outside geocoder.
     const qs = overpassCalls(x);
@@ -724,7 +726,9 @@ describe('TomTom road names', () => {
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     const tt = itemsOf(out).find((i) => i.from_cross_street === 'Alpha St')!;
     expect(tt.road).toBeNull();
-    expect(tt.note).toContain('set OVERPASS_URL');
+    expect(tt.note).toBe(
+      'TomTom gives no road name here; set OVERPASS_URL to name the road from OpenStreetMap',
+    );
     expect(x.mock.count(/photon|nominatim|census|overpass/)).toBe(0);
     expect((out.data as { attribution: string[] }).attribution).not.toContain(
       GEO_ATTRIBUTION.overpass,

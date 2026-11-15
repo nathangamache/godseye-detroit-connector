@@ -143,13 +143,13 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
 function unnamed(line: LonLat[], roadAt?: RoadAt): Partial<RoadItem> {
   if (!roadAt)
     return {
-      note: 'TomTom names only the cross streets here; set OVERPASS_URL to name the road from OpenStreetMap',
+      note: 'TomTom gives no road name here; set OVERPASS_URL to name the road from OpenStreetMap',
     };
   const mid = lineMidpoint(line);
   return {
     resolveRoad: (signal) => roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal),
     roadCredit: GEO_ATTRIBUTION.overpass,
-    note: `TomTom names only the cross streets here; the road is the nearest named road in OpenStreetMap within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`,
+    note: `TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`,
   };
 }
 

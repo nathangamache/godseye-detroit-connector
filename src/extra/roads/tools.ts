@@ -148,7 +148,7 @@ const closuresSchema = z
 const SUMMARY_ITEMS = 3;
 
 /** "<Road>: <what> between <A> and <B> (<direction>, <distance>)". */
-export function closureSentence(p: PublicItem): string {
+function closureSentence(p: PublicItem): string {
   const what = p.full_closure && !/\bclos/i.test(p.type) ? `${p.type}, full closure` : p.type;
   const cross =
     p.from_cross_street && p.to_cross_street
