@@ -6,8 +6,9 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 
 ## Why a gateway
 
-* Claude gets **four** tools instead of 40+: `find_tools` (BM25 search with hand-written
-  synonyms; with no query it lists every tool the policy allows, by category, paginated),
+* Claude gets **four** tools instead of 40+: `find_tools` (search with hand-written synonyms,
+  ranked by whole-word matches in a tool's name, then its tags, category and description, weak
+  matches dropped; with no query it lists every tool the policy allows, by category, paginated),
   `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
   `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, NWS alerts,
   weather in °F and mph, traffic, how many road closures are near and the nearest with road and
