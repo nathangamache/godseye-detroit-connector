@@ -28,10 +28,10 @@ import {
 import { ToolPolicy } from '../src/tools/policy.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ontario511Source, parseOntario } from '../src/extra/roads/sources/ontario511.js';
-import { TOMTOM_ATTRIBUTION } from '../src/extra/roads/sources/tomtom.js';
+import { TOMTOM_ATTRIBUTION, parseTomTom } from '../src/extra/roads/sources/tomtom.js';
 import { parseRideRecord, recordsOf } from '../src/extra/roads/sources/mdotRide.js';
 import { Http } from '../src/extra/roads/http.js';
-import { mentionsRoad, normRoad, roadQuery, cleanText } from '../src/extra/roads/text.js';
+import { mentionsRoad, normRoad, roadQuery, roadText, cleanText } from '../src/extra/roads/text.js';
 import {
   ALL_KEYS,
   CLOSED_NB,
@@ -764,10 +764,187 @@ describe('TomTom road names', () => {
       },
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
-    expect(itemsOf(out).find((i) => i.from_cross_street === 'Alpha St')!.road).toBeNull();
+    const tt = itemsOf(out).find((i) => i.from_cross_street === 'Alpha St')!;
+    expect(tt.road).toBeNull();
+    expect(tt.note).toBe(
+      'TomTom gives no road name here; the OpenStreetMap lookup of its road failed',
+    );
     expect((out.data as { attribution: string[] }).attribution).not.toContain(
       GEO_ATTRIBUTION.overpass,
     );
+  });
+
+  it('says the road is from OpenStreetMap only when the lookup found one', async () => {
+    const x = h(
+      { ...TT_ONLY, ...OVERPASS, DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          tomtomWith(unnamedClosure('tt-unnamed', CLOSED_NB, 'Alpha St', 'Bravo St')),
+          [/overpass\.invalid/, () => json({ elements: [] })],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const tt = itemsOf(out).find((i) => i.from_cross_street === 'Alpha St')!;
+    expect(tt.road).toBeNull();
+    expect(tt.note).toBe(
+      "TomTom gives no road name here, and OpenStreetMap has no named road within 25 m of the incident's midpoint",
+    );
+    expect(out.summary).toContain('Unknown road: road closed between Alpha St and Bravo St');
+    // TomTom's own names carry no such note.
+    const m10 = itemsOf(out).find((i) => i.road === 'M-10')!;
+    expect(m10.note).toBeUndefined();
+  });
+
+  it('names every TomTom incident although many city permits nearer the point need names too', async () => {
+    // Ten permits within 250 m of the point, then six unnamed TomTom closures over a kilometre
+    // off, each on its own street: the permits' lookups must not use up TomTom's.
+    const permits = Array.from({ length: 10 }, (_, i) => ({
+      attributes: {
+        permit_id: 50000 + i,
+        permit_type: 'Dumpster',
+        work_description: 'Dumpster in the curb lane',
+        start_date: '2026-11-01',
+        end_date: '2026-12-31',
+        roadway_direction_impact: 'Eastbound',
+        is_sidewalk: 0,
+      },
+      geometry: {
+        paths: [
+          [
+            [DETROIT.lon + i * 0.0003, DETROIT.lat],
+            [DETROIT.lon + i * 0.0003 + 0.0002, DETROIT.lat],
+          ],
+        ],
+      },
+    }));
+    const closures = Array.from({ length: 6 }, (_, i) =>
+      unnamedClosure(
+        `tt-${i}`,
+        [
+          [-83.03 - i * 0.003, 42.34],
+          [-83.03 - i * 0.003, 42.342],
+        ],
+        `Cross ${i} North`,
+        `Cross ${i} South`,
+      ),
+    );
+    const x = h(
+      { ...TT_ONLY, ...OVERPASS },
+      {
+        routes: [
+          [/FeatureServer\/4\/query/, arcgisLayer(permits)],
+          [/FeatureServer\/5\/query/, arcgisLayer([])],
+          [/api\.tomtom\.com/, () => json({ incidents: closures })],
+          [
+            /overpass\.invalid/,
+            (_u, init) => {
+              const q = new URLSearchParams(String(init.body)).get('data')!;
+              const at = /around:(\d+),(-?[\d.]+),(-?[\d.]+)/.exec(q)!;
+              const [lat, lon] = [Number(at[2]), Number(at[3])];
+              // A street through the point asked about: the permits' or TomTom's.
+              const name = at[1] === '25' ? `Test Road ${lon.toFixed(3)}` : 'Permit Street';
+              return json({
+                elements: [
+                  {
+                    type: 'way',
+                    tags: { highway: 'residential', name },
+                    geometry: [
+                      { lat: lat - 0.001, lon },
+                      { lat: lat + 0.001, lon },
+                    ],
+                  },
+                ],
+              });
+            },
+          ],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const tt = itemsOf(out).filter((i) => i.source === 'tomtom');
+    expect(tt.map((i) => i.road).sort()).toEqual([
+      'Test Road -83.030',
+      'Test Road -83.033',
+      'Test Road -83.036',
+      'Test Road -83.039',
+      'Test Road -83.042',
+      'Test Road -83.045',
+    ]);
+    for (const i of tt)
+      expect(i.note).toBe(
+        "TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within 25 m of the incident's midpoint",
+      );
+    // The permits still get at most the per-call number of lookups, and say which did not.
+    const row = itemsOf(out).filter((i) => i.source === 'detroit_row');
+    expect(row).toHaveLength(10);
+    expect(row.filter((i) => i.road === 'Permit Street')).toHaveLength(8);
+    expect(row.slice(8).map((i) => [i.road, i.note])).toEqual([
+      [
+        null,
+        'street name not looked up (street-name lookups are capped per call); 1 permit segment(s); full_closure is inferred from the permit text',
+      ],
+      [
+        null,
+        'street name not looked up (street-name lookups are capped per call); 1 permit segment(s); full_closure is inferred from the permit text',
+      ],
+    ]);
+    expect(row[0]!.note).toBe(
+      'street name looked up from the map; 1 permit segment(s); full_closure is inferred from the permit text',
+    );
+  });
+
+  it("fills each item's direction: as TomTom's text says, else the way its line heads", () => {
+    const withText = (id: string, text: string) => {
+      const f = unnamedClosure(id, CLOSED_NB, 'Alpha St', 'Bravo St');
+      (f.properties as Record<string, unknown>).events = [{ description: text, code: 401 }];
+      return f;
+    };
+    const items = parseTomTom({
+      incidents: [
+        ...TOMTOM.incidents,
+        unnamedClosure(
+          'east',
+          [
+            [-83.06, 42.34],
+            [-83.05, 42.3402],
+          ],
+          'Alpha St',
+          'Bravo St',
+        ),
+        unnamedClosure(
+          'west',
+          [
+            [-83.05, 42.35],
+            [-83.06, 42.3499],
+          ],
+          'Bravo St',
+          'Alpha St',
+        ),
+        // The text names a direction: it wins over the line.
+        withText('said-sb', 'Closed southbound'),
+        withText('said-both', 'Closed in both directions'),
+        // Too short to tell.
+        unnamedClosure(
+          'short',
+          [
+            [-83.05, 42.34],
+            [-83.05, 42.3401],
+          ],
+          'Alpha St',
+          'Bravo St',
+        ),
+      ],
+    });
+    expect(items.map((i) => [i.id, i.direction])).toEqual([
+      ['tomtom:tt-closed-1', 'northbound'],
+      ['tomtom:tt-jam-2', null],
+      ['tomtom:east', 'eastbound'],
+      ['tomtom:west', 'westbound'],
+      ['tomtom:said-sb', 'southbound'],
+      ['tomtom:said-both', 'both directions'],
+      ['tomtom:short', null],
+    ]);
   });
 
   it('labels a way by its name and route numbers', () => {
@@ -775,6 +952,117 @@ describe('TomTom road names', () => {
     expect(roadLabel({ ref: 'I 94;US 12' })).toBe('I-94 / US-12');
     expect(roadLabel({ name: 'First Street' })).toBe('First Street');
     expect(roadLabel({ highway: 'residential' })).toBeNull();
+  });
+});
+
+describe('exit and route labels', () => {
+  const TT_ONLY = { ...ALL_KEYS, MDOT_RIDE_API_KEY: '', ONTARIO_511_API_KEY: '' };
+
+  it('writes exits and Michigan trunklines one way: "exit 20", "M-14"', () => {
+    expect(roadText('exit [20]')).toBe('exit 20');
+    expect(roadText('M-14 exit [29]')).toBe('M-14 exit 29');
+    expect(roadText('Exit [ 18A ]')).toBe('Exit 18A');
+    expect(roadText('M-14 W at I-275 (MI-14), Exit 18 (MI-14)')).toBe(
+      'M-14 W at I-275 (M-14), Exit 18 (M-14)',
+    );
+    // Only "MI-<number>": Interstates, US routes, other states' routes and an address's state
+    // and ZIP code stay as they are.
+    for (const t of [
+      'I-94',
+      'US-12',
+      'M-14 W',
+      'OH-2',
+      'IN-912',
+      'SR-2',
+      'Hwy 401',
+      'Detroit, MI 48202',
+      'MI-48202',
+      'AMI-14',
+      '[20]',
+    ])
+      expect(roadText(t)).toBe(t);
+    expect(roadText(null)).toBeNull();
+  });
+
+  it('lists a TomTom freeway incident with plain exit numbers and one form of each route', async () => {
+    const f = unnamedClosure(
+      'tt-m14',
+      [
+        [-83.05, 42.36],
+        [-83.06, 42.3601],
+      ],
+      'exit [20]',
+      'M-14 exit [29]',
+    );
+    Object.assign(f.properties as Record<string, unknown>, {
+      roadNumbers: ['M-14', 'MI-14'],
+      events: [{ description: 'Closed between I-275 (MI-14) and Exit 18 (MI-14)', code: 401 }],
+    });
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      { routes: [[/api\.tomtom\.com/, () => json({ incidents: [f] })]] },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const [it0] = itemsOf(out);
+    expect(it0).toMatchObject({
+      road: 'M-14',
+      from_cross_street: 'exit 20',
+      to_cross_street: 'M-14 exit 29',
+      description: 'Closed between I-275 (M-14) and Exit 18 (M-14)',
+      direction: 'westbound',
+    });
+    expect(it0!.text).toBe(
+      'M-14: road closed between exit 20 and M-14 exit 29 (westbound, 3.2 km away, TomTom incidents)',
+    );
+    expect(out.summary).not.toMatch(/MI-14|\[\d+\]/);
+  });
+
+  it('matches a Michigan trunkline written "MI-14", "MI 14", "M-14" or "M 14"', () => {
+    for (const s of ['MI-14', 'MI 14', 'MI14', 'mi-14', 'Mi - 14', 'M-14', 'M 14', 'm14'])
+      expect(normRoad(s)).toBe('m 14');
+    expect(normRoad('I-275 (MI-14) W')).toBe('i 275 m 14 w');
+    expect(roadQuery('MI-14')).toMatchObject({ text: 'M-14', keyword: '14' });
+    expect(mentionsRoad(roadQuery('MI-14'), ['M-14 W'])).toBe(true);
+    expect(mentionsRoad(roadQuery('MI 14'), ['M-14'])).toBe(true);
+    expect(mentionsRoad(roadQuery('M-14'), ['Closed between I-275 (MI-14) and exit 18'])).toBe(
+      true,
+    );
+    expect(mentionsRoad(roadQuery('MI-14'), ['M-140', 'I-14', 'US-14'])).toBe(false);
+    // A distance, an address's state and ZIP code and other words are not a route.
+    expect(mentionsRoad(roadQuery('M-3'), ['Right lane closed for 2 mi 3 lanes open'])).toBe(false);
+    expect(mentionsRoad(roadQuery('M-3'), ['RIGHT LANE CLOSED 1.5 MI 3 LANES OPEN'])).toBe(false);
+    expect(normRoad('Detroit, MI 48202')).toBe('detroit mi 48202');
+    expect(normRoad('MI-48202')).toBe('mi 48202');
+    expect(normRoad('Miami 14')).toBe('miami 14');
+  });
+
+  it('finds a TomTom incident on "MI-14" whichever form the road search uses', async () => {
+    const f = unnamedClosure(
+      'tt-mi14',
+      [
+        [-83.05, 42.36],
+        [-83.06, 42.3601],
+      ],
+      'exit [20]',
+      'exit [29]',
+    );
+    Object.assign(f.properties as Record<string, unknown>, { roadNumbers: ['MI-14'] });
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      { routes: [[/api\.tomtom\.com/, () => json({ incidents: [f] })]] },
+    );
+    for (const road of ['MI-14', 'MI 14', 'mi-14', 'M-14', 'M 14']) {
+      const out = await x.run('road_closures', { ...DETROIT, radius_km: 5, road });
+      expect(
+        itemsOf(out).map((i) => i.road),
+        road,
+      ).toEqual(['M-14']);
+      expect(out.summary, road).not.toMatch(/^No /);
+    }
+    // The summary names the road the way the items do.
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5, road: 'MI-14' });
+    expect(out.summary).toMatch(/ on M-14 /);
+    expect(out.summary).not.toMatch(/MI-14/);
   });
 });
 
@@ -830,6 +1118,34 @@ describe('one item per closed stretch', () => {
     expect((out.data as { count: number }).count).toBe(itemsOf(out).length);
   });
 
+  it("keeps TomTom's own road name, with no OpenStreetMap note, when one direction has it", async () => {
+    // The northbound report has no route number, the southbound one has.
+    const nb = unnamedClosure('tt-nb', CLOSED_NB, 'Alpha St', 'Bravo St');
+    const sb = unnamedClosure('tt-sb', CLOSED_SB, 'Bravo St', 'Alpha St');
+    (sb.properties as Record<string, unknown>).roadNumbers = ['M-99'];
+    const x = h(
+      {
+        ...TT_ONLY,
+        OVERPASS_URL: 'http://overpass.invalid/api/interpreter',
+        DETROIT_ROW_ENABLED: 'false',
+      },
+      {
+        routes: [
+          [/api\.tomtom\.com/, () => json({ incidents: [nb, sb] })],
+          [/overpass\.invalid/, () => json(NEAR_WAYS)],
+        ],
+      },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const [both] = itemsOf(out);
+    expect(both).toMatchObject({ road: 'M-99', merged_reports: 2 });
+    expect(both!.note).toBe('2 reports of this stretch (one per direction) merged');
+    expect(x.mock.count(/overpass\.invalid/)).toBe(0);
+    expect((out.data as { attribution: string[] }).attribution).not.toContain(
+      GEO_ATTRIBUTION.overpass,
+    );
+  });
+
   it('lists each stretch once in the summary: road, what, cross streets, direction, distance', async () => {
     const x = h(
       {
@@ -856,7 +1172,7 @@ describe('one item per closed stretch', () => {
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     expect(out.summary).toContain(
-      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (1.9 km away).',
+      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (northbound, 1.9 km away).',
     );
     // Along a road, the length of the stretch stands in for the distance.
     const byRoad = await x.run('road_closures', { road: 'Charlie Avenue' });
@@ -947,16 +1263,16 @@ describe('one item per closed stretch', () => {
     expect(tt.filter((i) => i.merged_reports !== undefined)).toEqual([]);
     expect(tt.find((i) => i.road === 'Charlie Avenue')).toMatchObject({
       from_cross_street: 'Alpha St',
-      direction: null,
+      direction: 'northbound',
       full_closure: true,
     });
     expect(tt.find((i) => i.road === 'Delta Street')).toMatchObject({
       from_cross_street: 'Bravo St',
-      direction: null,
+      direction: 'southbound',
       full_closure: true,
     });
     expect(out.summary).toContain(
-      '4 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now), 3 full closure(s): Charlie Avenue: road closed between Alpha St and Bravo St (0.5 km away); Delta Street: road closed between Bravo St and Alpha St (0.6 km away);',
+      '4 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now), 3 full closure(s): Charlie Avenue: road closed between Alpha St and Bravo St (northbound, 0.5 km away); Delta Street: road closed between Bravo St and Alpha St (southbound, 0.6 km away);',
     );
   });
 
@@ -967,7 +1283,7 @@ describe('one item per closed stretch', () => {
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     expect(out.summary).toContain(
-      ': Unknown road: road closed between Alpha St and Bravo St (0.5 km away);',
+      ': Unknown road: road closed between Alpha St and Bravo St (northbound, 0.5 km away);',
     );
     const permits = await h().run('road_closures', { ...DETROIT, radius_km: 3 });
     expect(permits.summary).toContain(
@@ -1552,6 +1868,11 @@ describe('source parsers', () => {
   it('cleans third-party text and decodes polylines', () => {
     expect(cleanText('<script>x</script> a&amp;b‮\u0000  c', 50)).toBe('x a&b c');
     expect(cleanText('y'.repeat(400), 10)).toHaveLength(10);
+    // Long text is cut after a whole word, with an ellipsis.
+    expect(cleanText('Lane closed for the following work: Installation of conduit', 50)).toBe(
+      'Lane closed for the following work: Installation…',
+    );
+    expect(cleanText('Closed between Alpha St and Bravo St', 26)).toBe('Closed between Alpha St…');
     expect(cleanText(undefined)).toBeNull();
     const pts: Array<[number, number]> = [
       [-83.0458, 42.3314],

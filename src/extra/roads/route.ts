@@ -6,6 +6,7 @@
  */
 import { haversineM } from '../../util/geo.js';
 import {
+  lookUpRoad,
   reportSentence,
   type ClosureQuery,
   type ClosureService,
@@ -26,7 +27,7 @@ import {
   type Point,
 } from './geo.js';
 import { HttpError, errorText, type Http, type Pacer } from './http.js';
-import { cleanText } from './text.js';
+import { cleanText, clipWords, roadText } from './text.js';
 
 export const VALHALLA_ATTRIBUTION =
   'Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL); fix the map: https://www.openstreetmap.org/fixthemap';
@@ -118,10 +119,10 @@ export function valhallaRouter(o: { http: Http; baseUrl: string; pacer: Pacer })
         if (typeof leg.shape === 'string') shape.push(...decodePolyline(leg.shape, 6, 50_000));
         for (const m of (leg.maneuvers ?? []).slice(0, 500) as Array<Record<string, unknown>>) {
           maneuvers.push({
-            instruction: cleanText(m.instruction, 200) ?? '',
+            instruction: roadText(cleanText(m.instruction, 200)) ?? '',
             street_names: Array.isArray(m.street_names)
               ? m.street_names
-                  .map((s) => cleanText(s, 80))
+                  .map((s) => roadText(cleanText(s, 80)))
                   .filter((s): s is string => Boolean(s))
                   .slice(0, 4)
               : [],
@@ -244,24 +245,22 @@ export function routingSources(closures: ClosureService): ClosureSource[] {
   return closures.sources.filter((s) => !s.skip?.(probe));
 }
 
+/** Most characters of a closure's description a warning repeats (cut after a whole word). */
+const WARNING_TEXT_MAX = 200;
+
 function describe(it: RoadItem): string {
   const where = it.road
     ? ` on ${it.road}${it.direction ? ` ${it.direction}` : ''}`
     : it.direction
       ? ` (${it.direction})`
       : '';
-  return `${it.type}${where} (${it.source})${it.description ? `: ${it.description.slice(0, 140)}` : ''}`;
+  return `${it.type}${where} (${it.source})${it.description ? `: ${clipWords(it.description, WARNING_TEXT_MAX)}` : ''}`;
 }
 
 /** Street names for the items a route reports (Detroit permits have none), a few at a time. */
 async function nameAll(items: RoadItem[], signal: AbortSignal): Promise<void> {
   const todo = items.filter((it) => !it.road && it.resolveRoad).slice(0, 8);
-  await Promise.all(
-    todo.map(async (it) => {
-      it.road = await it.resolveRoad!(signal).catch(() => null);
-      if (it.road) it.roadLookedUp = true;
-    }),
-  );
+  await Promise.all(todo.map((it) => lookUpRoad(it, signal)));
 }
 
 /** Warnings shown per route for open-road work on the way (city permits are many downtown). */
@@ -316,7 +315,7 @@ export async function routeAvoidingClosures(
     await nameAll([...kept, ...atEnds, ...dropped, ...shown], signal);
     // A street name looked up on a map carries that map's credit.
     for (const it of [...kept, ...atEnds, ...dropped, ...shown])
-      if (it.roadLookedUp && it.roadCredit && !attributions.includes(it.roadCredit))
+      if (it.roadLookup === 'found' && it.roadCredit && !attributions.includes(it.roadCredit))
         attributions.push(it.roadCredit);
     for (const it of atEnds)
       warnings.push(`Closure at the start or end of the trip, can't be avoided: ${describe(it)}`);

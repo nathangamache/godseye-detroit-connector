@@ -164,6 +164,22 @@ export function lineMidpoint(line: LonLat[]): Point {
   return { lat, lon };
 }
 
+/**
+ * "northbound", "eastbound", ...: the way a line drawn in the direction of travel heads, first
+ * vertex to last (the nearest of the four). Null for a point or a line whose ends are less than
+ * minM apart (a loop, or too short to tell).
+ */
+export function travelDirection(line: LonLat[], minM = 30): string | null {
+  if (line.length < 2) return null;
+  const [aLon, aLat] = line[0]!;
+  const [bLon, bLat] = line[line.length - 1]!;
+  if (haversineM(aLat, aLon, bLat, bLon) < minM) return null;
+  const k = Math.cos(((aLat + bLat) / 2) * (Math.PI / 180));
+  // Degrees clockwise from north.
+  const deg = ((Math.atan2((bLon - aLon) * k, bLat - aLat) * 180) / Math.PI + 360) % 360;
+  return ['northbound', 'eastbound', 'southbound', 'westbound'][Math.round(deg / 90) % 4]!;
+}
+
 /** Points along a polyline at most stepM apart (vertices included). */
 export function samplePoints(line: LonLat[], stepM: number, max = 500): Point[] {
   const out: Point[] = [];

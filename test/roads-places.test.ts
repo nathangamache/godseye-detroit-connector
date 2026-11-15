@@ -20,6 +20,7 @@ import { decodePolyline, ringPerimeterM } from '../src/extra/roads/geo.js';
 import { Pacer } from '../src/extra/roads/http.js';
 import {
   ATTRIBUTION as GEO_ATTRIBUTION,
+  nameMatch,
   parseIntersection,
   roadFilter,
 } from '../src/extra/roads/geocode.js';
@@ -66,8 +67,55 @@ type Place = {
   attribution: string;
   in_region: boolean;
   distance_km?: number;
+  name_match?: number;
 };
 const placesOf = (out: { data?: unknown }) => (out.data as { places: Place[] }).places;
+
+/** A Photon feature (GeoJSON order) with an address in a synthetic street, or a landmark's. */
+function photonPlace(
+  name: string,
+  at: { lat: number; lon: number },
+  street: [string, string],
+  kind: [string, string] = ['amenity', 'cafe'],
+) {
+  return {
+    type: 'Feature',
+    properties: {
+      osm_key: kind[0],
+      osm_value: kind[1],
+      name,
+      housenumber: street[0],
+      street: street[1],
+      city: 'Detroit',
+      state: 'Michigan',
+      country: 'United States',
+    },
+    geometry: { type: 'Point', coordinates: [at.lon, at.lat] },
+  };
+}
+/** The Detroit Institute of Arts (a public landmark), about 3.3 km from DETROIT. */
+const DIA = photonPlace(
+  'Detroit Institute of Arts',
+  { lat: 42.3594, lon: -83.0646 },
+  ['5200', 'Woodward Avenue'],
+  ['tourism', 'museum'],
+);
+/** A synthetic place sharing some of its words, a few hundred metres from DETROIT. */
+const ALPHA_ARTS = photonPlace(
+  'Alpha Institute of Arts',
+  { lat: 42.333, lon: -83.0485 },
+  ['10', 'Alpha Street'],
+  ['amenity', 'school'],
+);
+/** Two synthetic places with the same name: one near DETROIT, one about 4.6 km off. */
+const CORNER_COFFEE_FAR = photonPlace('Corner Coffee', { lat: 42.3725, lon: -83.0458 }, [
+  '900',
+  'Bravo Street',
+]);
+const CORNER_COFFEE_NEAR = photonPlace('Corner Coffee', { lat: 42.3335, lon: -83.0435 }, [
+  '100',
+  'Alpha Street',
+]);
 const triedOf = (out: { data?: unknown }) =>
   (out.data as { tried: Array<{ source: string; status: string; note?: string }> }).tried;
 
@@ -112,19 +160,20 @@ describe('geocode_place', () => {
     expect(Number(q.get('lon'))).toBeCloseTo(-83.3, 2);
   });
 
-  it('sorts by distance from "near" without putting the point in the cache', async () => {
+  it('ranks by name first, "near" only among equal matches, without caching the point', async () => {
     const x = h();
-    // Downtown Grand Rapids: the Grand Rapids match comes first.
+    // Downtown Grand Rapids: the Grand Rapids "Comerica" is nearer but matches only half the
+    // name, so the stadium stays first; both get their distance.
     const out = await x.run('geocode_place', {
       query: 'Comerica Park',
       near: { lat: 42.9634, lon: -85.6681 },
       limit: 2,
     });
-    expect(placesOf(out).map((p) => p.name)).toEqual(['Comerica', 'Comerica Park']);
-    expect(placesOf(out)[0]!.distance_km).toBe(0.4);
-    expect(out.summary).toContain(
-      'Best: Comerica (Grand Rapids, Michigan) at 42.96000, -85.67000, 0.4 km away.',
-    );
+    expect(placesOf(out).map((p) => p.name)).toEqual(['Comerica Park', 'Comerica']);
+    expect(placesOf(out).map((p) => p.distance_km)).toEqual([225.2, 0.4]);
+    expect(placesOf(out)[0]).toMatchObject({ name_match: 1 });
+    expect(placesOf(out)[1]!.name_match).toBeLessThan(1);
+    expect(out.summary).toContain('Best: Comerica Park (2100 Woodward Avenue, Detroit,');
     const again = await x.run('geocode_place', { query: 'comerica park', near: DETROIT });
     expect(again.summary).toContain('(cached answer)');
     expect(placesOf(again)[0]!.name).toBe('Comerica Park');
@@ -468,6 +517,59 @@ describe('geocode_place', () => {
     expect(roadFilter('US-24')!.test({ ref: 'US 24;M 10' })).toBe(true);
     expect(roadFilter('US-24')!.test({ ref: 'US 240' })).toBe(false);
     expect(roadFilter('Hwy 401')!.test({ ref: '401' })).toBe(true);
+    // A Michigan trunkline in the national form is the map's "M 14".
+    expect(roadFilter('MI-14')!.test({ ref: 'M 14' })).toBe(true);
+    expect(roadFilter('MI 14')!.test({ ref: 'I 275;M 14' })).toBe(true);
+    expect(roadFilter('MI-14')!.test({ ref: 'M 140' })).toBe(false);
+  });
+
+  it('orders equally good matches by distance from "near"', async () => {
+    const x = h(
+      {},
+      {
+        routes: [
+          [
+            /photon\.komoot\.io\/api/,
+            () => json({ features: [CORNER_COFFEE_FAR, CORNER_COFFEE_NEAR, ALPHA_ARTS] }),
+          ],
+        ],
+      },
+    );
+    const near = await x.run('geocode_place', { query: 'Corner Coffee', near: DETROIT });
+    expect(placesOf(near).map((p) => [p.name, p.distance_km])).toEqual([
+      ['Corner Coffee', 0.3],
+      ['Corner Coffee', 4.6],
+      ['Alpha Institute of Arts', 0.3],
+    ]);
+    // Without a point: the geocoder's own order among equal matches.
+    const plain = await x.run('geocode_place', { query: 'Corner Coffee' });
+    expect(placesOf(plain)[0]!.lat).toBe(CORNER_COFFEE_FAR.geometry.coordinates[1]);
+  });
+
+  it('scores how well a place matches the name asked for', () => {
+    const p = (name: string, address: string | null = null) => ({ name, address });
+    const dia = p(
+      'Detroit Institute of Arts',
+      '5200 Woodward Avenue, Detroit, Michigan, 48202, United States',
+    );
+    const partial = p('Alpha Institute of Arts', '10 Alpha Street, Detroit, Michigan');
+    expect(nameMatch('Detroit Institute of Arts', dia)).toBe(1);
+    expect(nameMatch('detroit institute of arts', partial)).toBe(0.79);
+    // A qualifier after a comma is looked for in the address.
+    expect(nameMatch('Detroit Institute of Arts, Detroit, MI', dia)).toBe(1);
+    expect(nameMatch('DIA', dia)).toBe(0.9);
+    expect(nameMatch('Comerica', p('Comerica Park'))).toBe(0.88);
+    expect(nameMatch('Comerica Park', p('Comerica'))).toBe(0.63);
+    // One typo, a short form, plurals.
+    expect(nameMatch('Comerika Park', p('Comerica Park'))).toBeGreaterThan(0.85);
+    expect(
+      nameMatch('Detroit Metro Airport', p('Detroit Metropolitan Wayne County Airport')),
+    ).toBeGreaterThan(0.7);
+    expect(nameMatch('Unrelated Bakery', dia)).toBe(0);
+    // Addresses and intersections: the share of their parts that the place has.
+    expect(nameMatch('5200 Woodward Ave', dia)).toBe(1);
+    expect(nameMatch('5300 Woodward Ave', dia)).toBe(0.67);
+    expect(nameMatch('Woodward & 8 Mile', p('Woodward & Eight Mile'))).toBe(1);
   });
 
   it('reads the phone for near: "here"', async () => {
@@ -779,6 +881,97 @@ describe('route_avoiding_closures', () => {
     expect(bad.summary).toContain('Could not find "Nowhere Atall"');
   });
 
+  it('routes to the place named, not a nearer place sharing some of its words', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const x = h(
+      {},
+      {
+        routes: [
+          ...valhallaRoutes(seen),
+          // The far exact match first (as Photon ranks it), the near partial match second.
+          [/photon\.komoot\.io\/api/, () => json({ features: [DIA, ALPHA_ARTS] })],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: 'Detroit Institute of Arts',
+      avoid_closures: false,
+    });
+    expect(out.isError).toBeFalsy();
+    const locs = seen[0]!.locations as Array<{ lat: number; lon: number }>;
+    expect(locs[1]).toEqual({ lat: 42.3594, lon: -83.0646 });
+    expect(out.summary).toContain(
+      'Destination: Detroit Institute of Arts, 5200 Woodward Avenue, Detroit.',
+    );
+    expect(out.summary).toContain(
+      'Driving route from 42.3314, -83.0458 to Detroit Institute of Arts:',
+    );
+    // Not close enough to be worth naming as an alternative.
+    expect(out.summary).not.toContain('Alpha Institute');
+    expect(out.data).toMatchObject({
+      to: 'Detroit Institute of Arts',
+      places: { to: { name: 'Detroit Institute of Arts', name_match: 1 } },
+    });
+    // geocode_place ranks the same way from the same point.
+    const g = await x.run('geocode_place', { query: 'Detroit Institute of Arts', near: DETROIT });
+    expect(placesOf(g).map((p) => p.name)).toEqual([
+      'Detroit Institute of Arts',
+      'Alpha Institute of Arts',
+    ]);
+  });
+
+  it('takes the nearer of two equally good matches and names the other', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const x = h(
+      {},
+      {
+        routes: [
+          ...valhallaRoutes(seen),
+          [
+            /photon\.komoot\.io\/api/,
+            () => json({ features: [CORNER_COFFEE_FAR, CORNER_COFFEE_NEAR] }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: 'Corner Coffee',
+      avoid_closures: false,
+    });
+    const locs = seen[0]!.locations as Array<{ lat: number; lon: number }>;
+    expect(locs[1]!.lat).toBe(42.3335);
+    expect(out.summary).toContain(
+      'Destination: Corner Coffee, 100 Alpha Street, Detroit (another close match: Corner Coffee, 900 Bravo Street, Detroit, 4.6 km from the start).',
+    );
+    expect(out.data).toMatchObject({
+      places: { to: { alternative: { name: 'Corner Coffee', name_match: 1 } } },
+    });
+  });
+
+  it('refuses to route to a place whose name does not match the one asked for', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const x = h(
+      {},
+      {
+        routes: [
+          ...valhallaRoutes(seen),
+          [/photon\.komoot\.io\/api/, () => json({ features: [ALPHA_ARTS] })],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: 'Bravo Science Museum',
+    });
+    expect(out.isError).toBe(true);
+    expect(out.summary).toBe(
+      'To: No place named "Bravo Science Museum" was found: the closest match, Alpha Institute of Arts, 10 Alpha Street, Detroit, has a different name. Give the place\'s full name or its street address, or pass {lat, lon}.',
+    );
+    expect(seen).toHaveLength(0);
+  });
+
   it('excludes a long closure with a few small rings inside it, within the budget', () => {
     const route = line(DETROIT, BELLE_ISLE, 200);
     // A 4 km closed stretch lying on the route, and a closure elsewhere.
@@ -827,6 +1020,50 @@ describe('route_avoiding_closures', () => {
     const r2 = excludeRings(many, route);
     expect(r2.dropped.length).toBeGreaterThan(0);
     expect(r2.rings.reduce((m, r) => m + ringPerimeterM(r), 0)).toBeLessThanOrEqual(9_000);
+  });
+
+  it('cuts a long closure description in a warning after a whole word', async () => {
+    const onRoute = line(DETROIT, BELLE_ISLE, 40);
+    const description =
+      'Right lane closed for the following work: Installation of conduit and fiber optic cable, signal upgrades at three intersections, curb ramp reconstruction to current accessibility standards, and pavement marking replacement along the corridor.';
+    const zones = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          id: 'lane',
+          properties: {
+            core_details: { event_type: 'work-zone', road_names: ['Test Blvd'], description },
+            vehicle_impact: 'some-lanes-closed',
+            start_date: '2026-11-01T00:00:00Z',
+          },
+          geometry: { type: 'LineString', coordinates: onRoute.slice(15, 20) },
+        },
+      ],
+    };
+    const x = h(
+      { MDOT_RIDE_API_KEY: 'k', DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          [/work_zone_information/, () => json(zones)],
+          [/traffic_events/, () => json({ data: [] })],
+          [
+            /valhalla/,
+            () =>
+              json({
+                trip: {
+                  summary: { length: 4, time: 600 },
+                  legs: [{ shape: encodePolyline(onRoute, 6), maneuvers: [] }],
+                },
+              }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    expect((out.data as { warnings: string[] }).warnings).toEqual([
+      'On the route (not avoided, the road stays open): work-zone on Test Blvd (mdot_ride): Right lane closed for the following work: Installation of conduit and fiber optic cable, signal upgrades at three intersections, curb ramp reconstruction to current accessibility standards, and…',
+    ]);
+    expect(out.summary).toContain('accessibility standards, and… Closure descriptions');
   });
 
   it('warns about lane closures on the way and closures it cannot avoid', async () => {
@@ -947,6 +1184,47 @@ describe('route_avoiding_closures', () => {
     expect(out.summary).toContain(
       `Closure data: ${DETROIT_ATTRIBUTION}; ${GEO_ATTRIBUTION.photon}.`,
     );
+  });
+
+  it('writes Michigan trunklines in maneuvers as M-14, not MI-14', async () => {
+    const x = h(
+      {},
+      {
+        routes: [
+          [
+            /valhalla/,
+            () =>
+              json({
+                trip: {
+                  summary: { length: 4, time: 600 },
+                  legs: [
+                    {
+                      shape: encodePolyline(line(DETROIT, BELLE_ISLE, 4), 6),
+                      maneuvers: [
+                        {
+                          instruction: 'Take exit 18 on the right onto MI-14 West toward I-275.',
+                          street_names: ['MI-14', 'I-275', 'US-12'],
+                          length: 1,
+                          time: 60,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: BELLE_ISLE,
+      avoid_closures: false,
+    });
+    expect((out.data as { maneuvers: unknown[] }).maneuvers[0]).toMatchObject({
+      instruction: 'Take exit 18 on the right onto M-14 West toward I-275.',
+      street_names: ['M-14', 'I-275', 'US-12'],
+    });
   });
 
   it('reports Valhalla failures as errors', async () => {

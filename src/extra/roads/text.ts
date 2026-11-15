@@ -16,11 +16,12 @@ const ENTITIES: Record<string, string> = {
 
 /**
  * Plain, bounded text from an upstream string: tags stripped, a few entities decoded, control
- * characters and runs of whitespace collapsed, cut at max characters. Not a string: null.
+ * characters and runs of whitespace collapsed, at most max characters (cut after a whole word,
+ * with an ellipsis). Not a string: null.
  */
 export function cleanText(v: unknown, max = 300): string | null {
   if (typeof v !== 'string' && typeof v !== 'number') return null;
-  let s = String(v)
+  const s = String(v)
     .slice(0, 20_000)
     .replace(/<[^>]{0,500}>/g, ' ')
     .replace(/&(amp|lt|gt|quot|apos|nbsp|#39);/g, (_m, e: string) => ENTITIES[e] ?? ' ')
@@ -30,8 +31,35 @@ export function cleanText(v: unknown, max = 300): string | null {
     .replace(/ ([.,;:!?])(?=\s|$)/g, '$1')
     .trim();
   if (!s) return null;
-  if (s.length > max) s = s.slice(0, Math.max(1, max - 1)).trimEnd() + '…';
-  return s;
+  return clipWords(s, max);
+}
+
+/**
+ * At most max characters, cut after a whole word with an ellipsis (never mid-word); a text
+ * that fits is returned as is.
+ */
+export function clipWords(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, Math.max(1, max - 1));
+  // Mid-word: back to the last space, unless that would drop most of the text (one very long
+  // word, cut where it must be).
+  if (!/\s/.test(s[cut.length]!)) {
+    const sp = cut.lastIndexOf(' ');
+    if (sp >= max * 0.5) cut = cut.slice(0, sp);
+  }
+  return `${cut.replace(/[\s,;:.\-–—(]+$/, '')}…`;
+}
+
+/**
+ * Road labels as people write them in Michigan: "exit [20]" (an exit number in brackets, as
+ * some feeds give it) -> "exit 20"; a state trunkline written "MI-14" -> "M-14", the Michigan
+ * form. Only "MI-<number>" is changed: I-, US- and other states' routes are left alone.
+ */
+export function roadText<T extends string | null>(s: T): T {
+  if (!s) return s;
+  return s
+    .replace(/\b(exit)\s*\[\s*([0-9]{1,3}[A-Za-z]?)\s*\]/gi, '$1 $2')
+    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1') as T;
 }
 
 const NUMBER_WORDS: Record<string, string> = {
@@ -77,9 +105,14 @@ const SUFFIXES: Array<[RegExp, string]> = [
   [/\bwest\b/g, 'w'],
 ];
 
-/** Canonical form for matching: "Interstate-696 EB" -> "i 696 eb", "Highway 401" -> "hwy 401". */
+/**
+ * Canonical form for matching: "Interstate-696 EB" -> "i 696 eb", "Highway 401" -> "hwy 401",
+ * and a Michigan trunkline in the national form as roadText writes it: "MI-14", "MI 14" ->
+ * "m 14", like "M-14". "mi" right after a number is a distance ("2 mi 3 lanes"), and a ZIP code
+ * ("MI 48202") is not a route: both are left as they are.
+ */
 export function normRoad(s: string): string {
-  let t = ` ${s.toLowerCase()} `
+  let t = ` ${s.replace(/\bmi\s*-\s*(\d{1,3}[a-z]?)\b/gi, 'm $1').toLowerCase()} `
     .replace(/&/g, ' and ')
     .replace(/[’'.]/g, '')
     .replace(/[^a-z0-9]+/g, ' ');
@@ -88,6 +121,7 @@ export function normRoad(s: string): string {
     (w) => NUMBER_WORDS[w] ?? w,
   );
   t = t
+    .replace(/(?<!\d )\bmi ?(\d{1,3}[a-z]?)\b/g, 'm $1')
     .replace(/\binterstate\s*(\d+)/g, 'i $1')
     .replace(/\bi\s*(\d+)/g, 'i $1')
     .replace(/\bu\s*s\s*(\d+)/g, 'us $1')
@@ -113,7 +147,7 @@ const ALIASES: Array<[string, string]> = [
 ];
 
 export interface RoadQuery {
-  /** What the caller typed (cleaned). */
+  /** What the caller typed (cleaned), labels as items write them ("MI-14" -> "M-14": roadText). */
   text: string;
   /** Canonical spellings to look for (the input plus aliases). */
   needles: string[];
@@ -144,7 +178,7 @@ const GENERIC = new Set([
 ]);
 
 export function roadQuery(input: string): RoadQuery {
-  const text = cleanText(input, 80) ?? '';
+  const text = roadText(cleanText(input, 80)) ?? '';
   const n = normRoad(text);
   const needles = new Set([n]);
   for (const [name, ref] of ALIASES) {

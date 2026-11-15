@@ -3,6 +3,9 @@
  * licence decision) and TOMTOM_API_KEY is set. One bbox request (at most 10,000 km², the API's
  * limit) returns the incidents with their details, so the POST-by-id step is not needed.
  *
+ * An incident's direction is the one its text names, else the way its line heads: TomTom draws
+ * an incident in the direction of travel it affects (both directions come as two incidents).
+ *
  * Never cached: TomTom's terms allow caching only as the response's Cache-Control headers say,
  * and Incident Details sends none. A hard daily cap (TOMTOM_INCIDENTS_DAILY_MAX, counted on disk
  * so a restart does not reset it) bounds use. Not used for routing (TomTom's terms exclude
@@ -26,12 +29,13 @@ import {
   clampToWorld,
   lineMidpoint,
   round6,
+  travelDirection,
   type BBox,
   type LonLat,
   type Point,
 } from '../geo.js';
 import type { DailyCounter, Http } from '../http.js';
-import { cleanText } from '../text.js';
+import { cleanText, roadText } from '../text.js';
 
 export const TOMTOM_ATTRIBUTION = 'Traffic incidents © TomTom';
 
@@ -106,10 +110,9 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
       .map((e) => cleanText((e as { description?: unknown })?.description, 120))
       .filter(Boolean)
       .join('; ');
+    // "M-14" and "MI-14" are one route: each number once, in the Michigan form.
     const roads = Array.isArray(p.roadNumbers)
-      ? p.roadNumbers
-          .map((r) => cleanText(r, 20))
-          .filter(Boolean)
+      ? [...new Set(p.roadNumbers.map((r) => roadText(cleanText(r, 20))).filter(Boolean))]
           .slice(0, 4)
           .join(' / ')
       : '';
@@ -122,7 +125,7 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
       kind: cat === 9 ? 'work_zone' : 'incident',
       type: TYPE[cat] ?? 'incident',
       road: roads || null,
-      direction: null,
+      direction: directionOf(desc, line),
       lanes: cat === 7 ? 'lane(s) closed' : cat === 8 ? 'all lanes' : null,
       vehicle_impact: cat === 8 ? 'road closed' : impact || null,
       full_closure: cat === 8,
@@ -139,17 +142,37 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
   return out;
 }
 
-/** An incident TomTom gives no road for: the lookup, its credit and a note saying so. */
+/**
+ * The direction an incident is in: as TomTom's text says it ("Closed northbound"), else the way
+ * its line heads (TomTom draws an incident in the direction of travel it affects), else null.
+ */
+export function directionOf(text: string, line: LonLat[]): string | null {
+  if (/\bboth directions\b/i.test(text)) return 'both directions';
+  const m = /\b(north|south|east|west)[ -]?bound\b/i.exec(text);
+  return m ? `${m[1]!.toLowerCase()}bound` : travelDirection(line);
+}
+
+/**
+ * An incident TomTom gives no road for: the lookup, its credit, and what its note says (the road
+ * comes from OpenStreetMap only when the lookup found one).
+ */
 function unnamed(line: LonLat[], roadAt?: RoadAt): Partial<RoadItem> {
+  const none = 'TomTom gives no road name here';
   if (!roadAt)
     return {
-      note: 'TomTom gives no road name here; set OVERPASS_URL to name the road from OpenStreetMap',
+      roadNote: { skipped: `${none}; set OVERPASS_URL to name the road from OpenStreetMap` },
     };
   const mid = lineMidpoint(line);
+  const within = `within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`;
   return {
     resolveRoad: (signal) => roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal),
     roadCredit: GEO_ATTRIBUTION.overpass,
-    note: `TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`,
+    roadNote: {
+      found: `${none}; the road is the nearest named road in OpenStreetMap ${within}`,
+      none: `${none}, and OpenStreetMap has no named road ${within}`,
+      failed: `${none}; the OpenStreetMap lookup of its road failed`,
+      skipped: `${none}; not looked up in OpenStreetMap (street-name lookups are capped per call)`,
+    },
   };
 }
 

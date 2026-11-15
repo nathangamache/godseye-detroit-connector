@@ -425,7 +425,13 @@ export function detroitRowSource(o: DetroitRowOptions): ClosureSource {
           roadCredit: o.geocoder.overpassConfigured
             ? GEO_ATTRIBUTION.overpass
             : GEO_ATTRIBUTION.photon,
-          note: `${segs} permit segment(s); street name looked up from the map${segs > 1 ? ' at the segment shown' : ''}; full_closure is inferred from the permit text`,
+          roadNote: {
+            found: `street name looked up from the map${segs > 1 ? ' at the segment shown' : ''}`,
+            none: `no street name found on the map${segs > 1 ? ' at the segment shown' : ''}`,
+            failed: 'the street-name lookup failed',
+            skipped: 'street name not looked up (street-name lookups are capped per call)',
+          },
+          note: `${segs} permit segment(s); full_closure is inferred from the permit text`,
         });
       }
       const howOld = ageMs < 60_000 ? 'under a minute' : humanAge(Math.round(ageMs / 1000));
