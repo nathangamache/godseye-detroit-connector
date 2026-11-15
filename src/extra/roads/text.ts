@@ -105,9 +105,14 @@ const SUFFIXES: Array<[RegExp, string]> = [
   [/\bwest\b/g, 'w'],
 ];
 
-/** Canonical form for matching: "Interstate-696 EB" -> "i 696 eb", "Highway 401" -> "hwy 401". */
+/**
+ * Canonical form for matching: "Interstate-696 EB" -> "i 696 eb", "Highway 401" -> "hwy 401",
+ * and a Michigan trunkline in the national form as roadText writes it: "MI-14", "MI 14" ->
+ * "m 14", like "M-14". "mi" right after a number is a distance ("2 mi 3 lanes"), and a ZIP code
+ * ("MI 48202") is not a route: both are left as they are.
+ */
 export function normRoad(s: string): string {
-  let t = ` ${s.toLowerCase()} `
+  let t = ` ${s.replace(/\bmi\s*-\s*(\d{1,3}[a-z]?)\b/gi, 'm $1').toLowerCase()} `
     .replace(/&/g, ' and ')
     .replace(/[’'.]/g, '')
     .replace(/[^a-z0-9]+/g, ' ');
@@ -116,6 +121,7 @@ export function normRoad(s: string): string {
     (w) => NUMBER_WORDS[w] ?? w,
   );
   t = t
+    .replace(/(?<!\d )\bmi ?(\d{1,3}[a-z]?)\b/g, 'm $1')
     .replace(/\binterstate\s*(\d+)/g, 'i $1')
     .replace(/\bi\s*(\d+)/g, 'i $1')
     .replace(/\bu\s*s\s*(\d+)/g, 'us $1')
@@ -141,7 +147,7 @@ const ALIASES: Array<[string, string]> = [
 ];
 
 export interface RoadQuery {
-  /** What the caller typed (cleaned). */
+  /** What the caller typed (cleaned), labels as items write them ("MI-14" -> "M-14": roadText). */
   text: string;
   /** Canonical spellings to look for (the input plus aliases). */
   needles: string[];
@@ -172,7 +178,7 @@ const GENERIC = new Set([
 ]);
 
 export function roadQuery(input: string): RoadQuery {
-  const text = cleanText(input, 80) ?? '';
+  const text = roadText(cleanText(input, 80)) ?? '';
   const n = normRoad(text);
   const needles = new Set([n]);
   for (const [name, ref] of ALIASES) {

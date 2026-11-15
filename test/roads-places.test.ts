@@ -517,6 +517,10 @@ describe('geocode_place', () => {
     expect(roadFilter('US-24')!.test({ ref: 'US 24;M 10' })).toBe(true);
     expect(roadFilter('US-24')!.test({ ref: 'US 240' })).toBe(false);
     expect(roadFilter('Hwy 401')!.test({ ref: '401' })).toBe(true);
+    // A Michigan trunkline in the national form is the map's "M 14".
+    expect(roadFilter('MI-14')!.test({ ref: 'M 14' })).toBe(true);
+    expect(roadFilter('MI 14')!.test({ ref: 'I 275;M 14' })).toBe(true);
+    expect(roadFilter('MI-14')!.test({ ref: 'M 140' })).toBe(false);
   });
 
   it('orders equally good matches by distance from "near"', async () => {

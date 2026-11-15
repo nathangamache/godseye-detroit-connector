@@ -1016,6 +1016,54 @@ describe('exit and route labels', () => {
     );
     expect(out.summary).not.toMatch(/MI-14|\[\d+\]/);
   });
+
+  it('matches a Michigan trunkline written "MI-14", "MI 14", "M-14" or "M 14"', () => {
+    for (const s of ['MI-14', 'MI 14', 'MI14', 'mi-14', 'Mi - 14', 'M-14', 'M 14', 'm14'])
+      expect(normRoad(s)).toBe('m 14');
+    expect(normRoad('I-275 (MI-14) W')).toBe('i 275 m 14 w');
+    expect(roadQuery('MI-14')).toMatchObject({ text: 'M-14', keyword: '14' });
+    expect(mentionsRoad(roadQuery('MI-14'), ['M-14 W'])).toBe(true);
+    expect(mentionsRoad(roadQuery('MI 14'), ['M-14'])).toBe(true);
+    expect(mentionsRoad(roadQuery('M-14'), ['Closed between I-275 (MI-14) and exit 18'])).toBe(
+      true,
+    );
+    expect(mentionsRoad(roadQuery('MI-14'), ['M-140', 'I-14', 'US-14'])).toBe(false);
+    // A distance, an address's state and ZIP code and other words are not a route.
+    expect(mentionsRoad(roadQuery('M-3'), ['Right lane closed for 2 mi 3 lanes open'])).toBe(false);
+    expect(mentionsRoad(roadQuery('M-3'), ['RIGHT LANE CLOSED 1.5 MI 3 LANES OPEN'])).toBe(false);
+    expect(normRoad('Detroit, MI 48202')).toBe('detroit mi 48202');
+    expect(normRoad('MI-48202')).toBe('mi 48202');
+    expect(normRoad('Miami 14')).toBe('miami 14');
+  });
+
+  it('finds a TomTom incident on "MI-14" whichever form the road search uses', async () => {
+    const f = unnamedClosure(
+      'tt-mi14',
+      [
+        [-83.05, 42.36],
+        [-83.06, 42.3601],
+      ],
+      'exit [20]',
+      'exit [29]',
+    );
+    Object.assign(f.properties as Record<string, unknown>, { roadNumbers: ['MI-14'] });
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      { routes: [[/api\.tomtom\.com/, () => json({ incidents: [f] })]] },
+    );
+    for (const road of ['MI-14', 'MI 14', 'mi-14', 'M-14', 'M 14']) {
+      const out = await x.run('road_closures', { ...DETROIT, radius_km: 5, road });
+      expect(
+        itemsOf(out).map((i) => i.road),
+        road,
+      ).toEqual(['M-14']);
+      expect(out.summary, road).not.toMatch(/^No /);
+    }
+    // The summary names the road the way the items do.
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5, road: 'MI-14' });
+    expect(out.summary).toMatch(/ on M-14 /);
+    expect(out.summary).not.toMatch(/MI-14/);
+  });
 });
 
 describe('one item per closed stretch', () => {
