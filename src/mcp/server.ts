@@ -20,8 +20,14 @@ import {
   categoryFor as categoryForTool,
   type CategoryId,
 } from '../tools/tags.js';
-import type { ToolContext } from '../tools/types.js';
-import { whatsHappeningHere, whereAmI } from './whatsHappening.js';
+import { keyFields, offLabel } from '../tools/keygate.js';
+import type { ToolContext, ToolDef } from '../tools/types.js';
+import {
+  IntervalGate,
+  TOMTOM_SUMMARY_INTERVAL_MS,
+  whatsHappeningHere,
+  whereAmI,
+} from './whatsHappening.js';
 
 /**
  * Server instructions. Only links on the globe's own origin are described as the
@@ -78,7 +84,7 @@ const DIRECT_TOOLS = [
   {
     name: 'whats_happening_here',
     description:
-      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather, traffic, road closures, border waits near a crossing, air quality when configured, cameras when any are in range (call directly).",
+      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather (F and mph), traffic, road closures, border waits near a crossing, air quality, cameras; every section is listed, saying so when it has nothing or is not configured (call directly).",
   },
 ];
 
@@ -89,6 +95,8 @@ export interface McpDeps {
   /** Location reads are audited (review MCP-2; never with coordinates). */
   audit?: Audit;
   tokens?: TokenStore;
+  /** Paces whats_happening_here's TomTom requests across calls (createMcpHttpHandler makes one). */
+  tomtomGate?: IntervalGate;
 }
 
 const readOnly = {
@@ -175,7 +183,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       title: 'Find tools',
       description:
-        'Browse or search the connector\'s tool catalog (God\'s Eye View, rail, Detroit Pulse). With no query (or "*" / "all"), lists every available tool by category with one-line descriptions; with a category, lists that category; with a query, returns matching tools with their full input JSON schemas for run_tool (a tool\'s exact name returns that tool).',
+        'Browse or search the connector\'s tool catalog (God\'s Eye View; the gateway\'s own rail, aviation, weather, roads and civic tools; Detroit Pulse). With no query (or "*" / "all"), lists every available tool by category with one-line descriptions (a tool whose API key is missing is listed as OFF with the key it needs); with a category, lists that category; with a query, returns matching tools with their full input JSON schemas for run_tool (a tool\'s exact name returns that tool first).',
       inputSchema: z.object({
         query: z
           .string()
@@ -225,10 +233,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       runner.logCall('find_tools', 'gateway', t0, 'ok', toolContext(ctx));
       const results = hits.map((h) => ({
         name: h.tool.name,
-        description: oneLineDescription(h.tool.description),
+        description: catalogDescription(h.tool),
         source: h.tool.source,
         family: h.tool.family,
         category: categoryOf(h.tool),
+        ...keyFields(h.tool),
         input_schema: h.tool.inputSchema,
       }));
       const within = category ? ` in category ${category}` : '';
@@ -261,7 +270,13 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     const groups: Array<{
       category: CategoryId;
       label: string;
-      tools: Array<{ name: string; description: string; source: string }>;
+      tools: Array<{
+        name: string;
+        description: string;
+        source: string;
+        status?: 'off';
+        needs_key?: string;
+      }>;
     }> = [];
     for (const e of page) {
       let g = groups[groups.length - 1];
@@ -271,18 +286,26 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       }
       g.tools.push({
         name: e.tool.name,
-        description: oneLineDescription(e.tool.description),
+        description: catalogDescription(e.tool),
         source: e.tool.source,
+        ...keyFields(e.tool),
       });
     }
     const counts = new Map<string, number>();
     for (const e of all) counts.set(e.category, (counts.get(e.category) ?? 0) + 1);
     const bySource = (src: string) => all.filter((e) => e.tool.source === src).length;
     const scope = category ? ` in category ${category} (${labelOf(category)})` : '';
+    const gatewayKinds = gatewayFamilies(all.map((e) => e.tool));
+    const off = all.filter((e) => e.tool.needsKey);
     const text = [
-      `${all.length} tool(s) available through run_tool${scope}: ${bySource('gev')} from God's Eye View, ${bySource('gateway')} gateway (rail) and ${bySource('pulse')} Detroit Pulse.` +
+      `${all.length} tool(s) available through run_tool${scope}: ${bySource('gev')} from God's Eye View, ${bySource('gateway')} gateway tools${gatewayKinds ? ` (${gatewayKinds})` : ''} and ${bySource('pulse')} Detroit Pulse tools (scanner and rail radio).` +
         (category ? '' : ' where_am_i and whats_happening_here are called directly.'),
       `Categories: ${[...counts].map(([c, n]) => `${c} (${n})`).join(', ') || 'none'}.`,
+      ...(off.length
+        ? [
+            `OFF until their key is set (listed, and they answer status not_configured without fetching anything): ${off.map((e) => `${e.tool.name} (${e.tool.needsKey!.env})`).join(', ')}.`,
+          ]
+        : []),
       all.length
         ? `Showing ${offset + 1}-${offset + page.length}${next !== null ? `; call find_tools again with offset ${next} for the rest` : ''}.`
         : 'Nothing to show.',
@@ -358,7 +381,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       title: "What's happening here",
       description:
-        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather, traffic, road closures within about 5 km, border waits when a Detroit/Windsor or Port Huron crossing is near, air quality when configured and public cameras when any are in range, each with its data age.",
+        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather (F and mph), traffic, road closures within about 5 km (how many, the nearest 5 with road and cross streets; TomTom incidents at most every 15 minutes, otherwise ask road_closures), border waits when a Detroit/Windsor or Port Huron crossing is near, air quality and public cameras, each with its data age. Every section is listed: one with nothing to report, not configured or unable to run says so.",
       inputSchema: z.object({
         lat: z.number().min(-90).max(90).optional(),
         lon: z.number().min(-180).max(180).optional(),
@@ -378,6 +401,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             runner,
             locations,
             phoneCheck: (p) => phoneCheck('whats_happening_here', tc, p),
+            tomtomGate: deps.tomtomGate,
           },
           args,
           tc,
@@ -389,6 +413,26 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   );
 
   return server;
+}
+
+/** A catalog line: the one-line description, led by "OFF: not configured (needs X)." when so. */
+function catalogDescription(t: ToolDef): string {
+  const d = oneLineDescription(t.description);
+  return t.needsKey ? `${offLabel(t.needsKey)} ${d}` : d;
+}
+
+/** What the gateway's own tools are, by family, in a fixed order ("rail, aviation, weather"). */
+const FAMILY_ORDER = ['rail', 'aviation', 'weather', 'roads', 'civic'];
+const FAMILY_LABEL: Record<string, string> = { pulse: 'rail' };
+export function gatewayFamilies(tools: Array<Pick<ToolDef, 'source' | 'family'>>): string {
+  const kinds = new Set(
+    tools.filter((t) => t.source === 'gateway').map((t) => FAMILY_LABEL[t.family] ?? t.family),
+  );
+  const rank = (k: string) => {
+    const i = FAMILY_ORDER.indexOf(k);
+    return i < 0 ? FAMILY_ORDER.length : i;
+  };
+  return [...kinds].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)).join(', ');
 }
 
 function labelOf(c: CategoryId): string {
@@ -409,7 +453,12 @@ export function withNote(r: McpToolResult, note: string): McpToolResult {
 }
 
 export function createMcpHttpHandler(deps: McpDeps): McpHttpHandler {
-  return createMcpHandler(() => buildMcpServer(deps), {
+  // One server per request, so state that spans calls lives here.
+  const shared: McpDeps = {
+    ...deps,
+    tomtomGate: deps.tomtomGate ?? new IntervalGate(TOMTOM_SUMMARY_INTERVAL_MS),
+  };
+  return createMcpHandler(() => buildMcpServer(shared), {
     responseMode: 'sse',
     keepAliveMs: 15_000,
     maxRequestBodySize: 256 * 1024,

@@ -7,13 +7,17 @@
  *   Pulse        -> rail_activity_near (relays Pulse's rail voice and EOT/HOT verdicts: quiet
  *                   only with Pulse's proof for the whole window), incidents_near (never
  *                   quiet: no proof), so 0 messages is never mistaken for "quiet"
- *   gateway      -> weather_alerts (NWS, the point), road_closures (nearest 5 within 5 km, every
- *                   enabled source), border_wait_times (only within 8 km of a Detroit/Windsor or
- *                   Port Huron crossing), air_quality (only when AIRNOW_API_KEY is set)
- *   GEV          -> get_weather, get_traffic_flow, find_cctv_cameras (shown only when a camera
- *                   is in range: none in SE Michigan today)
- * and returns one compact summary with each source's timestamp/age and error. For an explicit
- * point it also says how far the user's phone is from that point (src/location/proximity.ts).
+ *   gateway      -> weather_alerts (NWS, "at your location (phone fix N old)" or "at the given
+ *                   point"), road_closures (how many within 5 km, the nearest 5 with road and
+ *                   cross streets, every enabled source; TomTom incidents at most every 15 min
+ *                   from this summary, never cached, with the requests left today),
+ *                   border_wait_times (asked only within 8 km of a Detroit/Windsor or Port Huron
+ *                   crossing), air_quality ("not configured (AIRNOW_API_KEY)" without its key)
+ *   GEV          -> get_weather (F and mph), get_traffic_flow, find_cctv_cameras ("none in
+ *                   range" when there are none: none in SE Michigan today)
+ * and returns one compact summary with each source's timestamp/age and error. No section is ever
+ * left out: one that has nothing, is not configured or cannot run says so. For an explicit point
+ * it also says how far the user's phone is from that point (src/location/proximity.ts).
  */
 import type { Config } from '../config.js';
 import {
@@ -107,7 +111,8 @@ export { humanAge };
 
 interface SourceReport {
   source: string;
-  status: 'ok' | 'error' | 'unavailable' | 'skipped';
+  /** not_configured: the tool's API key is missing (the line names it; nothing was fetched). */
+  status: 'ok' | 'error' | 'unavailable' | 'skipped' | 'not_configured';
   summary: string;
   retrieved_at: string;
   observed_at?: string;
@@ -213,6 +218,49 @@ export interface WhatsHappeningDeps {
   phoneCheck?: (p: Point) => ProximityCheck | undefined;
   /** Overall time budget in ms (default whatsHappeningBudgetMs). */
   budgetMs?: number;
+  /**
+   * Paces this summary's TomTom incident requests (TOMTOM_SUMMARY_INTERVAL_MS apart) so it never
+   * spends the daily cap on every call. Shared across calls; the default is process-wide.
+   */
+  tomtomGate?: IntervalGate;
+}
+
+/** whats_happening_here asks TomTom for incidents at most this often (results are never cached). */
+export const TOMTOM_SUMMARY_INTERVAL_MS = 15 * 60_000;
+/** What the summary says when it leaves TomTom out to save the quota. */
+export const TOMTOM_SKIPPED_NOTE = 'skipped to save the daily quota; ask road_closures for them';
+
+/**
+ * At most one use per interval. take() reserves the slot at once (so concurrent calls cannot
+ * both use it) and hands back an undo for a slot that turned out not to be used. Nothing about
+ * the results is kept: only the time of the last use.
+ */
+export class IntervalGate {
+  private last: number | undefined;
+
+  constructor(readonly intervalMs: number) {}
+
+  take(now: number): { ok: true; undo: () => void } | { ok: false; waitMs: number } {
+    if (this.last !== undefined && now - this.last < this.intervalMs)
+      return { ok: false, waitMs: this.intervalMs - (now - this.last) };
+    const before = this.last;
+    this.last = now;
+    return {
+      ok: true,
+      undo: () => {
+        if (this.last === now) this.last = before;
+      },
+    };
+  }
+}
+
+const defaultTomTomGate = new IntervalGate(TOMTOM_SUMMARY_INTERVAL_MS);
+
+/** TomTom incidents would be asked: key, the owner's licence switch and a non-zero cap. */
+function tomtomEnabled(
+  c: Pick<Config, 'TOMTOM_API_KEY' | 'ALLOW_TOMTOM_INCIDENTS' | 'TOMTOM_INCIDENTS_DAILY_MAX'>,
+): boolean {
+  return Boolean(c.TOMTOM_API_KEY) && c.ALLOW_TOMTOM_INCIDENTS && c.TOMTOM_INCIDENTS_DAILY_MAX > 0;
 }
 
 export interface WhatsHappeningArgs {
@@ -231,6 +279,8 @@ export async function whatsHappeningHere(
   let lat = args.lat;
   let lon = args.lon;
   let positionNote: string;
+  /** How sections that describe the point say where it is ("at your location (...)"). */
+  let atPoint = 'at the given point';
   if (lat === undefined || lon === undefined) {
     if (lat !== undefined || lon !== undefined) {
       return {
@@ -255,6 +305,7 @@ export async function whatsHappeningHere(
     lon = pos.lon;
     const acc = pos.accuracy_m === null ? '' : `, ±${pos.accuracy_m} m`;
     positionNote = `position from phone fix ${humanAge(pos.age_s)} old${acc}${pos.stale ? ' (STALE: may have moved)' : ''}`;
+    atPoint = `at your location (phone fix ${humanAge(pos.age_s)} old${pos.stale ? ', STALE' : ''})`;
   } else {
     positionNote = 'position supplied by caller';
   }
@@ -276,15 +327,14 @@ export async function whatsHappeningHere(
     timeoutMs: number,
     interpret: (out: ToolOutput) => Omit<SourceReport, 'source' | 'retrieved_at'>,
     opts: {
-      /** Leave the section out when the tool is missing or switched off by policy. */
-      optional?: boolean;
       /** Credit the tool's own attribution when the section is shown. */
       credit?: boolean;
+      /** Context for this section's call (e.g. road sources to skip). */
+      ctx?: ToolContext;
     } = {},
-  ): Promise<SourceReport | undefined> => {
+  ): Promise<SourceReport> => {
     const def = registry.get(toolName);
     if (!def) {
-      if (opts.optional) return undefined;
       const missing =
         toolName === 'nearest_rail'
           ? 'rail data is not loaded'
@@ -296,10 +346,16 @@ export async function whatsHappeningHere(
       return { source, status: 'unavailable', summary: missing, retrieved_at: retrievedAt() };
     }
     const verdict = registry.policy.evaluate(def);
-    if (!verdict.allowed) {
-      if (opts.optional) return undefined;
+    if (!verdict.allowed)
       return { source, status: 'skipped', summary: verdict.reason, retrieved_at: retrievedAt() };
-    }
+    // A key-gated tool without its key: said so, never left out, and nothing is fetched.
+    if (def.needsKey)
+      return {
+        source,
+        status: 'not_configured',
+        summary: `not configured (${def.needsKey.env})`,
+        retrieved_at: retrievedAt(),
+      };
     const left = budget - (Date.now() - started);
     if (left < MIN_SECTION_MS)
       return {
@@ -317,7 +373,7 @@ export async function whatsHappeningHere(
         retrieved_at: retrievedAt(),
       };
     }
-    const out = await runner.callRaw(def, toolArgs, ctx, Math.min(timeoutMs, left));
+    const out = await runner.callRaw(def, toolArgs, opts.ctx ?? ctx, Math.min(timeoutMs, left));
     const rep = interpret(out);
     const obs = rep.observed_at ?? observedAt(out.data);
     const r: SourceReport = { source, retrieved_at: retrievedAt(), ...rep };
@@ -329,11 +385,21 @@ export async function whatsHappeningHere(
     return r;
   };
 
+  // TomTom incidents at most every 15 min from this summary (never cached: when skipped, the
+  // line says so and road_closures has them).
+  let tomtomUse: { undo: () => void } | undefined;
+  let roadsCtx = ctx;
+  if (tomtomEnabled(deps.config)) {
+    const t = (deps.tomtomGate ?? defaultTomTomGate).take(now());
+    if (t.ok) tomtomUse = t;
+    else roadsCtx = { ...ctx, skipRoadSources: { tomtom: TOMTOM_SKIPPED_NOTE } };
+  }
+
   // Rail is local and fast; its subdivision feeds the Pulse rail query.
-  const rail = (await runSource('rail', 'nearest_rail', { lat, lon }, 3000, (out) => {
+  const rail = await runSource('rail', 'nearest_rail', { lat, lon }, 3000, (out) => {
     if (out.isError) return { status: 'error', summary: out.summary };
     return { status: 'ok', summary: railLine((out.data ?? {}) as RailData), data: out.data };
-  }))!;
+  });
 
   const pulseDown = (out: ToolOutput) => out.isError && out.errorKind === 'unavailable';
   const nearCrossings = crossingsNear({ lat, lon }, BORDER_NEAR_KM);
@@ -379,7 +445,7 @@ export async function whatsHappeningHere(
           const d = (out.data ?? {}) as { count?: number; zone?: unknown; alerts?: unknown[] };
           return {
             status: 'ok',
-            summary: out.summary,
+            summary: alertsAt(out.summary, atPoint),
             observed_at: isoOrUndefined(out.observedAt),
             data: { count: d.count, zone: d.zone, alerts: (d.alerts ?? []).slice(0, 5) },
           };
@@ -392,7 +458,7 @@ export async function whatsHappeningHere(
         delete d.view;
         return { status: 'ok', summary: out.summary, data: d };
       }),
-      // Only when AIRNOW_API_KEY is set (the policy switches air_quality off without it).
+      // Without AIRNOW_API_KEY the line says "not configured (AIRNOW_API_KEY)".
       runSource(
         'air_quality',
         'air_quality',
@@ -406,7 +472,7 @@ export async function whatsHappeningHere(
                 summary: out.summary,
                 data: compact(out.data, ['note', 'observations', 'forecast', 'retrieved_at']),
               },
-        { optional: true, credit: true },
+        { credit: true },
       ),
       runSource(
         'traffic',
@@ -436,6 +502,7 @@ export async function whatsHappeningHere(
         { lat, lon, radius_km: CLOSURES_RADIUS_KM, limit: CLOSURES_SHOWN },
         12_000,
         (out) => closuresReport(out, credits),
+        { ctx: roadsCtx },
       ),
       nearCrossings.length
         ? runSource(
@@ -446,8 +513,13 @@ export async function whatsHappeningHere(
             (out) => borderReport(out, nearCrossings),
             { credit: true },
           )
-        : undefined,
-      // Public cameras: shown only when one is in range (none in SE Michigan today).
+        : Promise.resolve<SourceReport>({
+            source: 'border',
+            status: 'ok',
+            summary: `none: no Detroit/Windsor or Port Huron crossing within ${BORDER_NEAR_KM} km`,
+            retrieved_at: retrievedAt(),
+          }),
+      // Public cameras ("none in range" when there are none: none in SE Michigan today).
       runSource(
         'cameras',
         'find_cctv_cameras',
@@ -460,17 +532,25 @@ export async function whatsHappeningHere(
             ? d.cameras
                 .slice(0, 5)
                 .map((c) => compact(c, ['id', 'name', 'city', 'distance_km', 'provider', 'credit']))
-            : undefined;
+            : [];
+          if (!cams.length)
+            return {
+              status: 'ok',
+              summary: `none in range (within ${radius} km)`,
+              data: { total: 0, cameras: [] },
+            };
           return { status: 'ok', summary: out.summary, data: { total: d.total, cameras: cams } };
         },
-        { optional: true },
       ),
     ]);
   const camerasInRange =
-    cameras?.status === 'ok' &&
+    cameras.status === 'ok' &&
     ((cameras.data as { cameras?: unknown[] } | undefined)?.cameras?.length ?? 0) > 0;
+  // A reserved TomTom slot that went unused (not asked, or refused for its cap) is given back.
+  if (tomtomUse && !tomtomAsked(closures)) tomtomUse.undo();
 
-  const sources = [
+  // Every section is listed, even when it has nothing or cannot run (it says why).
+  const sources: SourceReport[] = [
     rail,
     railRadio,
     incidents,
@@ -480,8 +560,8 @@ export async function whatsHappeningHere(
     traffic,
     closures,
     border,
-    camerasInRange ? cameras : undefined,
-  ].filter((s): s is SourceReport => s !== undefined);
+    cameras,
+  ];
   const label: Record<string, string> = {
     rail: 'Rail line & crossing',
     rail_radio: 'Rail radio (Pulse)',
@@ -500,7 +580,7 @@ export async function whatsHappeningHere(
   if (phone) lines.push(phone.note);
   for (const s of sources) {
     const age = s.age_s !== undefined ? ` [data ${humanAge(s.age_s)} old]` : '';
-    const flag = s.status === 'ok' ? '' : ` (${s.status})`;
+    const flag = s.status === 'ok' || s.status === 'not_configured' ? '' : ` (${s.status})`;
     lines.push(`- ${label[s.source] ?? s.source}${flag}: ${oneLine(s.summary)}${age}`);
   }
   lines.push(`Retrieved ${retrievedAt()}. Always tell the user how old each piece of data is.`);
@@ -543,7 +623,12 @@ export async function whatsHappeningHere(
 }
 
 /** Gateway-native tools whose section says "not available" (not "GEV offline") when missing. */
-const GATEWAY_SECTIONS = new Set(['weather_alerts', 'road_closures', 'border_wait_times']);
+const GATEWAY_SECTIONS = new Set([
+  'weather_alerts',
+  'air_quality',
+  'road_closures',
+  'border_wait_times',
+]);
 /** A section that would get less than this of the budget is skipped, not started. */
 const MIN_SECTION_MS = 250;
 /** Crossings this close to the point get a border-waits section. */
@@ -570,17 +655,73 @@ interface ClosureItemData {
   road?: string | null;
   direction?: string | null;
   full_closure?: boolean;
+  from_cross_street?: string | null;
+  to_cross_street?: string | null;
   distance_km?: number | null;
+  /** road_closures' own line for the item (road and cross streets included). */
+  text?: string;
 }
 interface ClosureSourceData {
   source?: string;
   label?: string;
   status?: string;
   count?: number;
+  found?: number;
   note?: string;
+  quota?: { remaining: number; max: number };
 }
 
-/** road_closures, nearest few, with every enabled source and what it found. */
+/** An item in words when road_closures gave no text: road, direction and cross streets. */
+function closureItemText(i: ClosureItemData, label: string): string {
+  const where = i.road ? ` on ${i.road}${i.direction ? ` ${i.direction}` : ''}` : '';
+  const cross =
+    i.from_cross_street && i.to_cross_street
+      ? ` between ${i.from_cross_street} and ${i.to_cross_street}`
+      : i.from_cross_street
+        ? ` at ${i.from_cross_street}`
+        : '';
+  const dist = typeof i.distance_km === 'number' ? `, ${i.distance_km} km away` : '';
+  return `${i.full_closure ? 'FULL CLOSURE: ' : ''}${i.type ?? 'item'}${where}${cross} (${label}${dist})`;
+}
+
+/** "City of Detroit permits: 4", "TomTom incidents: 2 (57 of 60 requests left today)". */
+function closureSourceText(r: ClosureSourceData): string {
+  const label = r.label ?? r.source ?? '?';
+  if (r.source === 'tomtom' && r.status === 'skipped' && r.note === TOMTOM_SKIPPED_NOTE)
+    return `${label} ${TOMTOM_SKIPPED_NOTE}`;
+  const left =
+    r.quota && r.status !== 'quota'
+      ? ` (${r.quota.remaining} of ${r.quota.max} requests left today)`
+      : '';
+  if (r.status === 'ok') return `${label}: ${r.found ?? r.count ?? 0}${left}`;
+  return `${label}: ${r.note ?? r.status ?? 'unknown'}${left}`;
+}
+
+/** Whether this summary's road_closures call asked TomTom (a reserved slot was used). */
+function tomtomAsked(closures: SourceReport): boolean {
+  if (closures.status === 'skipped' || closures.status === 'unavailable') return false;
+  const d = closures.data as { sources?: ClosureSourceData[] } | undefined;
+  const tt = d?.sources?.find((r) => r.source === 'tomtom');
+  // No report (the call failed or timed out): it may have asked, so the slot counts as used.
+  if (!tt) return closures.status === 'error';
+  return tt.status === 'ok' || tt.status === 'error';
+}
+
+/**
+ * The alerts tool describes a point it was given as "the given point" (src/extra/weather/
+ * common.ts pointPhrase); for the phone fix this summary says "your location (phone fix N old)".
+ */
+function alertsAt(summary: string, at: string): string {
+  const nl = summary.indexOf('\n');
+  const head = nl < 0 ? summary : summary.slice(0, nl);
+  return head.replace(/\bat the given point\b/, at) + (nl < 0 ? '' : summary.slice(nl));
+}
+
+/**
+ * road_closures within 5 km: how many there are and how many are shown, each shown with its
+ * road and cross streets, and every enabled source with what it found (TomTom with the requests
+ * left today, or why it was skipped).
+ */
 function closuresReport(
   out: ToolOutput,
   credits: string[],
@@ -588,11 +729,15 @@ function closuresReport(
   if (out.isError) return { status: 'error', summary: out.summary };
   const d = (out.data ?? {}) as {
     items?: ClosureItemData[];
+    count?: number;
+    total?: number | null;
     sources?: ClosureSourceData[];
     attribution?: string[];
     disclaimer?: string;
   };
-  const items = (d.items ?? []).slice(0, CLOSURES_SHOWN);
+  const all = d.items ?? [];
+  const items = all.slice(0, CLOSURES_SHOWN);
+  const total = Math.max(typeof d.total === 'number' ? d.total : (d.count ?? 0), all.length);
   // Ontario 511's licence: its "as is" disclaimer goes with every result that uses its data.
   const ontario = typeof d.disclaimer === 'string' || items.some((i) => i.source === 'ontario511');
   const disclaimer = ontario ? { disclaimer: ONTARIO_DISCLAIMER } : {};
@@ -602,35 +747,37 @@ function closuresReport(
   // Sources that are off (no key, licence switch) aren't "checked"; the tool itself says so.
   const enabled = reports.filter((r) => r.status !== 'off' && r.status !== 'not_configured');
   const checked = enabled.length
-    ? enabled
-        .map((r) => `${r.label}: ${r.status === 'ok' ? (r.count ?? 0) : (r.note ?? r.status)}`)
-        .join('; ')
+    ? enabled.map(closureSourceText).join('; ')
     : 'none (no road source is enabled)';
   const within = `within ${CLOSURES_RADIUS_KM} km`;
   if (!items.length)
     return {
       status: 'ok',
       summary: `No closures, incidents or work zones found ${within} in the sources checked, which is not proof the roads are open. Sources checked: ${checked}.${asIs}`,
-      data: { count: 0, items: [], sources: enabled, ...disclaimer },
+      data: { total: 0, count: 0, items: [], sources: enabled, ...disclaimer },
     };
   for (const a of d.attribution ?? []) credits.push(a);
   const full = items.filter((i) => i.full_closure).length;
   const text = items
-    .map((i) => {
-      const where = i.road ? ` on ${i.road}${i.direction ? ` ${i.direction}` : ''}` : '';
-      const dist = typeof i.distance_km === 'number' ? `${i.distance_km} km, ` : '';
-      return `${i.full_closure ? 'FULL CLOSURE: ' : ''}${i.type ?? 'item'}${where} (${dist}${labelOf.get(i.source) ?? i.source})`;
-    })
+    .map((i) =>
+      typeof i.text === 'string' && i.text
+        ? i.text
+        : closureItemText(i, labelOf.get(i.source) ?? i.source ?? '?'),
+    )
     .join('; ');
-  const more =
-    items.length >= CLOSURES_SHOWN ? ` More may exist: road_closures lists up to 50.` : '';
+  const shown =
+    total > items.length ? `${items.length} nearest shown` : `all ${items.length} shown`;
+  const fullText = full ? ` (${full} full closure${full === 1 ? '' : 's'})` : '';
+  const more = total > items.length ? ' road_closures lists the rest (up to 50).' : '';
   return {
     status: 'ok',
-    summary: `${items.length} item(s) ${within} (${full} full closure(s)); nearest ${items.length}: ${text}. Sources checked: ${checked}.${more}${asIs}`,
+    summary: `${total} closure${total === 1 ? '' : 's'} ${within}; ${shown}${fullText}: ${text}. Sources checked: ${checked}.${more}${asIs}`,
     data: {
+      total,
       count: items.length,
       items: items.map((i) =>
         compact(i, [
+          'text',
           'source',
           'type',
           'road',

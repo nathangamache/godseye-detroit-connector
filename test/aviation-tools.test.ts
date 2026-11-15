@@ -4,9 +4,9 @@
  *  - the exact position never leaves the gateway (snapped centre, enlarged radius) and is never
  *    logged; distances come from the exact point;
  *  - `here` reads the phone fix like where_am_i and is audited the same way;
- *  - owner disclosure: government by name, companies by name only in a single lookup, private
- *    owners as "private individual" + city/state, never street or ZIP, LADD withholding, FAA
- *    blanks never filled (not from DEREG, not from adsb.fi's ownOp);
+ *  - owner disclosure, the same in flights_near and aircraft_lookup: government and companies by
+ *    name, private owners as "private individual" + city/state, never street or ZIP, LADD
+ *    withholding, FAA blanks never filled (not from DEREG, not from adsb.fi's ownOp);
  *  - lookup order and the non-US / military answers; attribution in every result;
  *  - the aviation tools are listed by find_tools under "aviation".
  */
@@ -309,36 +309,53 @@ describe('flights_near', () => {
     );
   });
 
-  it('shows registrant type, city and state; names only for government; never ownOp', async () => {
-    const h = await harness(live);
+  it('shows owners as aircraft_lookup does: owner_type, names for government and companies; never ownOp', async () => {
+    // adsb.lol's LADD list is empty here (only N404LL is flagged, live).
+    const h = await harness((url, n) =>
+      url.endsWith('/v2/ladd') ? json({ ac: [] }) : live(url, n),
+    );
     const r = await h.run('flights_near', { lat: DETROIT.lat, lon: DETROIT.lon });
     const rows = data(r).aircraft as Loose[];
     const reg = (n: string) => rows.find((x) => x.registration === n)!.registry;
     expect(reg('N202SP')).toMatchObject({
       n_number: 'N202SP',
-      registrant_type: 'government',
-      owner: 'EXAMPLE COUNTY SHERIFF OFFICE',
+      owner_type: 'government',
+      owner_name: 'EXAMPLE COUNTY SHERIFF OFFICE',
       government: true,
       law_enforcement_hint: true,
     });
     expect(reg('N101AA')).toEqual({
       n_number: 'N101AA',
-      registrant_type: 'individual',
-      owner: 'private individual',
+      owner_type: 'individual',
+      owner_label: 'private individual',
       city: 'LANSING',
       state: 'MI',
     });
-    expect(reg('N303CC')).toMatchObject({
-      registrant_type: 'corporation',
-      owner: 'corporation',
+    // A corporation: its name (as aircraft_lookup gives it), never the type in an owner field.
+    expect(reg('N303CC')).toEqual({
+      n_number: 'N303CC',
+      owner_type: 'corporation',
+      owner_name: 'EXAMPLE CHARTER CORP',
       city: 'GRAND RAPIDS',
+      state: 'MI',
+    });
+    for (const row of rows) expect(row.registry?.owner).toBeUndefined();
+    // LADD (live flag): an LLC's name is withheld, its type, city and state are shown.
+    expect(reg('N404LL')).toEqual({
+      n_number: 'N404LL',
+      owner_type: 'LLC',
+      city: 'DETROIT',
+      state: 'MI',
+      owner_withheld_ladd: true,
     });
     expect(reg('N505WH')).toMatchObject({ owner_withheld_by_faa: true });
-    expect(reg('N505WH').owner).toBeUndefined();
+    expect(reg('N505WH').owner_name).toBeUndefined();
     const all = text(r);
+    expect(all).toMatch(/registered to EXAMPLE CHARTER CORP \(corporation\), GRAND RAPIDS, MI/);
+    expect(all).toMatch(/owner name withheld \(LADD\) \(LLC\), DETROIT, MI/);
     for (const leak of [
       'PRIVATE EXAMPLE PERSON',
-      'EXAMPLE CHARTER CORP',
+      'EXAMPLE HOLDINGS LLC',
       'WITHHELD OWNER LEAK',
       SECRET_STREET,
       SECRET_ZIP,
@@ -346,6 +363,34 @@ describe('flights_near', () => {
     ])
       expect(all).not.toContain(leak);
     expect(all).toMatch(/GOVERNMENT-REGISTERED: EXAMPLE COUNTY SHERIFF OFFICE/);
+    // Both tools agree on every aircraft both can see.
+    for (const n of ['N202SP', 'N101AA', 'N303CC']) {
+      const one = data(await h.run('aircraft_lookup', { registration: n })).aircraft.registrant;
+      const row = reg(n);
+      expect(row.owner_type, n).toBe(one.registrant_type);
+      expect(row.owner_name ?? row.owner_label, n).toBe(one.owner);
+      expect(row.city, n).toBe(one.city);
+      expect(row.state, n).toBe(one.state);
+    }
+  });
+
+  it('withholds a company name in the list when the aircraft was seen flagged LADD earlier', async () => {
+    let ladd = true;
+    const h = await harness((url) => {
+      const feed = feedAround(DETROIT);
+      for (const a of feed.ac as Loose[]) if (a.hex === hexOf('N303CC') && ladd) a.dbFlags = 8;
+      return url.includes('/v2/hex/') ? json({ ac: [] }) : json(feed);
+    });
+    await h.run('flights_near', { lat: DETROIT.lat, lon: DETROIT.lon });
+    // The next answer lacks the live flag, but the gateway remembers it (as aircraft_lookup does).
+    ladd = false;
+    // A larger radius than the cached answer covers, so the feed is asked again.
+    const r = await h.run('flights_near', { lat: DETROIT.lat, lon: DETROIT.lon, radius_nm: 6 });
+    const row = (data(r).aircraft as Loose[]).find((x) => x.registration === 'N303CC')!;
+    expect(row.flags.ladd).toBe(false);
+    expect(row.registry).toMatchObject({ owner_type: 'corporation', owner_withheld_ladd: true });
+    expect(row.registry.owner_name).toBeUndefined();
+    expect(text(r)).not.toContain('EXAMPLE CHARTER CORP');
   });
 
   it('uses the phone fix with here: true and audits it like where_am_i', async () => {

@@ -38,6 +38,10 @@ export const DETROIT_BOX = { minLat: 42.25, maxLat: 42.456, minLon: -83.293, max
 
 /** The layer's maxRecordCount. */
 const PAGE = 2000;
+/** The longest window (hours) the tool looks back. */
+export const DPD_MAX_HOURS = 48;
+/** A publication lag this long (or longer) gets a heads-up at the top of the answer. */
+export const DPD_LAG_NOTE_MS = 60 * 60_000;
 /** Calls listed in a result (the counts cover all of them). */
 const MAX_LISTED = 50;
 const TIMEOUT_MS = 20_000;
@@ -72,10 +76,10 @@ const schema = z
     hours: z
       .int()
       .min(1)
-      .max(48)
+      .max(DPD_MAX_HOURS)
       .optional()
       .describe(
-        'Look back this many hours from now (default 24). The city publishes with a delay of hours, so short windows are often empty.',
+        'Look back this many hours from now (default 24). The city publishes with a delay of hours (sometimes over 12), so a window shorter than the delay is empty: the answer says how far behind the data is and which hours value covers it.',
       ),
     category: z
       .string()
@@ -167,6 +171,64 @@ function matchesCategory(
   return terms.some((t) => hay.includes(t));
 }
 
+export interface LagAdvice {
+  /** The heads-up that leads the answer. */
+  lead: string;
+  data: {
+    newest_call_age_s: number;
+    window_h: number;
+    /** Hours of the window that can hold published calls (0: none). */
+    published_h_in_window: number;
+    /** A window (hours) that covers published calls, when it differs from the one asked. */
+    suggested_hours: number | null;
+  };
+}
+
+/**
+ * The window always ends now, but the city publishes calls hours late: when the newest
+ * published call is at least DPD_LAG_NOTE_MS old, the answer opens with how old it is, how much
+ * of the window the city has published, and an hours value that covers published calls.
+ */
+export function lagAdvice(
+  hours: number,
+  nowMs: number,
+  newestMs: number | undefined,
+): LagAdvice | undefined {
+  if (newestMs === undefined) return undefined;
+  const lagMs = Math.max(0, nowMs - newestMs);
+  if (lagMs < DPD_LAG_NOTE_MS) return undefined;
+  const lagH = lagMs / 3_600_000;
+  const age = humanAge(Math.round(lagMs / 1000));
+  const placed = `The newest call in the whole dataset was placed ${new Date(newestMs).toISOString()} (${age} ago); later calls are not published yet`;
+  const publishedH = Math.max(0, hours - lagH);
+  // Enough hours for the window asked of published calls (at least the default 24), at most 48.
+  const suggested = Math.min(DPD_MAX_HOURS, Math.max(24, Math.ceil(lagH + hours)));
+  const covers = (h: number) => {
+    const n = Math.round(h - lagH);
+    return n >= 1 ? `about ${n} h of published calls` : 'less than 1 h of published calls';
+  };
+  let lead: string;
+  if (lagH >= DPD_MAX_HOURS)
+    lead = `Heads-up: the City of Detroit's 911 data is behind by more than the ${DPD_MAX_HOURS} h this tool can look back. ${placed}, so no window can show any.`;
+  else if (publishedH <= 0)
+    lead = `Heads-up: ${placed}, and that delay is longer than this ${hours} h window, so the window cannot hold any published call. Ask again with hours: ${suggested} (it covers ${covers(suggested)}).`;
+  else
+    lead =
+      `Heads-up: ${placed}, so the city has published only ${publishedH < 1 ? 'less than 1' : `about ${Math.round(publishedH)}`} h of this ${hours} h window (its newest ${age} are missing).` +
+      (suggested > hours
+        ? ` For more, ask with hours: ${suggested} (it covers ${covers(suggested)}).`
+        : '');
+  return {
+    lead,
+    data: {
+      newest_call_age_s: Math.round(lagMs / 1000),
+      window_h: hours,
+      published_h_in_window: Math.round(publishedH * 10) / 10,
+      suggested_hours: lagH < DPD_MAX_HOURS && suggested > hours ? suggested : null,
+    },
+  };
+}
+
 export function dpdTools(deps: DpdDeps): ToolDef[] {
   const newest = new TtlCache<number | undefined>(10 * 60_000, 1, deps.now);
 
@@ -212,7 +274,7 @@ export function dpdTools(deps: DpdDeps): ToolDef[] {
       name: 'dpd_calls_near',
       title: 'Detroit police 911 calls near a point (official, delayed)',
       description:
-        'Official Detroit Police Department 911 calls for service near a point (City of Detroit open data), newest first: time called, description, category code, priority (P highest, then 1-5), nearest intersection, neighborhood and response minutes. Official but delayed a few hours (the result says how far behind the dataset is), Detroit city limits only, located only by the nearest intersection, never a house address. Use to cross-check scanner incidents (incidents_near). Point: lat/lon or here: true.',
+        'Official Detroit Police Department 911 calls for service near a point (City of Detroit open data), newest first: time called, description, category code, priority (P highest, then 1-5), nearest intersection, neighborhood and response minutes. Official but published hours late (sometimes more than 12): the result opens with how far behind the dataset is and an hours value that covers published calls when the window does not. Detroit city limits only, located only by the nearest intersection, never a house address. Use to cross-check scanner incidents (incidents_near). Point: lat/lon or here: true.',
       schema,
       tags: [
         'police',
@@ -324,8 +386,10 @@ export function dpdTools(deps: DpdDeps): ToolDef[] {
           .slice(0, 5)
           .map(([k, n]) => `${k} (${n})`)
           .join(', ');
-        const lag =
-          newestMs !== undefined
+        const advice = lagAdvice(hours, now, newestMs);
+        const lag = advice
+          ? ''
+          : newestMs !== undefined
             ? ` The newest call in the whole dataset was placed ${new Date(newestMs).toISOString()} (${humanAge(Math.max(0, Math.round((now - newestMs) / 1000)))} ago); later calls are not published yet.`
             : ' How far behind the dataset is could not be checked just now.';
         const filter = a.category ? ` matching "${a.category}"` : '';
@@ -341,7 +405,7 @@ export function dpdTools(deps: DpdDeps): ToolDef[] {
           : '';
         return {
           summary:
-            `${head}${latest}${more}${cut} Official City of Detroit data, delayed a few hours.${lag}` +
+            `${advice ? `${advice.lead} ` : ''}${head}${latest}${more}${cut} Official City of Detroit data, delayed a few hours.${lag}` +
             ' Locations are the nearest intersection only, never a house address; Detroit city limits only.',
           data: {
             label: 'official, delayed a few hours',
@@ -351,6 +415,7 @@ export function dpdTools(deps: DpdDeps): ToolDef[] {
             position: at.point.note,
             count: all.length,
             dataset_newest_call: newestMs !== undefined ? new Date(newestMs).toISOString() : null,
+            ...(advice ? { publication_lag: advice.data } : {}),
             priority_scale: 'P is highest, then 1 (most urgent number) to 5',
             calls: listed,
             ...(truncated ? { calls_truncated: `only the newest ${PAGE} calls were checked` } : {}),

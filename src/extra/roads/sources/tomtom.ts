@@ -177,6 +177,7 @@ export function tomtomSource(o: TomTomOptions): ClosureSource {
       q.purpose === 'route'
         ? "not used for routing (TomTom's terms exclude navigation use)"
         : undefined,
+    quota: () => ({ remaining: o.daily.remaining(), max: o.daily.max }),
     async fetch(q: ClosureQuery, signal: AbortSignal): Promise<FetchResult> {
       // Valid coordinates first (TomTom refuses lon > 180 or lat > 90, and the refusal would
       // still spend a call of the daily cap), then the area limit around the trimmed centre.

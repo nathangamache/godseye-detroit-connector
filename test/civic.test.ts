@@ -21,11 +21,13 @@ import {
   CENSUS_COORDINATES_API,
   GDELT_DOC_API,
   GDELT_MIN_GAP_MS,
+  normalizeTitle,
   placeQuery,
   SpacedQueue,
   type Clock,
 } from '../src/extra/civic/headlines.js';
 import { civicTools } from '../src/extra/civic/index.js';
+import { metroForPlace } from '../src/extra/civic/outlets.js';
 import { SWIFTLY_BASE } from '../src/extra/civic/transit.js';
 import { LocationStore } from '../src/location/store.js';
 import { nullLogger } from '../src/log.js';
@@ -335,6 +337,52 @@ describe('dpd_calls_near', () => {
     expect(r.observedAt).toBe(d.dataset_newest_call);
   });
 
+  it('opens with the publication lag and an hours value that covers it', async () => {
+    const withNewest = (lagH: number): Array<[string, Handler]> => [
+      [
+        `${DPD_CALLS_LAYER}/query`,
+        (u) =>
+          u.searchParams.get('outStatistics')
+            ? json({ features: [{ attributes: { newest: NOW - lagH * 3_600_000 } }] })
+            : json({ features: [] }),
+      ],
+    ];
+    // A window shorter than the lag cannot hold any published call.
+    const short = await setup({ routes: withNewest(14) }).run('dpd_calls_near', {
+      ...DETROIT,
+      hours: 6,
+    });
+    expect(short.isError).toBeFalsy();
+    expect(short.summary).toMatch(
+      /^Heads-up: The newest call in the whole dataset was placed 2026-11-14T07:00:00\.000Z \(14 h ago\); later calls are not published yet, and that delay is longer than this 6 h window, so the window cannot hold any published call\. Ask again with hours: 24 \(it covers about 10 h of published calls\)\. No DPD 911 calls/,
+    );
+    expect(data(short).publication_lag).toEqual({
+      newest_call_age_s: 14 * 3600,
+      window_h: 6,
+      published_h_in_window: 0,
+      suggested_hours: 24,
+    });
+    // A window that ends after the newest published call: how much of it is published.
+    const day = await setup({ routes: withNewest(14) }).run('dpd_calls_near', { ...DETROIT });
+    expect(day.summary).toMatch(
+      /^Heads-up: The newest call .* \(14 h ago\); later calls are not published yet, so the city has published only about 10 h of this 24 h window \(its newest 14 h are missing\)\. For more, ask with hours: 38 \(it covers about 24 h of published calls\)\./,
+    );
+    expect(data(day).publication_lag).toMatchObject({ suggested_hours: 38 });
+    // The longest window gets no suggestion it cannot follow.
+    const max = await setup({ routes: withNewest(14) }).run('dpd_calls_near', {
+      ...DETROIT,
+      hours: 48,
+    });
+    expect(max.summary).toMatch(/^Heads-up: .* about 34 h of this 48 h window/);
+    expect(max.summary).not.toMatch(/ask with hours/);
+    expect(data(max).publication_lag).toMatchObject({ suggested_hours: null });
+    // A small lag: no heads-up, the age is still given.
+    const fresh = await setup({ routes: withNewest(0.25) }).run('dpd_calls_near', { ...DETROIT });
+    expect(fresh.summary).not.toMatch(/Heads-up/);
+    expect(fresh.summary).toMatch(/newest call in the whole dataset was placed .* \(15 min ago\)/);
+    expect(data(fresh).publication_lag).toBeUndefined();
+  });
+
   it('filters by category words and the city codes', async () => {
     const rows = [
       dpdRow({ call_description: 'SHOTS FIRED IP', category: 'SHOTS IP' }),
@@ -636,16 +684,31 @@ function transitRoutes(
 }
 
 describe('transit_vehicles_near', () => {
-  it('is OFF without SWIFTLY_API_KEY and fetches nothing', async () => {
-    const { run, http, tool } = setup({ routes: transitRoutes() });
-    expect(tool('transit_vehicles_near').description).toMatch(
-      /^OFF: not configured \(set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env\)/,
-    );
+  it('is OFF without SWIFTLY_API_KEY: a normal not_configured answer, nothing fetched', async () => {
+    const { run, http, tool, runner } = setup({ routes: transitRoutes() });
+    expect(tool('transit_vehicles_near').needsKey).toMatchObject({ env: 'SWIFTLY_API_KEY' });
+    // Run directly (as a composite would) and through run_tool: never a tool error.
     const r = await run('transit_vehicles_near', { ...DETROIT });
-    expect(r).toMatchObject({ isError: true, errorKind: 'unavailable' });
+    expect(r.isError).toBeFalsy();
+    expect(r.errorKind).toBeUndefined();
     expect(r.summary).toMatch(
-      /^transit_vehicles_near is not configured: set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env/,
+      /^transit_vehicles_near is not configured: set SWIFTLY_API_KEY in deploy\/secrets\/gateway\.env .*Nothing was fetched\.$/,
     );
+    expect(data(r)).toMatchObject({
+      status: 'not_configured',
+      missing_key: 'SWIFTLY_API_KEY',
+      fetched: false,
+    });
+    const viaRun = await runner.run(
+      'transit_vehicles_near',
+      { ...DETROIT },
+      { signal: new AbortController().signal },
+    );
+    expect(viaRun.isError).toBeFalsy();
+    const text = viaRun.content.map((c) => c.text ?? '').join('\n');
+    expect(text).toMatch(/Nothing was fetched/);
+    expect(text).toMatch(/"status":"not_configured"/);
+    expect(text).toMatch(/"missing_key":"SWIFTLY_API_KEY"/);
     expect(http.calls).toHaveLength(0);
   });
 
@@ -809,7 +872,9 @@ describe('local_headlines', () => {
     const r = await run('local_headlines', { place: 'Lansing, Michigan', max: 2 });
     expect(r.isError).toBeFalsy();
     const q = new URL(http.calls[0]!.url).searchParams;
-    expect(q.get('query')).toBe('"Lansing" "Michigan"');
+    expect(q.get('query')).toBe(
+      '"Lansing" "Michigan" (domain:lansingstatejournal.com OR domain:wlns.com OR domain:wilx.com OR domain:wkar.org OR domain:lansingcitypulse.com OR domain:mlive.com)',
+    );
     expect(q.get('mode')).toBe('artlist');
     expect(q.get('format')).toBe('json');
     expect(q.get('sort')).toBe('datedesc');
@@ -844,9 +909,184 @@ describe('local_headlines', () => {
     const census = new URL(http.calls[0]!.url).searchParams;
     expect([census.get('y'), census.get('x')]).toEqual(['42.33', '-83.05']);
     const g = new URL(http.calls[1]!.url).searchParams;
-    expect(g.get('query')).toBe('"Detroit" (Michigan OR "Wayne County")');
+    // Wayne County is Metro Detroit: its local outlets first.
+    expect(g.get('query')).toMatch(
+      /^"Detroit" \(Michigan OR "Wayne County"\) \(domain:freep\.com OR domain:detroitnews\.com OR .*domain:mlive\.com OR domain:theoaklandpress\.com\)$/,
+    );
     expect(g.get('timespan')).toBe('6h');
     expect(data(r).place).toBe('Detroit, Michigan');
+    expect(data(r)).toMatchObject({ mode: 'local_outlets', metro: 'Metro Detroit' });
+  });
+
+  it('local outlets first, then the broad search when they have nothing, each labelled', async () => {
+    const queries: string[] = [];
+    const { run, http } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          (u) => {
+            const q = u.searchParams.get('query')!;
+            queries.push(q);
+            return json(q.includes('domain:') ? { articles: [] } : gdeltBody(2));
+          },
+        ],
+      ],
+    });
+    const local = await setup({ routes: [[GDELT_DOC_API, () => json(gdeltBody(2))]] }).run(
+      'local_headlines',
+      { place: 'Dearborn' },
+    );
+    expect(local.summary).toMatch(
+      /^2 headline\(s\) mentioning Dearborn from the last 24 h, newest first; search: local outlets in Metro Detroit \(freep\.com, detroitnews\.com, clickondetroit\.com, wxyz\.com, …\)/,
+    );
+    expect(data(local)).toMatchObject({ mode: 'local_outlets' });
+    const r = await run('local_headlines', { place: 'Dearborn' });
+    expect(r.isError).toBeFalsy();
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toMatch(/^"Dearborn" \(domain:freep\.com OR /);
+    expect(queries[1]).toBe('"Dearborn"');
+    // Still one GDELT request every 5 s.
+    expect(http.calls[1]!.at - http.calls[0]!.at).toBeGreaterThanOrEqual(GDELT_MIN_GAP_MS);
+    expect(r.summary).toMatch(
+      /search: broad \(any outlet GDELT indexes; national stories that only mention the place can dominate\).* Local outlets in Metro Detroit .* found nothing in the last 24 h, so this is the broad search\./,
+    );
+    expect(data(r)).toMatchObject({
+      mode: 'broad',
+      gdelt_query: '"Dearborn"',
+      searches: [
+        { mode: 'local_outlets', found: 0 },
+        { mode: 'broad', found: 2 },
+      ],
+    });
+  });
+
+  it('outside the listed metros: outlets in the country, the town near its state', async () => {
+    const queries: string[] = [];
+    const { run } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          (u) => {
+            queries.push(u.searchParams.get('query')!);
+            return json(gdeltBody(1));
+          },
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(queries).toEqual(['"Toledo" "Ohio" near20:"Toledo Ohio" sourcecountry:US']);
+    expect(data(r)).toMatchObject({ mode: 'country' });
+    expect(r.summary).toMatch(/search: U\.S\. outlets only/);
+    // No country to go on: the broad search alone.
+    queries.length = 0;
+    const any = await run('local_headlines', { place: 'Atlantis' });
+    expect(queries).toEqual(['"Atlantis"']);
+    expect(data(any)).toMatchObject({ mode: 'broad' });
+    // A conflicting state is not the metro of the same city name.
+    queries.length = 0;
+    await run('local_headlines', { place: 'Lansing, Illinois' });
+    expect(queries[0]).toMatch(/sourcecountry:US$/);
+    expect(queries[0]).not.toMatch(/domain:/);
+  });
+
+  it('a bare county name is a metro only with "County" or the metro\'s state or province', async () => {
+    // Many places share a county's name (Ottawa, Ontario; Oakland, California).
+    for (const p of ['Ottawa', 'Oakland', 'Kent', 'Essex', 'Clinton', 'Livingston', 'Ottawa, USA'])
+      expect(metroForPlace(p), p).toBeUndefined();
+    expect(metroForPlace('Ottawa, Ontario')).toBeUndefined();
+    expect(metroForPlace('Oakland, California')).toBeUndefined();
+    expect(metroForPlace('MI')).toBeUndefined();
+    const id = (p: string) => metroForPlace(p)?.id;
+    expect(id('Ottawa County')).toBe('grand_rapids');
+    expect(id('Ottawa, Michigan')).toBe('grand_rapids');
+    expect(id('Ottawa, MI')).toBe('grand_rapids');
+    expect(id('Ottawa County, Michigan')).toBe('grand_rapids');
+    expect(id('Oakland County')).toBe('detroit');
+    expect(id('Oakland, Mich.')).toBe('detroit');
+    expect(id('Essex, Ontario')).toBe('windsor');
+    expect(id('Essex County, ON')).toBe('windsor');
+    // A city still names its metro alone, and a bare county may still go with it.
+    expect(id('Dearborn')).toBe('detroit');
+    expect(id('Grand Rapids, Kent')).toBe('grand_rapids');
+    expect(id('Ottawa County, Ontario')).toBeUndefined();
+
+    const queries: string[] = [];
+    const { run } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          (u) => {
+            queries.push(u.searchParams.get('query')!);
+            return json(gdeltBody(1));
+          },
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Ottawa' });
+    expect(queries).toEqual(['"Ottawa"']);
+    expect(data(r)).toMatchObject({ mode: 'broad' });
+    expect(r.summary).not.toMatch(/Grand Rapids/);
+    queries.length = 0;
+    const county = await run('local_headlines', { place: 'Ottawa County' });
+    expect(queries[0]).toMatch(/^"Ottawa County" \(domain:woodtv\.com OR /);
+    expect(data(county)).toMatchObject({ mode: 'local_outlets', metro: 'the Grand Rapids area' });
+  });
+
+  it('a narrow query GDELT refuses falls back to the broad one', async () => {
+    const { run, http } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          (u) =>
+            u.searchParams.get('query')!.includes('domain:')
+              ? new Response('Your query was too long.')
+              : json(gdeltBody(1)),
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Detroit' });
+    expect(r.isError).toBeFalsy();
+    expect(http.calls).toHaveLength(2);
+    expect(data(r)).toMatchObject({
+      mode: 'broad',
+      searches: [
+        { mode: 'local_outlets', found: 'refused' },
+        { mode: 'broad', found: 1 },
+      ],
+    });
+    expect(r.summary).toMatch(/could not be run \(GDELT refused the narrow query\)/);
+  });
+
+  it("tidies GDELT's stray spaces in titles", async () => {
+    const titles = [
+      'Preview vs . the Lions : what to watch',
+      "Detroit ' s   budget , explained ( again )",
+      'Wait . . . is it snowing ?',
+    ];
+    const { run } = setup({
+      routes: [
+        [
+          GDELT_DOC_API,
+          () =>
+            json({
+              articles: titles.map((title, i) => ({
+                url: `https://news.example/t-${i}`,
+                title,
+                seendate: '20261114T200000Z',
+                domain: 'news.example',
+              })),
+            }),
+        ],
+      ],
+    });
+    const r = await run('local_headlines', { place: 'Detroit' });
+    expect((data(r).headlines as Array<{ title: string }>).map((h) => h.title)).toEqual([
+      'Preview vs. the Lions: what to watch',
+      "Detroit's budget, explained (again)",
+      'Wait... is it snowing?',
+    ]);
+    expect(r.summary).toContain('"Preview vs. the Lions: what to watch"');
+    expect(normalizeTitle("students ' t-shirts")).toBe("students ' t-shirts");
   });
 
   it('a point with no U.S. place (across the river) asks for a place name', async () => {

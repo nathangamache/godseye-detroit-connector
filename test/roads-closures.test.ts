@@ -329,6 +329,54 @@ describe('road_closures with every source on', () => {
     expect(y.mock.count(/tomtom/)).toBe(1);
   });
 
+  it('a composite can leave TomTom out of one call: no request, the report says why', async () => {
+    const x = h(ALL_KEYS);
+    const out = await x.tools.road_closures!.run(
+      { ...DETROIT, radius_km: 5 },
+      { signal: new AbortController().signal, skipRoadSources: { tomtom: 'skipped for a test' } },
+    );
+    expect(x.mock.count(/tomtom/)).toBe(0);
+    expect(sourcesOf(out).find((s) => s.source === 'tomtom')).toMatchObject({
+      status: 'skipped',
+      note: 'skipped for a test',
+    });
+    // The next call (no skip) asks TomTom, and its report carries the requests left today.
+    const next = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    expect(x.mock.count(/tomtom/)).toBe(1);
+    expect(sourcesOf(next).find((s) => s.source === 'tomtom')).toMatchObject({
+      status: 'ok',
+      quota: { remaining: 59, max: 60 },
+    });
+  });
+
+  it('says how many items are in range when it lists fewer, each with its own line of text', async () => {
+    const x = h();
+    const all = await x.run('road_closures', { ...DETROIT, radius_km: 3 });
+    const n = itemsOf(all).length;
+    expect(n).toBeGreaterThan(1);
+    expect(all.data).toMatchObject({ count: n, total: n });
+    const one = await x.run('road_closures', { ...DETROIT, radius_km: 3, limit: 1 });
+    expect(one.data).toMatchObject({ count: 1, total: n });
+    expect(one.summary).toMatch(
+      new RegExp(
+        `^${n} closure, incident and work-zone item\\(s\\) within 3 km of .* \\(the nearest 1 listed\\)`,
+      ),
+    );
+    // Each item's text is the summary's line for it with the source named last (the summary
+    // names the sources once, under "Sources:").
+    const item = itemsOf(one)[0]!;
+    expect(item.text).toBe(
+      'Woodward Avenue: permit: Water Tap (Eastbound, 0.1 km away, City of Detroit permits)',
+    );
+    expect(one.summary).toContain(
+      '(the nearest 1 listed) (in effect now), 0 full closure(s): Woodward Avenue: permit: Water Tap (Eastbound, 0.1 km away). Sources:',
+    );
+    expect(sourcesOf(one).find((s) => s.source === 'detroit_row')).toMatchObject({
+      count: 1,
+      found: n,
+    });
+  });
+
   it('keeps TomTom off without the owner switch', async () => {
     const x = h({ TOMTOM_API_KEY: 'k' });
     const out = await x.run('road_closures', { ...DETROIT });

@@ -4,11 +4,11 @@
  *
  * Owner rules (AIRCRAFT_OWNER_DISCLOSURE, default private_hidden):
  *  - government registrants: name, city and state, always (they cannot ask the FAA to withhold);
- *  - corporations, LLCs, non-citizen corporations: name, city and state in a single-aircraft
- *    lookup; in a list (flights_near) the registrant type, city and state only;
+ *  - corporations, LLCs, non-citizen corporations: name, city and state, in a single-aircraft
+ *    lookup (aircraft_lookup) and in a list (flights_near) alike;
  *  - individuals, co-owners, partnerships: "private individual" / "private owners" plus city and
  *    state (private_hidden), the label alone (type_only), or the name only in a single-aircraft
- *    lookup (full);
+ *    lookup (full; a list still says "private individual" with city and state);
  *  - LADD aircraft (AIRCRAFT_LADD_WITHHOLD, default true): no owner name unless government;
  *  - an owner the FAA file leaves blank stays blank (likely withheld at the owner's request under
  *    49 U.S.C. 44114(b)): never filled from deregistered records, old copies or a live feed.
@@ -113,14 +113,6 @@ export function ownerView(
   const laddNote =
     'The aircraft is on the FAA LADD list (its owner asked to limit display), so the owner name is withheld (AIRCRAFT_LADD_WITHHOLD).';
   if (kind === 'organization') {
-    if (context === 'list')
-      return {
-        ...base,
-        owner: def!.label,
-        owner_is_name: false,
-        ...place,
-        withheld: 'list',
-      };
     if (ladd && policy.laddWithhold)
       return { ...base, owner_is_name: false, ...place, withheld: 'ladd', note: laddNote };
     return { ...base, ...(name ? { owner: name } : {}), owner_is_name: Boolean(name), ...place };
@@ -129,7 +121,9 @@ export function ownerView(
   const label = def?.privateLabel ?? 'private owner';
   if (policy.disclosure === 'type_only')
     return { ...base, owner: label, owner_is_name: false, withheld: 'policy' };
-  if (policy.disclosure === 'full' && context === 'lookup') {
+  if (policy.disclosure === 'full' && context === 'list')
+    return { ...base, owner: label, owner_is_name: false, ...place, withheld: 'list' };
+  if (policy.disclosure === 'full') {
     if (ladd && policy.laddWithhold)
       return {
         ...base,

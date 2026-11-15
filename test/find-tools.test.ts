@@ -188,6 +188,73 @@ describe('find_tools list mode', () => {
     expect((exact.json.results as Array<{ name: string }>)[0]!.name).toBe('crossings_near');
   });
 
+  it('labels the gateway tools by what they are, not "gateway (rail)"', async () => {
+    const { text } = await find({});
+    expect(text).not.toMatch(/gateway \(rail\)/);
+    const gateway = gw.registry
+      .all()
+      .filter((t) => t.source === 'gateway' && gw.registry.isAllowed(t));
+    expect(text).toContain(
+      `${gateway.length} gateway tools (rail, aviation, weather, roads, civic) and`,
+    );
+    expect(text).toMatch(/Detroit Pulse tools \(scanner and rail radio\)/);
+    // A category names only the families in it.
+    const rail = await find({ category: 'rail' });
+    expect(rail.text).toMatch(/2 gateway tools \(rail\) and 1 Detroit Pulse tools/);
+  });
+
+  it('lists every key-gated tool the same way: OFF, with the key it needs', async () => {
+    const { text, json } = await find({ limit: 100 });
+    const entry = (n: string) =>
+      json.categories.flatMap((c) => c.tools).find((t) => t.name === n) as
+        { name: string; description: string; status?: string; needs_key?: string } | undefined;
+    for (const [name, key] of [
+      ['air_quality', 'AIRNOW_API_KEY'],
+      ['transit_vehicles_near', 'SWIFTLY_API_KEY'],
+    ] as const) {
+      const e = entry(name);
+      expect(e, name).toBeDefined();
+      expect(e).toMatchObject({ status: 'off', needs_key: key });
+      expect(e!.description).toMatch(new RegExp(`^OFF: not configured \\(needs ${key}\\)\\. \\S`));
+      expect(text).toContain(`${name} (${key})`);
+    }
+    expect(text).toMatch(/OFF until their key is set .*answer status not_configured/);
+    // Configured tools carry no OFF mark.
+    expect(entry('weather_alerts')).not.toHaveProperty('status');
+    expect(entry('weather_alerts')!.description).not.toMatch(/^OFF/);
+  });
+
+  it('an exact tool name returns that tool first, even when it is OFF', async () => {
+    for (const name of ['air_quality', 'transit_vehicles_near', 'crossings_near']) {
+      const { json } = await find({ query: name });
+      const first = (json.results as Array<Record<string, unknown>>)[0]!;
+      expect(first.name, name).toBe(name);
+      expect(first.input_schema, name).toBeDefined();
+    }
+    const aq = (await find({ query: 'air_quality' })).json.results as Array<
+      Record<string, unknown>
+    >;
+    expect(aq[0]).toMatchObject({ status: 'off', needs_key: 'AIRNOW_API_KEY' });
+  });
+
+  it('a key-gated tool without its key answers a normal not_configured result over MCP', async () => {
+    for (const [name, key] of [
+      ['air_quality', 'AIRNOW_API_KEY'],
+      ['transit_vehicles_near', 'SWIFTLY_API_KEY'],
+    ] as const) {
+      const r = await client.callTool({
+        name: 'run_tool',
+        arguments: { name, arguments: { lat: 42.3314, lon: -83.0458 } },
+      });
+      expect(r.isError, name).toBeFalsy();
+      const all = (r.content as Array<{ text?: string }>).map((c) => c.text ?? '').join('\n');
+      expect(all).toContain(`${name} is not configured: set ${key}`);
+      expect(all).toContain('Nothing was fetched');
+      expect(all).toContain('"status":"not_configured"');
+      expect(all).toContain(`"missing_key":"${key}"`);
+    }
+  });
+
   it('the server instructions give the real count and point at list mode', () => {
     const s = client.getInstructions()!;
     expect(s).not.toMatch(/~\s*40|about 40|40 data tools/);

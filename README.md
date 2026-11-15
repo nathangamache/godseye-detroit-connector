@@ -10,9 +10,10 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
   synonyms; with no query it lists every tool the policy allows, by category, paginated),
   `run_tool` (validate, apply policy, route, post-process), `where_am_i` (latest phone fix) and
   `whats_happening_here` (rail line and crossing, Pulse rail radio and incidents, NWS alerts,
-  weather, traffic, the nearest road closures, border waits near a crossing, air quality when
-  configured and cameras when one is in range, in parallel, each with a short timeout inside one
-  overall budget and its data age). The server instructions give the live tool count instead of
+  weather in F and mph, traffic, how many road closures are near and the nearest with road and
+  cross streets, border waits near a crossing, air quality and cameras, in parallel, each with a
+  short timeout inside one overall budget and its data age; every section is listed, saying so
+  when it has nothing, is not configured or can't run). The server instructions give the live tool count instead of
   a fixed number.
 * GEV's own MCP server is local-only and its UI assumes the owner is local. The gateway adds
   OAuth, licensing policy, quotas, result shrinking and link rewriting, and keeps every
@@ -24,8 +25,9 @@ remote MCP server, added to claude.ai as a custom connector (web, desktop and th
 ## Tools
 
 Claude calls the first four directly; every other tool goes through `find_tools` (search or
-list by category) and `run_tool`. A tool whose requirement is missing is hidden or answers with
-the setting to add. Gateway settings live in `deploy/secrets/gateway.env` (`.env.example` lists
+list by category) and `run_tool`. A gateway tool whose API key is missing is listed as **OFF**
+with the key it needs and answers a normal result with status `not_configured` (nothing is
+fetched); other missing requirements are hidden or answer with the setting to add. Gateway settings live in `deploy/secrets/gateway.env` (`.env.example` lists
 them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 
 | Tool | Source | What it answers | Key / requirement |
@@ -33,17 +35,17 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `find_tools` | gateway | search the catalog, or list it by category (no argument needed) | none |
 | `run_tool` | gateway | runs any tool `find_tools` shows, validated against its schema | that tool's own |
 | `where_am_i` | gateway | the phone's latest fix (never history), its age and staleness | a phone posting fixes (OwnTracks or `/locate`, `docs/phone-setup.md`) |
-| `whats_happening_here` | gateway | one summary around a point or the phone: rail, rail radio, incidents, NWS alerts, weather, traffic, road closures within 5 km, border waits near a crossing, air quality, cameras in range | a point or a phone fix; each section needs its tool's requirement and is left out or marked when it can't run |
+| `whats_happening_here` | gateway | one summary around a point or the phone: rail, rail radio, incidents, NWS alerts ("at your location (phone fix N old)" or "at the given point"), weather (F, mph), traffic, road closures within 5 km (total, nearest 5 with road and cross streets), border waits near a crossing, air quality, cameras | a point or a phone fix; each section needs its tool's requirement and says so ("not configured (AIRNOW_API_KEY)", "none in range") rather than being left out; TomTom incidents at most every 15 min, with the requests left today |
 | `nearest_rail` | gateway (rail) | nearest line (owner, every FRA/NARN name, track count) plus the nearest crossing of any kind and the nearest at-grade one, labelled | bundled FRA/NARN data (`data/rail`, `npm run rail:build`) |
 | `crossings_near` | gateway (rail) | crossings in a radius: at grade or road over/under the tracks, warning devices, trains/day, FRA vs NARN track counts | bundled FRA/NARN data |
 | `rail_activity_near` | Pulse | rail voice and EOT/HOT traffic near a point, with Pulse's verdict (quiet only on Pulse's proof) | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) with its own SDR receivers |
 | `incidents_near`, `incident_detail`, `search_transcripts`, `feeds_status` | Pulse | scanner incidents, their transcripts, transcript search, feed and receiver status | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) |
 | `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
-| `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (off without) |
+| `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `local_headlines` | gateway (civic) | recent GDELT headlines for a place or point | none |
 | `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
 | `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
-| `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (off without) |
+| `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `road_closures` | gateway (roads) | closures, crashes, lane closures and work zones near a point or along a road | none for Detroit permits; `MDOT_RIDE_API_KEY`, `ONTARIO_511_API_KEY`, and `TOMTOM_API_KEY` with `ALLOW_TOMTOM_INCIDENTS=true` add their sources |
 | `geocode_place` | gateway (roads) | coordinates for a place, address or intersection | none; intersections need a self-hosted Overpass (`OVERPASS_URL`, `docs/overpass.md`) |
 | `route_avoiding_closures` | gateway (roads) | a driving route around full closures | none (`VALHALLA_URL`, FOSSGIS by default) |
@@ -51,7 +53,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `border_wait_times` | gateway (roads) | waits at the Ambassador Bridge, tunnel, Gordie Howe and Blue Water bridges | none |
 | `flights_near` | gateway (aviation) | aircraft near a point or the phone, with registry and LADD/PIA flags | none (adsb.fi, personal non-commercial use; adsb.lol fallback, `ADSBLOL_DAILY_MAX`) |
 | `aircraft_lookup` | gateway (aviation) | one aircraft by hex or N-number from the FAA registry | the daily FAA registry copy (`AIRCRAFT_REGISTRY_SYNC`, or `scripts/aircraft-registry-sync.ts`) |
-| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind | GEV running (`GEV_URL`); none |
+| `get_weather`, `get_weather_map`, `get_wind` | GEV | current weather, radar/cloud map, wind (in F and mph: the gateway converts GEV's C and km/h, keeping both in data) | GEV running (`GEV_URL`); none |
 | `get_earthquakes`, `get_cyclones`, `get_fire_perimeters` | GEV | earthquakes, tropical cyclones, wildfire perimeters | GEV; none |
 | `get_active_fires` | GEV | satellite fire detections (NASA FIRMS) | `FIRMS_MAP_KEY` in GEV |
 | `get_traffic_flow` | GEV | TomTom speed vs free flow in an area | `TOMTOM_API_KEY` in GEV (quota 20/h, 150/d) |
@@ -148,9 +150,12 @@ latest fix and is audited as a location read.
   separate items. Counts are after merging, and the merged item keeps both directions' geometry
   for routing.
 * Upstream limits are kept inside the gateway: TomTom is never cached and hard-capped at
-  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk; the City of Detroit permits are
-  one in-memory snapshot refreshed every 15 minutes (the last good copy is kept when a refresh
-  fails, and results say how old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are cached 1-5 minutes and calls stay under 10 a
+  `TOMTOM_INCIDENTS_DAILY_MAX` (60) calls a day, counted on disk, and `whats_happening_here` asks
+  it at most every 15 minutes (otherwise its line says TomTom was skipped to save the quota and
+  `road_closures` has the incidents); the City of Detroit permits are one in-memory snapshot
+  refreshed every 15 minutes (the last good copy is kept when a refresh fails, and results say how
+  old it is); MDOT RIDE is polled at most every 5 minutes; Ontario 511's provincial lists are
+  cached 1-5 minutes and calls stay under 10 a
   minute; Valhalla and Nominatim get at most one request a second; Nominatim at most
   `GEOCODER_NOMINATIM_DAILY_MAX` (50) a day and the shared `nominatim` bucket; border feeds are
   cached 5 minutes.
@@ -215,7 +220,7 @@ every result carries its source's credit.
 | `weather_alerts` | active NWS watches, warnings and advisories for the point: event, severity, urgency, certainty, headline, description, instruction, areas, onset, ends, issuing office, link; "No active alerts for zone …" when there are none | NWS `api.weather.gov` (public domain) | none |
 | `weather_forecast` | 12-hour periods (up to 7 days) or hourly (`hourly: true`), `periods` 1-14: temperature, wind, chance of precipitation, forecast text | NWS `/points` → forecast / forecastHourly; office/grid cached per ~1 km cell for 12 h; points NWS doesn't cover are remembered for 12 h (per ~100 m) or, far from every US area, never sent | none |
 | `water_levels_near` | Great Lakes and tide stations, stream gages and NWS river gauges within `radius_km` (5-60): value, units, datum, ~3 h trend, flood stage and NWS flood category when known, update time | NOAA CO-OPS, USGS Water Data OGC API, NWS National Water Prediction Service (public domain) | `USGS_API_KEY` optional (else the shared `DEMO_KEY`) |
-| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **off** without it (`not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env`) |
+| `air_quality` | current AQI by pollutant (with the monitoring site) and the agency forecast (with Action Days) for the reporting area AirNow matches to the point, passed through unaltered, labelled preliminary and credited to the agency AirNow names | EPA AirNow (Michigan EGLE for Michigan), its June 2026 services | `AIRNOW_API_KEY`; **OFF** without it: listed with the key it needs, and every call answers status `not_configured` (`air_quality is not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env (…). Nothing was fetched.`) |
 
 Quotas (`WEATHER_TOOL_RATE_LIMITS`, overridable per bucket in `TOOL_RATE_LIMITS`): alerts 120/h,
 forecast 60/h, water levels 20/h, air quality 30/h. Outbound requests use https only, a fixed host
@@ -232,9 +237,9 @@ generic User-Agent, caps its output, labels it untrusted third-party data and cr
 
 | Tool | What it answers | Source (key) | Notes |
 |---|---|---|---|
-| `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": the result says how old the newest record is; nearest intersection only, never a house address; Detroit city limits only |
-| `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **off** without it); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
-| `local_headlines` | Recent headlines mentioning a place (`place`, or a point turned into the town there) | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | at most one GDELT request every 5 s per process (queued), 10-minute cache; headlines are untrusted third-party text |
+| `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": when the newest published call is an hour or more old, the result opens with its age, how much of the window is published and an `hours` value that covers published calls; nearest intersection only, never a house address; Detroit city limits only |
+| `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **OFF** without it, answering `not_configured`); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
+| `local_headlines` | Recent headlines about a place (`place`, or a point turned into the town there): first from the metro's local outlets (GDELT `domain:`, `src/extra/civic/outlets.ts`) or, elsewhere, outlets in the place's country (`sourcecountry:`, town `near20:` its state), then a broad search only if that finds nothing; `data.mode` and the summary say which; titles tidied | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | at most one GDELT request every 5 s per process (queued; at most two per call), 10-minute cache; headlines are untrusted third-party text |
 
 GEV's `get_transit_vehicles` no longer advertises DDOT, SMART or QLINE: its feed registry has no
 Michigan feed.

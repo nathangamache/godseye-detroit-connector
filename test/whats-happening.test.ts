@@ -4,11 +4,18 @@
  * one is in range; each section fails on its own within a short timeout and an overall budget,
  * and the rail and Pulse sections read exactly as before. Fake tools only (no HTTP).
  */
+import { rmSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { ONTARIO_ATTRIBUTION, ONTARIO_DISCLAIMER } from '../src/extra/roads/sources/ontario511.js';
 import { nullLogger } from '../src/log.js';
-import { railLine, whatsHappeningHere } from '../src/mcp/whatsHappening.js';
+import { harness as roadsHarness, ALL_KEYS } from './fixtures/roads.js';
+import {
+  IntervalGate,
+  TOMTOM_SUMMARY_INTERVAL_MS,
+  railLine,
+  whatsHappeningHere,
+} from '../src/mcp/whatsHappening.js';
 import { ToolPolicy } from '../src/tools/policy.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ToolRunner } from '../src/tools/runner.js';
@@ -56,8 +63,11 @@ function closureItem(i: number) {
     vehicle_impact: null,
     full_closure: i === 0,
     description: `third-party text ${i}`,
-    from_cross_street: null,
-    to_cross_street: null,
+    from_cross_street: i === 1 ? 'Cross A' : null,
+    to_cross_street: i === 1 ? 'Cross B' : null,
+    ...(i === 1
+      ? { text: 'Lane closure on Road 1 between Cross A and Cross B (MDOT RIDE, 1.5 km away)' }
+      : {}),
     start: '2026-11-01T00:00:00Z',
     end: null,
     updated: '2026-11-14T11:00:00Z',
@@ -71,6 +81,7 @@ const CLOSURES: ToolOutput = {
   summary: 'long road_closures summary',
   data: {
     count: 7,
+    total: 11,
     items: Array.from({ length: 7 }, (_, i) => closureItem(i)),
     sources: [
       { source: 'detroit_row', label: 'City of Detroit permits', status: 'ok', count: 4 },
@@ -114,8 +125,9 @@ const BORDER: ToolOutput = {
 };
 
 const ALERTS: ToolOutput = {
+  // As weather_alerts words it for {lat, lon} (whats_happening_here always passes the point).
   summary:
-    '1 active NWS alert(s) for Wayne County, at 42.3314, -83.0458:\n- Winter Weather Advisory (Moderate, Expected, Likely) until 2026-11-15T06:00:00-05:00: snow',
+    '1 active NWS alert(s) for zone MIZ076 (Wayne, MI), at the given point:\n- Winter Weather Advisory (Moderate, Expected, Likely) until 2026-11-15T06:00:00-05:00: snow',
   data: {
     count: 1,
     alerts: [
@@ -142,15 +154,27 @@ interface Harness {
     data: { sources: Array<{ source: string; status: string; summary: string; data?: unknown }> };
     ms: number;
   }>;
-  calls: Array<{ name: string; args: Record<string, unknown> }>;
+  calls: Array<{ name: string; args: Record<string, unknown>; ctx: ToolContext }>;
   policy: ToolPolicy;
+  clock: { now: number };
 }
 
 function harness(
   over: Record<string, Behaviour> = {},
-  opts: { env?: Record<string, string>; budgetMs?: number; airQuality?: boolean } = {},
+  opts: {
+    env?: Record<string, string>;
+    budgetMs?: number;
+    airQuality?: boolean;
+    /** A phone fix this many seconds old at the test point (the call then gives no lat/lon). */
+    fixAgeS?: number;
+    /** A real tool in place of the fake road_closures. */
+    roadClosures?: ToolDef;
+    tomtomGate?: IntervalGate;
+  } = {},
 ): Harness {
   const config = loadConfig({ GATEWAY_MODE: 'test', ...opts.env });
+  const clock = { now: Date.parse('2026-11-14T17:00:00Z') };
+  const gate = opts.tomtomGate ?? new IntervalGate(TOMTOM_SUMMARY_INTERVAL_MS);
   const policy = new ToolPolicy(config);
   const registry = new ToolRegistry(policy);
   const calls: Harness['calls'] = [];
@@ -183,7 +207,7 @@ function harness(
     tags: [],
     attribution: `${name} credit`,
     run: (args, ctx) => {
-      calls.push({ name, args });
+      calls.push({ name, args, ctx });
       return behaviours[name]!(args, ctx);
     },
   });
@@ -194,7 +218,13 @@ function harness(
     'road_closures',
     'border_wait_times',
   ])
-    registry.register(def(n, 'gateway'));
+    registry.register({
+      ...(n === 'road_closures' && opts.roadClosures ? opts.roadClosures : def(n, 'gateway')),
+      // As registerWeatherTools does without AIRNOW_API_KEY.
+      ...(n === 'air_quality' && opts.airQuality === false
+        ? { needsKey: { env: 'AIRNOW_API_KEY', what: 'a free EPA AirNow API key' } }
+        : {}),
+    });
   for (const n of ['rail_activity_near', 'incidents_near']) registry.register(def(n, 'pulse'));
   registry.setGevTools(
     ['get_weather', 'get_traffic_flow', 'find_cctv_cameras'].map((name) => ({
@@ -203,13 +233,11 @@ function harness(
       inputSchema: { type: 'object' },
     })),
     (name, args, ctx) => {
-      calls.push({ name, args });
+      calls.push({ name, args, ctx });
       return behaviours[name]!(args, ctx);
     },
     60_000,
   );
-  if (opts.airQuality === false)
-    policy.switchOff('air_quality', 'not configured: set AIRNOW_API_KEY');
   const runner = new ToolRunner(registry, {
     timeoutMs: 60_000,
     maxConcurrent: 4,
@@ -223,17 +251,26 @@ function harness(
       maxImages: 1,
     },
   });
+  const fix =
+    opts.fixAgeS === undefined
+      ? undefined
+      : { ...DETROIT, accuracy_m: 12, device: 'phone', source: 'pwa' };
   return {
     calls,
     policy,
+    clock,
     async run(args) {
       const t0 = Date.now();
       const r = await whatsHappeningHere(
         {
           config,
           runner,
-          locations: { latest: () => undefined } as never,
+          locations: {
+            latest: () => (fix ? { ...fix, fix_ts: clock.now - opts.fixAgeS! * 1000 } : undefined),
+          } as never,
           budgetMs: opts.budgetMs,
+          now: () => clock.now,
+          tomtomGate: gate,
         },
         args,
         { signal: new AbortController().signal },
@@ -265,6 +302,7 @@ describe('whats_happening_here sections', () => {
       'traffic',
       'road_closures',
       'border',
+      'cameras',
     ]);
     // NWS alerts for the point.
     expect(h.calls.find((c) => c.name === 'weather_alerts')!.args).toEqual({
@@ -272,6 +310,7 @@ describe('whats_happening_here sections', () => {
       lon: DETROIT.lon,
     });
     expect(line(text, 'Weather alerts (NWS)')).toMatch(/Winter Weather Advisory/);
+    expect(line(text, 'Weather alerts (NWS)')).toMatch(/, at the given point: /);
     // Road closures: every enabled source, top 5 within 5 km.
     expect(h.calls.find((c) => c.name === 'road_closures')!.args).toEqual({
       lat: DETROIT.lat,
@@ -280,20 +319,27 @@ describe('whats_happening_here sections', () => {
       limit: 5,
     });
     const roads = line(text, 'Road closures')!;
+    // The total and how many are shown; each line keeps its road and cross streets.
     expect(roads).toMatch(
-      /^- Road closures: 5 item\(s\) within 5 km \(1 full closure\(s\)\); nearest 5:/,
+      /^- Road closures: 11 closures within 5 km; 5 nearest shown \(1 full closure\): /,
     );
     expect(roads).toMatch(
-      /FULL CLOSURE: Road closed on Road 0 NB \(0\.5 km, City of Detroit permits\)/,
+      /FULL CLOSURE: Road closed on Road 0 NB \(City of Detroit permits, 0\.5 km away\)/,
     );
-    expect(roads).toMatch(/Lane closure on Road 4 \(4\.5 km, City of Detroit permits\)/);
+    expect(roads).toContain(
+      'Lane closure on Road 1 between Cross A and Cross B (MDOT RIDE, 1.5 km away)',
+    );
+    expect(roads).toMatch(/Lane closure on Road 4 \(City of Detroit permits, 4\.5 km away\)/);
     expect(roads).not.toMatch(/Road 5/);
     expect(roads).toMatch(/Sources checked: City of Detroit permits: 4; MDOT RIDE: 3\./);
+    expect(roads).toMatch(/road_closures lists the rest/);
     expect(roads).not.toMatch(/TomTom|Ontario/);
     const rc = data.sources.find((s) => s.source === 'road_closures')!.data as {
       items: unknown[];
+      total: number;
     };
     expect(rc.items).toHaveLength(5);
+    expect(rc.total).toBe(11);
     // Border waits: the Detroit/Windsor crossings within 8 km only.
     const border = line(text, 'Border waits')!;
     expect(border).toMatch(/Ambassador Bridge into the US passenger: 10 min/);
@@ -309,6 +355,9 @@ describe('whats_happening_here sections', () => {
   it('passes on the Ontario 511 "as is" disclaimer with its credit when an Ontario item is shown', async () => {
     const ontarioItem = {
       ...closureItem(1),
+      text: undefined,
+      from_cross_street: null,
+      to_cross_street: null,
       source: 'ontario511',
       type: 'Lane closure',
       road: 'Ontario Road',
@@ -334,7 +383,8 @@ describe('whats_happening_here sections', () => {
       }).run(DETROIT);
       const roads = line(text, 'Road closures')!;
       const why = `disclaimer in road_closures data: ${disclaimer}`;
-      expect(roads, why).toMatch(/Lane closure on Ontario Road \(4\.2 km, Ontario 511\)/);
+      expect(roads, why).toMatch(/Lane closure on Ontario Road \(Ontario 511, 4\.2 km away\)/);
+      expect(roads, why).toMatch(/^- Road closures: 2 closures within 5 km; all 2 shown/);
       expect(roads, why).toContain(ONTARIO_DISCLAIMER);
       const rc = data.sources.find((s) => s.source === 'road_closures')!;
       expect(rc.summary).toContain(ONTARIO_DISCLAIMER);
@@ -347,6 +397,30 @@ describe('whats_happening_here sections', () => {
     expect(data.sources.find((s) => s.source === 'road_closures')!.data).not.toHaveProperty(
       'disclaimer',
     );
+  });
+
+  it('the weather line is in F and mph (GEV reports C and km/h)', async () => {
+    const { text, data } = await harness({
+      get_weather: async () => ({
+        summary: 'Weather at 42.3314, -83.0458: light snow, -1°C, wind 19 km/h.',
+        data: {
+          weather: {
+            observed_at: '2026-11-14T16:45:00Z',
+            conditions: 'light snow',
+            temperature_c: -1.2,
+            wind_kph: 19.3,
+          },
+        },
+      }),
+    }).run(DETROIT);
+    expect(line(text, 'Weather:')).toMatch(
+      /^- Weather: Weather at 42\.3314, -83\.0458: light snow, 30 F \(-1 C\), wind 12 mph\./,
+    );
+    expect(text).not.toMatch(/°C|km\/h/);
+    const w = data.sources.find((s) => s.source === 'weather')!.data as {
+      weather: Record<string, number>;
+    };
+    expect(w.weather).toMatchObject({ temperature_f: 29.8, wind_mph: 12 });
   });
 
   it('the rail and Pulse sections read exactly as before', async () => {
@@ -365,33 +439,43 @@ describe('whats_happening_here sections', () => {
   it('border waits only near a crossing: none in Ann Arbor, the Blue Water Bridge in Port Huron', async () => {
     const aa = harness();
     const r = await aa.run(ANN_ARBOR);
-    expect(sourceNames(r.data)).not.toContain('border');
+    // Not asked away from a crossing, but never dropped silently.
     expect(aa.calls.some((c) => c.name === 'border_wait_times')).toBe(false);
-    expect(line(r.text, 'Border waits')).toBeUndefined();
+    expect(line(r.text, 'Border waits')).toBe(
+      '- Border waits: none: no Detroit/Windsor or Port Huron crossing within 8 km',
+    );
     const ph = await harness().run(PORT_HURON);
     const border = line(ph.text, 'Border waits')!;
     expect(border).toMatch(/Blue Water Bridge into the US passenger: 25 min/);
     expect(border).not.toMatch(/Ambassador|Tunnel|Gordie/);
   });
 
-  it('air quality only when it is configured', async () => {
+  it('air quality: the AQI when configured, "not configured (AIRNOW_API_KEY)" without its key', async () => {
     const off = harness({}, { airQuality: false });
     const r = await off.run(DETROIT);
-    expect(sourceNames(r.data)).not.toContain('air_quality');
+    // Never dropped silently, and nothing is fetched.
     expect(off.calls.some((c) => c.name === 'air_quality')).toBe(false);
-    expect(r.text).not.toMatch(/AIRNOW_API_KEY|Air quality/);
+    expect(line(r.text, 'Air quality')).toBe(
+      '- Air quality (AirNow): not configured (AIRNOW_API_KEY)',
+    );
+    expect(r.data.sources.find((s) => s.source === 'air_quality')).toMatchObject({
+      status: 'not_configured',
+    });
     const on = await harness().run(DETROIT);
     expect(line(on.text, 'Air quality (AirNow)')).toMatch(/AQI 42 \(Good\)/);
   });
 
-  it('cameras only when one is actually in range', async () => {
+  it('cameras: listed when in range, "none in range" or the error otherwise (never dropped)', async () => {
     const none = await harness().run(DETROIT);
-    expect(sourceNames(none.data)).not.toContain('cameras');
-    expect(none.text).not.toMatch(/- Cameras/);
+    expect(line(none.text, 'Cameras')).toBe('- Cameras: none in range (within 3 km)');
+    expect(none.data.sources.find((s) => s.source === 'cameras')).toMatchObject({
+      status: 'ok',
+      data: { total: 0, cameras: [] },
+    });
     const failing = await harness({
       find_cctv_cameras: async () => ({ summary: 'GEV error', isError: true }),
     }).run(DETROIT);
-    expect(failing.text).not.toMatch(/- Cameras/);
+    expect(line(failing.text, 'Cameras')).toBe('- Cameras (error): GEV error');
     const one = await harness({
       find_cctv_cameras: async () => ({
         summary: '1 camera',
@@ -406,6 +490,164 @@ describe('whats_happening_here sections', () => {
       total: 1,
       cameras: [{ id: 'c1', name: 'Bridge cam', distance_km: 1.2, provider: 'x' }],
     });
+  });
+
+  it('the alert line says "at your location (phone fix N old)" for the phone, "at the given point" otherwise', async () => {
+    const phone = await harness({}, { fixAgeS: 240 }).run({});
+    expect(line(phone.text, 'Weather alerts (NWS)')).toMatch(
+      /^- Weather alerts \(NWS\): 1 active NWS alert\(s\) for zone MIZ076 \(Wayne, MI\), at your location \(phone fix 4 min old\): /,
+    );
+    expect(phone.text).not.toMatch(/given point/);
+    const given = await harness({}, { fixAgeS: 240 }).run(DETROIT);
+    expect(line(given.text, 'Weather alerts (NWS)')).toMatch(/, at the given point: /);
+    // No active alerts reads the same way.
+    const quiet = await harness(
+      {
+        weather_alerts: async () => ({
+          summary: 'No active alerts for zone MIZ076 (Wayne, MI), at the given point.',
+          data: { count: 0, alerts: [] },
+        }),
+      },
+      { fixAgeS: 120 },
+    ).run({});
+    expect(line(quiet.text, 'Weather alerts (NWS)')).toBe(
+      '- Weather alerts (NWS): No active alerts for zone MIZ076 (Wayne, MI), at your location (phone fix 2 min old).',
+    );
+  });
+
+  it('asks TomTom at most every 15 min (no caching) and shows the requests left when it does', async () => {
+    const TOMTOM_ON = { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true' };
+    let left = 60;
+    const closures: Behaviour = async (_a, ctx) => {
+      const skip = ctx.skipRoadSources?.tomtom;
+      if (!skip) left--;
+      return {
+        summary: 'road_closures',
+        data: {
+          count: 1,
+          total: 1,
+          items: [closureItem(0)],
+          sources: [
+            { source: 'detroit_row', label: 'City of Detroit permits', status: 'ok', count: 1 },
+            skip
+              ? {
+                  source: 'tomtom',
+                  label: 'TomTom incidents',
+                  status: 'skipped',
+                  count: 0,
+                  note: skip,
+                }
+              : {
+                  source: 'tomtom',
+                  label: 'TomTom incidents',
+                  status: 'ok',
+                  count: 0,
+                  found: 2,
+                  quota: { remaining: left, max: 60 },
+                },
+          ],
+        },
+      };
+    };
+    const h = harness({ road_closures: closures }, { env: TOMTOM_ON });
+    const first = await h.run(DETROIT);
+    expect(line(first.text, 'Road closures')).toMatch(
+      /TomTom incidents: 2 \(59 of 60 requests left today\)/,
+    );
+    // Within 15 min: TomTom is left out of the call (not served from a cache) and the line says so.
+    h.clock.now += 14 * 60_000;
+    const second = await h.run(DETROIT);
+    expect(line(second.text, 'Road closures')).toContain(
+      'TomTom incidents skipped to save the daily quota; ask road_closures for them',
+    );
+    expect(left).toBe(59);
+    const ctxs = h.calls.filter((c) => c.name === 'road_closures').map((c) => c.ctx);
+    expect(ctxs[0]!.skipRoadSources).toBeUndefined();
+    expect(ctxs[1]!.skipRoadSources).toEqual({
+      tomtom: 'skipped to save the daily quota; ask road_closures for them',
+    });
+    // 15 min after the last use: asked again.
+    h.clock.now += 60_000;
+    const third = await h.run(DETROIT);
+    expect(line(third.text, 'Road closures')).toMatch(
+      /TomTom incidents: 2 \(58 of 60 requests left today\)/,
+    );
+    // Without TomTom configured nothing is held back.
+    const off = harness({ road_closures: closures });
+    await off.run(DETROIT);
+    await off.run(DETROIT);
+    expect(
+      off.calls.filter((c) => c.name === 'road_closures').map((c) => c.ctx.skipRoadSources),
+    ).toEqual([undefined, undefined]);
+  });
+
+  it('a slot TomTom did not use (daily cap reached) is given back', async () => {
+    const env = { TOMTOM_API_KEY: 'k', ALLOW_TOMTOM_INCIDENTS: 'true' };
+    let capped = true;
+    const h = harness(
+      {
+        road_closures: async () => ({
+          summary: 'road_closures',
+          data: {
+            count: 0,
+            items: [],
+            sources: [
+              capped
+                ? {
+                    source: 'tomtom',
+                    label: 'TomTom incidents',
+                    status: 'quota',
+                    count: 0,
+                    note: 'daily cap of 60 TomTom incident requests reached; resets at midnight (Detroit time)',
+                    quota: { remaining: 0, max: 60 },
+                  }
+                : {
+                    source: 'tomtom',
+                    label: 'TomTom incidents',
+                    status: 'ok',
+                    count: 0,
+                    quota: { remaining: 12, max: 60 },
+                  },
+            ],
+          },
+        }),
+      },
+      { env },
+    );
+    const r = await h.run(DETROIT);
+    expect(line(r.text, 'Road closures')).toMatch(/TomTom incidents: daily cap of 60 .* reached/);
+    capped = false;
+    h.clock.now += 60_000;
+    const again = await h.run(DETROIT);
+    expect(line(again.text, 'Road closures')).toMatch(
+      /TomTom incidents: 0 \(12 of 60 requests left today\)/,
+    );
+  });
+
+  it('with the real road_closures: one TomTom request across calls 5 min apart, two after 15 min', async () => {
+    const roads = roadsHarness(ALL_KEYS);
+    try {
+      const h = harness({}, { env: ALL_KEYS, roadClosures: roads.tools.road_closures });
+      const a = await h.run(DETROIT);
+      expect(roads.mock.count(/tomtom/)).toBe(1);
+      expect(line(a.text, 'Road closures')).toMatch(
+        /TomTom incidents: \d+ \(59 of 60 requests left today\)/,
+      );
+      h.clock.now += 5 * 60_000;
+      const b = await h.run(DETROIT);
+      expect(roads.mock.count(/tomtom/)).toBe(1);
+      expect(line(b.text, 'Road closures')).toContain(
+        'TomTom incidents skipped to save the daily quota; ask road_closures for them',
+      );
+      // road_closures itself still asks TomTom (never answered from a cache).
+      await roads.run('road_closures', { ...DETROIT, radius_km: 5 });
+      expect(roads.mock.count(/tomtom/)).toBe(2);
+      h.clock.now += 15 * 60_000;
+      await h.run(DETROIT);
+      expect(roads.mock.count(/tomtom/)).toBe(3);
+    } finally {
+      rmSync(roads.dir, { recursive: true, force: true });
+    }
   });
 
   it('each section fails on its own, within its timeout and the overall budget', async () => {

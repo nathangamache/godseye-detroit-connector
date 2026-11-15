@@ -1,9 +1,11 @@
 /**
- * run_tool pipeline: lookup -> policy -> schema validation -> argument rules ->
+ * run_tool pipeline: lookup -> policy -> key gate (a missing API key answers not_configured) ->
+ * schema validation -> argument rules ->
  * rate limits -> concurrency slot -> timeout-bounded call -> post-processing.
  */
 import type { Logger } from '../log.js';
 import { BusyError, Semaphore } from '../util/semaphore.js';
+import { notConfiguredOutput } from './keygate.js';
 import { postprocess, type McpToolResult, type PostprocessOptions } from './postprocess.js';
 import type { ToolRegistry } from './registry.js';
 import type { ToolContext, ToolDef, ToolOutput } from './types.js';
@@ -57,6 +59,16 @@ export class ToolRunner {
     if (!verdict.allowed) {
       this.log(def, t0, 'denied', ctx);
       return ToolRunner.error(`Tool "${name}" is not available: ${verdict.reason}.`);
+    }
+    // A key-gated tool without its key: a normal answer saying so (no request, no quota spent).
+    if (def.needsKey) {
+      const result = await postprocess(
+        def,
+        notConfiguredOutput(def.name, def.needsKey),
+        this.opts.post,
+      );
+      this.log(def, t0, 'not_configured', ctx);
+      return result;
     }
     const argObj = args === undefined || args === null ? {} : args;
     if (typeof argObj !== 'object' || Array.isArray(argObj)) {

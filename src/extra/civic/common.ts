@@ -10,7 +10,14 @@ import type { Config } from '../../config.js';
 import type { LocationStore } from '../../location/store.js';
 import { currentPosition, noFixMessage } from '../../mcp/whatsHappening.js';
 import type { TokenStore } from '../../oauth/tokens.js';
-import type { JsonSchema, ToolContext, ToolDef, ToolOutput } from '../../tools/types.js';
+import { notConfiguredOutput } from '../../tools/keygate.js';
+import type {
+  JsonSchema,
+  MissingKey,
+  ToolContext,
+  ToolDef,
+  ToolOutput,
+} from '../../tools/types.js';
 import { humanAge } from '../../util/format.js';
 
 /** Generic and self-describing: no person, host or contact in it. */
@@ -255,12 +262,12 @@ export function upstreamFailure(err: unknown, source: string): ToolOutput {
   return failure(`${source}: ${err.message}.`, kind[err.kind]);
 }
 
-/** "OFF" answer for a tool whose key is missing: no request is made. */
+/**
+ * The answer of a tool whose key is missing: a normal result with status not_configured and the
+ * missing key, not an error. No request is made.
+ */
 export function notConfigured(tool: string, envVar: string, what: string): ToolOutput {
-  return failure(
-    `${tool} is not configured: set ${envVar} in deploy/secrets/gateway.env (${what}). Nothing was fetched.`,
-    'unavailable',
-  );
+  return notConfiguredOutput(tool, { env: envVar, what });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -379,6 +386,8 @@ export interface CivicToolSpec<S extends z.ZodType> {
   schema: S;
   tags: string[];
   attribution: string;
+  /** Set when the tool's API key is missing (listed as OFF; answers not_configured). */
+  needsKey?: MissingKey;
   run(args: z.output<S>, ctx: ToolContext): Promise<ToolOutput>;
 }
 
@@ -401,6 +410,7 @@ export function civicTool<S extends z.ZodType>(spec: CivicToolSpec<S>): ToolDef 
     tags: spec.tags,
     attribution: spec.attribution,
     untrustedText: true,
+    ...(spec.needsKey ? { needsKey: spec.needsKey } : {}),
     async run(args, ctx) {
       const parsed = spec.schema.safeParse(args);
       if (!parsed.success) {

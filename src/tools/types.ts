@@ -25,6 +25,19 @@ export interface ToolContext {
   clientId?: string;
   /** The OAuth grant (token family) making the call. */
   familyId?: string;
+  /**
+   * Road sources to leave out of this call, each with the note its report gives. Set only by a
+   * gateway composite (whats_happening_here saving the TomTom daily quota), never by a request.
+   */
+  skipRoadSources?: Readonly<Record<string, string>>;
+}
+
+/** The API key a key-gated tool needs, when it is missing. */
+export interface MissingKey {
+  /** The setting to fill in deploy/secrets/gateway.env, e.g. AIRNOW_API_KEY. */
+  env: string;
+  /** What the key is, e.g. "a free EPA AirNow API key". */
+  what: string;
 }
 
 export interface ToolDef {
@@ -39,5 +52,10 @@ export interface ToolDef {
   attribution?: string;
   /** Untrusted third-party text (radio transcripts, news) may appear in the output. */
   untrustedText?: boolean;
+  /**
+   * Set when the tool needs an API key that is not configured: find_tools lists it as OFF with
+   * the key, and run_tool answers a normal result with status not_configured (nothing fetched).
+   */
+  needsKey?: MissingKey;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutput>;
 }

@@ -5,7 +5,8 @@
  *  1. NEVER: tools that must not exist on the connector at all (panel_request).
  *  2. Licensing hard denies (Google-derived content; metered OpenAI). Not configurable.
  *  3. Licensing switches: OpenSky-backed aviation tools, ALPR locations; then tools a backend
- *     switched off at startup (switchOff, e.g. a missing API key).
+ *     switched off at startup (switchOff). A missing API key is not a policy matter: such a tool
+ *     stays listed as OFF and answers not_configured (ToolDef.needsKey, src/tools/keygate.ts).
  *  4. TOOL_DENYLIST from config.
  *  5. GEV tools must be on GEV_TOOL_ALLOWLIST (deny by default, so a tool that
  *     appears after an upstream pull stays hidden until it is vetted).
@@ -62,7 +63,10 @@ export class ToolPolicy {
     this.limits = [...config.toolRateLimits];
   }
 
-  /** Switch a tool off: hidden from find_tools, and run_tool answers with `reason`. */
+  /**
+   * Switch a tool off: hidden from find_tools, and run_tool answers with `reason`. Not for a
+   * missing API key (set ToolDef.needsKey instead, so the tool is listed as OFF with the key).
+   */
   switchOff(name: string, reason: string): void {
     this.switchedOff.set(name, reason);
   }

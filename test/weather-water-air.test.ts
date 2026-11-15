@@ -310,7 +310,7 @@ describe('registration and catalog', () => {
     expect(h.registry.catalog('hazards').map((e) => e.tool.name)).toContain('water_levels_near');
   });
 
-  it('the gateway registers them; air_quality is off with a clear reason when AIRNOW_API_KEY is missing', async () => {
+  it('the gateway registers them; air_quality is listed as OFF and answers not_configured without AIRNOW_API_KEY', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gw-wx-'));
     try {
       const core = buildCore(
@@ -320,18 +320,22 @@ describe('registration and catalog', () => {
       for (const n of ['weather_alerts', 'weather_forecast', 'water_levels_near'])
         expect(core.registry.isAllowed(core.registry.get(n)!)).toBe(true);
       const aq = core.registry.get('air_quality')!;
-      expect(core.registry.isAllowed(aq)).toBe(false);
-      expect(core.registry.catalog().map((e) => e.tool.name)).not.toContain('air_quality');
-      expect(core.registry.find('air quality', 10).map((x) => x.tool.name)).not.toContain(
-        'air_quality',
-      );
+      // Listed (like every key-gated tool), marked with the key it needs.
+      expect(aq.needsKey).toEqual({ env: 'AIRNOW_API_KEY', what: expect.any(String) });
+      expect(core.registry.isAllowed(aq)).toBe(true);
+      expect(core.registry.catalog().map((e) => e.tool.name)).toContain('air_quality');
+      expect(core.registry.find('air_quality', 10)[0]!.tool.name).toBe('air_quality');
       const r = await core.runner.run('air_quality', DETROIT, {
         signal: new AbortController().signal,
       });
-      expect(r.isError).toBe(true);
-      expect(r.content[0]!.text).toContain(
-        'not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env',
+      expect(r.isError).toBeFalsy();
+      const text = r.content.map((c) => c.text ?? '').join('\n');
+      expect(text).toContain(
+        'air_quality is not configured: set AIRNOW_API_KEY in deploy/secrets/gateway.env',
       );
+      expect(text).toContain('Nothing was fetched');
+      expect(text).toMatch(/"status":"not_configured"/);
+      expect(text).toMatch(/"missing_key":"AIRNOW_API_KEY"/);
       core.db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -343,8 +347,10 @@ describe('registration and catalog', () => {
     const out = await h.registry
       .get('air_quality')!
       .run(DETROIT, { signal: new AbortController().signal });
-    expect(out.isError).toBe(true);
+    expect(out.isError).toBeFalsy();
+    expect(out.data).toMatchObject({ status: 'not_configured', missing_key: 'AIRNOW_API_KEY' });
     expect(out.summary).toContain('set AIRNOW_API_KEY in deploy/secrets/gateway.env');
+    expect(out.summary).toContain('Nothing was fetched.');
     expect(h.calls).toHaveLength(0);
   });
 });
@@ -530,6 +536,17 @@ describe('weather_forecast', () => {
     expect(data).toMatchObject({ office: 'DTX', grid: { x: 66, y: 34 }, near: 'Detroit, MI' });
     expect(text).toMatch(/NWS 12-hour forecast near Detroit, MI \(NWS office DTX, grid 66,34\)/);
     expect(text).toMatch(/This Afternoon: Partly Sunny, 46°F, wind NW 12 mph, precip 14%/);
+  });
+
+  it('shows a period the NWS gives in C in F as well, like every temperature here', async () => {
+    const h = harness();
+    nwsBasics(h);
+    const celsius = structuredClone(FORECAST);
+    Object.assign(celsius.properties.periods[0]!, { temperature: 4, temperatureUnit: 'C' });
+    h.on(NWS, /\/forecast$/, { body: celsius });
+    const { text } = await h.run('weather_forecast', { ...DETROIT, periods: 2 });
+    expect(text).toMatch(/This Afternoon: Partly Sunny, 39 F \(4 C\), wind NW 12 mph/);
+    expect(text).toMatch(/Tonight: Mostly Cloudy, 35°F/);
   });
 
   it('hourly: true uses forecastHourly, with dewpoint and humidity', async () => {

@@ -209,7 +209,11 @@ export function aviationTools(deps: AviationToolDeps): ToolDef[] {
         };
   };
 
-  /** Registrant type, city/state (names: government only) for one row; cached per registry copy. */
+  /**
+   * The owner of one row by aircraft_lookup's rules (government, corporations and LLCs by name;
+   * private owners as "private individual"; city and state; LADD withholding), cached per
+   * registry copy. owner_type is the FAA registrant type, never in place of a name.
+   */
   function rowRegistry(hex: string, ladd: boolean): RowRegistry | null {
     if (deps.store.generation !== listCacheGen) {
       listCache.clear();
@@ -231,13 +235,15 @@ export function aviationTools(deps: AviationToolDeps): ToolDef[] {
       const status = (rec.status_code ?? '').trim();
       const view: Record<string, unknown> = {
         n_number: `N${rec.n_number}`,
-        ...(o.registrant_type ? { registrant_type: o.registrant_type } : {}),
-        ...(o.owner ? { owner: o.owner } : {}),
+        ...(o.registrant_type ? { owner_type: o.registrant_type } : {}),
+        ...(o.owner && o.owner_is_name ? { owner_name: o.owner } : {}),
+        ...(o.owner && !o.owner_is_name ? { owner_label: o.owner } : {}),
         ...(o.city ? { city: o.city } : {}),
         ...(o.state ? { state: o.state } : {}),
         ...(o.government ? { government: true } : {}),
         ...(o.law_enforcement_hint ? { law_enforcement_hint: true } : {}),
         ...(o.withheld === 'faa_blank' ? { owner_withheld_by_faa: true } : {}),
+        ...(o.withheld === 'ladd' ? { owner_withheld_ladd: true } : {}),
         ...(isDrone(rec) ? { drone: true } : {}),
         ...(status && status !== 'V'
           ? { status: STATUS_CODES[status] ?? `status code ${status}` }
@@ -263,7 +269,7 @@ export function aviationTools(deps: AviationToolDeps): ToolDef[] {
     name: 'flights_near',
     title: 'Aircraft near a point',
     description:
-      'Aircraft flying (or on the ground) near a point or the user\'s phone ("what plane / helicopter is that?"): callsign, ICAO hex, registration, type and long type name, altitude, speed, track, vertical rate, distance and bearing from the point, data age, position source (ADS-B, MLAT, TIS-B), military/LADD/PIA flags, and for US aircraft the FAA registrant type with city and state (government owners by name). Live data from adsb.fi (adsb.lol as fallback). Each aircraft has a globe link.',
+      'Aircraft flying (or on the ground) near a point or the user\'s phone ("what plane / helicopter is that?"): callsign, ICAO hex, registration, type and long type name, altitude, speed, track, vertical rate, distance and bearing from the point, data age, position source (ADS-B, MLAT, TIS-B), military/LADD/PIA flags, and for US aircraft the registered owner as aircraft_lookup gives it (government, corporations and LLCs by name; private owners as "private individual"; with city and state and the FAA registrant type). Live data from adsb.fi (adsb.lol as fallback). Each aircraft has a globe link.',
     source: 'gateway',
     family: 'aviation',
     inputSchema: jsonSchema(FlightsNearArgs),
@@ -372,7 +378,8 @@ export function aviationTools(deps: AviationToolDeps): ToolDef[] {
               note: 'Privacy ICAO address (PIA): deliberately not linked to the FAA registry, so it is not looked up.',
             };
           } else if (registryLoaded) {
-            const r = rowRegistry(ac.hex, flags.ladd);
+            // LADD as aircraft_lookup knows it: this live flag, flags seen earlier, adsb.lol's list.
+            const r = rowRegistry(ac.hex, flags.ladd || deps.ladd.has(ac.hex));
             if (r) {
               registry = r.view;
               if (r.view.government) govCount++;
@@ -458,7 +465,7 @@ export function aviationTools(deps: AviationToolDeps): ToolDef[] {
 
       const notes: string[] = [
         `Distances and bearings are measured here from ${a.here ? "the phone's fix" : 'the given point'}. The feed was asked about a nearby ${QUERY_GRID_DEG}° grid point with a ${QUERY_PAD_NM} nm larger radius, so it never saw the exact position.`,
-        'Owners: government registrants by name; others by FAA registrant type, city and state. aircraft_lookup gives the full record.',
+        'Owners as aircraft_lookup shows them: government registrants, corporations and LLCs by name; private owners as "private individual"; with city and state (owner_type is the FAA registrant type). aircraft_lookup gives the full record.',
         'Police and other helicopters often fly without ADS-B, so an empty or short list does not prove nothing is flying.',
       ];
       if (snap.fallback_reason)

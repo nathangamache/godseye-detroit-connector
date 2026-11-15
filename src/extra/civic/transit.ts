@@ -1,7 +1,8 @@
 /**
  * transit_vehicles_near: live SMART bus positions and service alerts from Swiftly's
  * GTFS-Realtime feeds (detroit-smartbus). Needs SWIFTLY_API_KEY, sent as the Authorization
- * header as Swiftly documents; without it the tool is OFF and fetches nothing.
+ * header as Swiftly documents; without it the tool is listed as OFF, answers not_configured
+ * and fetches nothing.
  *
  * Swiftly's API licence grants display inside the licensee's application and bars sharing or
  * redistributing the content, so: one in-memory snapshot, at most 30 s old and deleted when it
@@ -12,7 +13,7 @@
 import { z } from 'zod';
 import { bearingDeg, compassPoint, haversineM } from '../../util/geo.js';
 import { humanAge } from '../../util/format.js';
-import type { ToolDef, ToolOutput } from '../../tools/types.js';
+import type { MissingKey, ToolDef, ToolOutput } from '../../tools/types.js';
 import {
   civicTool,
   cleanText,
@@ -43,6 +44,11 @@ import {
 import { SMART_STATIC_GTFS_URL, scheduleNames, type ScheduleNames } from './gtfsStatic.js';
 
 export const SWIFTLY_BASE = 'https://api.goswift.ly/real-time/detroit-smartbus';
+/** Without it the tool is listed as OFF and answers not_configured (src/tools/keygate.ts). */
+export const SWIFTLY_MISSING_KEY: MissingKey = {
+  env: 'SWIFTLY_API_KEY',
+  what: 'a free Swiftly real-time API key for SMART',
+};
 export const TRANSIT_ATTRIBUTION =
   'SMART (via Swiftly): live data shown for display only, never stored or exported; route names and headsigns from the SMART GTFS schedule';
 
@@ -221,10 +227,9 @@ export function transitTools(deps: TransitDeps): ToolDef[] {
     civicTool({
       name: 'transit_vehicles_near',
       title: 'SMART buses near a point (live)',
-      description: deps.apiKey
-        ? description
-        : `OFF: not configured (set SWIFTLY_API_KEY in deploy/secrets/gateway.env). ${description}`,
+      description,
       schema,
+      ...(deps.apiKey ? {} : { needsKey: SWIFTLY_MISSING_KEY }),
       tags: [
         'bus',
         'buses',
@@ -247,8 +252,8 @@ export function transitTools(deps: TransitDeps): ToolDef[] {
         if (!deps.apiKey)
           return notConfigured(
             'transit_vehicles_near',
-            'SWIFTLY_API_KEY',
-            'a free Swiftly real-time API key for SMART',
+            SWIFTLY_MISSING_KEY.env,
+            SWIFTLY_MISSING_KEY.what,
           );
         const at = resolvePoint(deps, 'transit_vehicles_near', a, ctx);
         if (!at.ok) return at.output;
