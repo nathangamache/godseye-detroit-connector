@@ -596,7 +596,7 @@ async function forecastFor(
       isError: true,
       errorKind: 'retry_later',
     };
-  // US units: the NWS answers in F; a period in C reads "39 F (4 C)" like the rest.
+  // US units: the NWS answers in °F ("46°F"); a period in °C reads "39°F (4°C)" like the rest.
   const unit = (x: PeriodOut) =>
     x.temp === null
       ? ''

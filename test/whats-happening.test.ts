@@ -407,7 +407,7 @@ describe('whats_happening_here sections', () => {
     );
   });
 
-  it('the weather line is in F and mph (GEV reports C and km/h)', async () => {
+  it('the weather line is in °F and mph (GEV reports °C and km/h)', async () => {
     const { text, data } = await harness({
       get_weather: async () => ({
         summary: 'Weather at 42.3314, -83.0458: light snow, -1°C, wind 19 km/h.',
@@ -422,9 +422,10 @@ describe('whats_happening_here sections', () => {
       }),
     }).run(DETROIT);
     expect(line(text, 'Weather:')).toMatch(
-      /^- Weather: Weather at 42\.3314, -83\.0458: light snow, 30 F \(-1 C\), wind 12 mph\./,
+      /^- Weather: Weather at 42\.3314, -83\.0458: light snow, 30°F \(-1°C\), wind 12 mph\./,
     );
-    expect(text).not.toMatch(/°C|km\/h/);
+    // No temperature in °C alone, and no km/h.
+    expect(text).not.toMatch(/(?<!°F \(-?)\d+°C|km\/h/);
     const w = data.sources.find((s) => s.source === 'weather')!.data as {
       weather: Record<string, number>;
     };

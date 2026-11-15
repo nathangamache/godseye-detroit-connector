@@ -13,7 +13,7 @@
  *                   from this summary, never cached, with the requests left today),
  *                   border_wait_times (asked only within 8 km of a Detroit/Windsor or Port Huron
  *                   crossing), air_quality ("not configured (AIRNOW_API_KEY)" without its key)
- *   GEV          -> get_weather (F and mph), get_traffic_flow, find_cctv_cameras ("none in
+ *   GEV          -> get_weather (°F and mph), get_traffic_flow, find_cctv_cameras ("none in
  *                   range" when there are none: none in SE Michigan today)
  * and returns one compact summary with each source's timestamp/age and error. No section is ever
  * left out: one that has nothing, is not configured or cannot run says so. For an explicit point

@@ -84,7 +84,7 @@ const DIRECT_TOOLS = [
   {
     name: 'whats_happening_here',
     description:
-      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather (F and mph), traffic, road closures, border waits near a crossing, air quality, cameras; every section is listed, saying so when it has nothing or is not configured (call directly).",
+      "One-call summary around a point or the user's phone: rail, rail radio, incidents, weather alerts, weather (°F and mph), traffic, road closures, border waits near a crossing, air quality, cameras; every section is listed, saying so when it has nothing or is not configured (call directly).",
   },
 ];
 
@@ -381,7 +381,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       title: "What's happening here",
       description:
-        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather (F and mph), traffic, road closures within about 5 km (how many, the nearest 5 with road and cross streets; TomTom incidents at most every 15 minutes, otherwise ask road_closures), border waits when a Detroit/Windsor or Port Huron crossing is near, air quality and public cameras, each with its data age. Every section is listed: one with nothing to report, not configured or unable to run says so.",
+        "One-call situational summary around a point (default: the user's phone location): nearest rail line and crossing, rail radio and incidents from Pulse, NWS weather alerts, weather (°F and mph), traffic, road closures within about 5 km (how many, the nearest 5 with road and cross streets; TomTom incidents at most every 15 minutes, otherwise ask road_closures), border waits when a Detroit/Windsor or Port Huron crossing is near, air quality and public cameras, each with its data age. Every section is listed: one with nothing to report, not configured or unable to run says so.",
       inputSchema: z.object({
         lat: z.number().min(-90).max(90).optional(),
         lon: z.number().min(-180).max(180).optional(),
