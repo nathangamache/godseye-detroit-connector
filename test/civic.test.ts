@@ -335,6 +335,52 @@ describe('dpd_calls_near', () => {
     expect(r.observedAt).toBe(d.dataset_newest_call);
   });
 
+  it('opens with the publication lag and an hours value that covers it', async () => {
+    const withNewest = (lagH: number): Array<[string, Handler]> => [
+      [
+        `${DPD_CALLS_LAYER}/query`,
+        (u) =>
+          u.searchParams.get('outStatistics')
+            ? json({ features: [{ attributes: { newest: NOW - lagH * 3_600_000 } }] })
+            : json({ features: [] }),
+      ],
+    ];
+    // A window shorter than the lag cannot hold any published call.
+    const short = await setup({ routes: withNewest(14) }).run('dpd_calls_near', {
+      ...DETROIT,
+      hours: 6,
+    });
+    expect(short.isError).toBeFalsy();
+    expect(short.summary).toMatch(
+      /^Heads-up: The newest call in the whole dataset was placed 2026-11-14T07:00:00\.000Z \(14 h ago\); later calls are not published yet, and that delay is longer than this 6 h window, so the window cannot hold any published call\. Ask again with hours: 24 \(it covers about 10 h of published calls\)\. No DPD 911 calls/,
+    );
+    expect(data(short).publication_lag).toEqual({
+      newest_call_age_s: 14 * 3600,
+      window_h: 6,
+      published_h_in_window: 0,
+      suggested_hours: 24,
+    });
+    // A window that ends after the newest published call: how much of it is published.
+    const day = await setup({ routes: withNewest(14) }).run('dpd_calls_near', { ...DETROIT });
+    expect(day.summary).toMatch(
+      /^Heads-up: The newest call .* \(14 h ago\); later calls are not published yet, so the city has published only about 10 h of this 24 h window \(its newest 14 h are missing\)\. For more, ask with hours: 38 \(it covers about 24 h of published calls\)\./,
+    );
+    expect(data(day).publication_lag).toMatchObject({ suggested_hours: 38 });
+    // The longest window gets no suggestion it cannot follow.
+    const max = await setup({ routes: withNewest(14) }).run('dpd_calls_near', {
+      ...DETROIT,
+      hours: 48,
+    });
+    expect(max.summary).toMatch(/^Heads-up: .* about 34 h of this 48 h window/);
+    expect(max.summary).not.toMatch(/ask with hours/);
+    expect(data(max).publication_lag).toMatchObject({ suggested_hours: null });
+    // A small lag: no heads-up, the age is still given.
+    const fresh = await setup({ routes: withNewest(0.25) }).run('dpd_calls_near', { ...DETROIT });
+    expect(fresh.summary).not.toMatch(/Heads-up/);
+    expect(fresh.summary).toMatch(/newest call in the whole dataset was placed .* \(15 min ago\)/);
+    expect(data(fresh).publication_lag).toBeUndefined();
+  });
+
   it('filters by category words and the city codes', async () => {
     const rows = [
       dpdRow({ call_description: 'SHOTS FIRED IP', category: 'SHOTS IP' }),
