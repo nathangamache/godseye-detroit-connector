@@ -34,6 +34,18 @@ export function cleanText(v: unknown, max = 300): string | null {
   return s;
 }
 
+/**
+ * Road labels as people write them in Michigan: "exit [20]" (an exit number in brackets, as
+ * some feeds give it) -> "exit 20"; a state trunkline written "MI-14" -> "M-14", the Michigan
+ * form. Only "MI-<number>" is changed: I-, US- and other states' routes are left alone.
+ */
+export function roadText<T extends string | null>(s: T): T {
+  if (!s) return s;
+  return s
+    .replace(/\b(exit)\s*\[\s*([0-9]{1,3}[A-Za-z]?)\s*\]/gi, '$1 $2')
+    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1') as T;
+}
+
 const NUMBER_WORDS: Record<string, string> = {
   one: '1',
   two: '2',

@@ -35,7 +35,7 @@ import {
   type Point,
 } from '../geo.js';
 import type { DailyCounter, Http } from '../http.js';
-import { cleanText } from '../text.js';
+import { cleanText, roadText } from '../text.js';
 
 export const TOMTOM_ATTRIBUTION = 'Traffic incidents © TomTom';
 
@@ -110,10 +110,9 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
       .map((e) => cleanText((e as { description?: unknown })?.description, 120))
       .filter(Boolean)
       .join('; ');
+    // "M-14" and "MI-14" are one route: each number once, in the Michigan form.
     const roads = Array.isArray(p.roadNumbers)
-      ? p.roadNumbers
-          .map((r) => cleanText(r, 20))
-          .filter(Boolean)
+      ? [...new Set(p.roadNumbers.map((r) => roadText(cleanText(r, 20))).filter(Boolean))]
           .slice(0, 4)
           .join(' / ')
       : '';

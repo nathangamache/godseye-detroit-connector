@@ -1138,6 +1138,47 @@ describe('route_avoiding_closures', () => {
     );
   });
 
+  it('writes Michigan trunklines in maneuvers as M-14, not MI-14', async () => {
+    const x = h(
+      {},
+      {
+        routes: [
+          [
+            /valhalla/,
+            () =>
+              json({
+                trip: {
+                  summary: { length: 4, time: 600 },
+                  legs: [
+                    {
+                      shape: encodePolyline(line(DETROIT, BELLE_ISLE, 4), 6),
+                      maneuvers: [
+                        {
+                          instruction: 'Take exit 18 on the right onto MI-14 West toward I-275.',
+                          street_names: ['MI-14', 'I-275', 'US-12'],
+                          length: 1,
+                          time: 60,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: BELLE_ISLE,
+      avoid_closures: false,
+    });
+    expect((out.data as { maneuvers: unknown[] }).maneuvers[0]).toMatchObject({
+      instruction: 'Take exit 18 on the right onto M-14 West toward I-275.',
+      street_names: ['M-14', 'I-275', 'US-12'],
+    });
+  });
+
   it('reports Valhalla failures as errors', async () => {
     const x = h(
       {},

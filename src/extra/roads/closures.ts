@@ -16,7 +16,7 @@ import {
   type Point,
 } from './geo.js';
 import { mergeDirections } from './merge.js';
-import { cleanText, mentionsRoad, type RoadQuery } from './text.js';
+import { cleanText, mentionsRoad, roadText, type RoadQuery } from './text.js';
 
 export type SourceId = 'detroit_row' | 'tomtom' | 'mdot_ride' | 'ontario511';
 export type Kind = 'incident' | 'work_zone';
@@ -68,12 +68,23 @@ export type RoadLookup = 'found' | 'none' | 'failed';
 export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<void> {
   if (it.road || !it.resolveRoad) return;
   try {
-    const name = cleanText(await it.resolveRoad(signal), 120);
+    const name = roadText(cleanText(await it.resolveRoad(signal), 120));
     it.road = name;
     it.roadLookup = name ? 'found' : 'none';
   } catch {
     it.roadLookup = 'failed';
   }
+}
+
+/** One spelling of exits and Michigan routes across sources ("exit 20", "M-14"): roadText. */
+function tidy(it: RoadItem): RoadItem {
+  return {
+    ...it,
+    road: roadText(it.road),
+    from_cross_street: roadText(it.from_cross_street),
+    to_cross_street: roadText(it.to_cross_street),
+    description: roadText(it.description),
+  };
 }
 
 /** The item's note on its road name, if the road is not the source's own. */
@@ -288,7 +299,7 @@ export class ClosureService {
       const sig = AbortSignal.any([signal, timeout]);
       try {
         const r = await src.fetch(q, sig);
-        const kept = r.items.filter((it) => this.keep(it, q));
+        const kept = r.items.filter((it) => this.keep(it, q)).map(tidy);
         reports.push({
           ...base,
           status: 'ok',

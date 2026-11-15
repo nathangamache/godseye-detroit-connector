@@ -27,7 +27,7 @@ import {
   type Point,
 } from './geo.js';
 import { HttpError, errorText, type Http, type Pacer } from './http.js';
-import { cleanText } from './text.js';
+import { cleanText, roadText } from './text.js';
 
 export const VALHALLA_ATTRIBUTION =
   'Routing: Valhalla/FOSSGIS, data © OpenStreetMap contributors (ODbL); fix the map: https://www.openstreetmap.org/fixthemap';
@@ -119,10 +119,10 @@ export function valhallaRouter(o: { http: Http; baseUrl: string; pacer: Pacer })
         if (typeof leg.shape === 'string') shape.push(...decodePolyline(leg.shape, 6, 50_000));
         for (const m of (leg.maneuvers ?? []).slice(0, 500) as Array<Record<string, unknown>>) {
           maneuvers.push({
-            instruction: cleanText(m.instruction, 200) ?? '',
+            instruction: roadText(cleanText(m.instruction, 200)) ?? '',
             street_names: Array.isArray(m.street_names)
               ? m.street_names
-                  .map((s) => cleanText(s, 80))
+                  .map((s) => roadText(cleanText(s, 80)))
                   .filter((s): s is string => Boolean(s))
                   .slice(0, 4)
               : [],

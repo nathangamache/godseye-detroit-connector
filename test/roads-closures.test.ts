@@ -31,7 +31,7 @@ import { ontario511Source, parseOntario } from '../src/extra/roads/sources/ontar
 import { TOMTOM_ATTRIBUTION, parseTomTom } from '../src/extra/roads/sources/tomtom.js';
 import { parseRideRecord, recordsOf } from '../src/extra/roads/sources/mdotRide.js';
 import { Http } from '../src/extra/roads/http.js';
-import { mentionsRoad, normRoad, roadQuery, cleanText } from '../src/extra/roads/text.js';
+import { mentionsRoad, normRoad, roadQuery, roadText, cleanText } from '../src/extra/roads/text.js';
 import {
   ALL_KEYS,
   CLOSED_NB,
@@ -952,6 +952,69 @@ describe('TomTom road names', () => {
     expect(roadLabel({ ref: 'I 94;US 12' })).toBe('I-94 / US-12');
     expect(roadLabel({ name: 'First Street' })).toBe('First Street');
     expect(roadLabel({ highway: 'residential' })).toBeNull();
+  });
+});
+
+describe('exit and route labels', () => {
+  const TT_ONLY = { ...ALL_KEYS, MDOT_RIDE_API_KEY: '', ONTARIO_511_API_KEY: '' };
+
+  it('writes exits and Michigan trunklines one way: "exit 20", "M-14"', () => {
+    expect(roadText('exit [20]')).toBe('exit 20');
+    expect(roadText('M-14 exit [29]')).toBe('M-14 exit 29');
+    expect(roadText('Exit [ 18A ]')).toBe('Exit 18A');
+    expect(roadText('M-14 W at I-275 (MI-14), Exit 18 (MI-14)')).toBe(
+      'M-14 W at I-275 (M-14), Exit 18 (M-14)',
+    );
+    // Only "MI-<number>": Interstates, US routes, other states' routes and an address's state
+    // and ZIP code stay as they are.
+    for (const t of [
+      'I-94',
+      'US-12',
+      'M-14 W',
+      'OH-2',
+      'IN-912',
+      'SR-2',
+      'Hwy 401',
+      'Detroit, MI 48202',
+      'MI-48202',
+      'AMI-14',
+      '[20]',
+    ])
+      expect(roadText(t)).toBe(t);
+    expect(roadText(null)).toBeNull();
+  });
+
+  it('lists a TomTom freeway incident with plain exit numbers and one form of each route', async () => {
+    const f = unnamedClosure(
+      'tt-m14',
+      [
+        [-83.05, 42.36],
+        [-83.06, 42.3601],
+      ],
+      'exit [20]',
+      'M-14 exit [29]',
+    );
+    Object.assign(f.properties as Record<string, unknown>, {
+      roadNumbers: ['M-14', 'MI-14'],
+      events: [{ description: 'Closed between I-275 (MI-14) and Exit 18 (MI-14)', code: 401 }],
+    });
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      { routes: [[/api\.tomtom\.com/, () => json({ incidents: [f] })]] },
+    );
+    const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+    const [it0] = itemsOf(out);
+    expect(it0).toMatchObject({
+      road: 'M-14',
+      from_cross_street: 'exit 20',
+      to_cross_street: 'M-14 exit 29',
+      description: 'Closed between I-275 (M-14) and Exit 18 (M-14)',
+      direction: 'westbound',
+    });
+    expect(it0!.text).toBe(
+      'M-14: road closed between exit 20 and M-14 exit 29 (westbound, 3.2 km away, TomTom incidents)',
+    );
+    expect(out.summary).not.toMatch(/MI-14|\[\d+\]/);
   });
 });
 
