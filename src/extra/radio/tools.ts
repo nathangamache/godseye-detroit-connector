@@ -266,16 +266,15 @@ export function radioStationTools(deps: RadioToolDeps): ToolDef[] {
       "Radio stations near a place or the user: internet radio stations around a point from the public Radio Browser community directory, nearest first, including small local stations (public, college, community, news and talk). For popular stations worldwide by genre or name, use find_radio_stations instead. Each station: name, distance and bearing, state/region and country, tags, languages, codec and bitrate, whether the stream is https or HLS, the stream URL, the homepage, and whether the directory last found it working. Only stations whose directory entry has coordinates appear, and names, tags and places are community-entered (sometimes wrong). Claude cannot listen to the audio; the user can play the stream (on the God's Eye View globe only https MP3/AAC streams that are not HLS play). Point: lat/lon (for a place name, get its coordinates with geocode_place first) or here: true (the exact position is never sent: the directory is asked about a nearby grid point).",
     source: 'gateway',
     family: 'radio',
-    nearIntent: true,
+    // Not "station": "weather stations near me" and "fire stations nearby" are not radio questions.
+    nearIntent: { topic: ['radio', 'fm', 'am'] },
     inputSchema: jsonSchema(schema),
+    // No place words ("nearby") or bare "stations": nearIntent answers radio questions for a place.
     tags: [
       'radio',
       'radio station',
       'radio stations',
       'local radio',
-      'stations near me',
-      'nearby',
-      'closest',
       'fm',
       'am',
       'internet radio',

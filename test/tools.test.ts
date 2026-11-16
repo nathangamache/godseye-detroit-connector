@@ -17,7 +17,7 @@ import {
 } from '../src/tools/postprocess.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ToolRunner } from '../src/tools/runner.js';
-import { asksAboutPlace, NEAR_BONUS, stem } from '../src/tools/search.js';
+import { asksAboutPlace, NEAR_BONUS, stem, topicWords } from '../src/tools/search.js';
 import { metaFor } from '../src/tools/tags.js';
 import type { ToolDef } from '../src/tools/types.js';
 import { SchemaValidator } from '../src/tools/validate.js';
@@ -248,6 +248,8 @@ describe('search ranking: the two radio tools', () => {
         'closest radio station',
         'jazz radio stations near me',
         'public radio stations in my area',
+        'am stations near me',
+        'stations near me',
       ])
         expect(names(q)[0], q).toBe('radio_stations_near');
       for (const q of [
@@ -257,8 +259,22 @@ describe('search ranking: the two radio tools', () => {
         'internet radio by genre',
       ])
         expect(names(q)[0], q).toBe('find_radio_stations');
-      // A place word does not pull the radio tool into other questions.
+      // A place word does not pull the radio tool into other questions, nor does a word its name
+      // shares with them ("stations"): only a radio word names its topic.
       expect(names('news near me')[0]).toBe('local_headlines');
+      expect(names('weather stations near me').slice(0, 3)).toEqual([
+        'weather_alerts',
+        'radio_stations_near',
+        'get_weather',
+      ]);
+      expect(names('fire stations nearby').slice(0, 2)).toEqual([
+        'incidents_near',
+        'radio_stations_near',
+      ]);
+      // "am" names the AM band, not the verb of "where I am".
+      expect(names('what is the weather where I am')[0]).toBe('weather_alerts');
+      expect(topicWords('what is the weather where I am').has('am')).toBe(false);
+      expect(topicWords('where am I? AM stations').has('am')).toBe(true);
       expect(asksAboutPlace('stations around here')).toBe(true);
       expect(asksAboutPlace('stations in Toledo')).toBe(true);
       expect(asksAboutPlace('stations in Spanish')).toBe(false);
