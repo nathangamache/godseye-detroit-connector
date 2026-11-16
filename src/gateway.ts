@@ -14,6 +14,7 @@ import { registerAviation, type AviationHandle } from './extra/aviation/index.js
 import { withGdeltNote } from './extra/civic/gdelt.js';
 import { registerCivicTools, type CivicHandle } from './extra/civic/index.js';
 import { registerRadioTools } from './extra/radio/index.js';
+import { withRadioChecks } from './extra/radio/regions.js';
 import { registerRoads, type RoadsHandle } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
@@ -265,7 +266,8 @@ export async function startGateway(
     }
     const child = new GevChild({ ...opts, logger: logger.child({ component: 'gev' }) });
     // GEV's regional brief may ask GDELT from this address: the gateway's GDELT queue counts it.
-    const call = withGdeltNote(makeGevCaller(child));
+    // find_radio_stations rows whose state and country disagree are flagged (src/extra/radio).
+    const call = withRadioChecks(withGdeltNote(makeGevCaller(child)));
     child.on('catalog', (tools) => core.registry.setGevTools(tools, call, config.TOOL_TIMEOUT_MS));
     core.gev = child;
     void child.start();

@@ -31,6 +31,7 @@ import {
   type RadioBrowser,
   type SearchResult,
 } from './browser.js';
+import { mismatchNote, stateCountryCheck } from './regions.js';
 
 export const RADIO_ATTRIBUTION =
   "Radio Browser (radio-browser.info), community directory data, public domain (PDDL). Stations and streams belong to their broadcasters (each station's homepage is listed with it); each stream's own terms apply.";
@@ -98,6 +99,9 @@ export interface RadioStation {
   homepage: string | null;
   last_check_ok: boolean;
   last_checked_at: string | null;
+  /** 'state/country mismatch' when the state names a region of another country (kept, flagged). */
+  check?: string;
+  check_detail?: string;
 }
 
 const LOCAL_SUFFIX = /(^|\.)(localhost|local|internal|lan|localdomain|home\.arpa)$/;
@@ -183,6 +187,10 @@ export function parseStation(
   const cc = typeof r.countrycode === 'string' ? r.countrycode.trim().toUpperCase() : '';
   const bearing = bearingDeg(at.lat, at.lon, lat, lon);
   const homepage = publicHttpUrl(r.homepage) ?? null;
+  const state = cleanText(r.state, 80) ?? null;
+  const country = cleanText(r.country, 80) ?? null;
+  const countryCode = /^[A-Z]{2}$/.test(cc) ? cc : null;
+  const check = stateCountryCheck(state, { name: country, code: countryCode });
   return {
     station: {
       id: id.toLowerCase(),
@@ -190,9 +198,9 @@ export function parseStation(
       distance_km: round(d / 1000, 1),
       bearing_deg: Math.round(bearing),
       direction: compassPoint(bearing),
-      state: cleanText(r.state, 80) ?? null,
-      country: cleanText(r.country, 80) ?? null,
-      country_code: /^[A-Z]{2}$/.test(cc) ? cc : null,
+      state,
+      country,
+      country_code: countryCode,
       tags: list(r.tags, MAX_TAGS),
       languages: languages.length ? languages : list(r.languagecodes, MAX_LANGUAGES),
       codec,
@@ -204,6 +212,7 @@ export function parseStation(
       homepage,
       last_check_ok: r.lastcheckok === 1 || r.lastcheckok === true,
       last_checked_at: isoOrNull(r.lastchecktime_iso8601),
+      ...(check ?? {}),
     },
     // Every tag counts for matching, not only the ones listed.
     haystack: fold(
@@ -234,7 +243,8 @@ function directoryFailure(err: unknown): ToolOutput {
 function stationPhrase(s: RadioStation): string {
   const fmt = s.codec ? `, ${s.codec}${s.bitrate_kbps ? ` ${s.bitrate_kbps} kbps` : ''}` : '';
   const how = s.hls ? ', HLS' : s.https ? '' : ', http only';
-  return `${s.name} (${s.distance_km} km ${s.direction}${fmt}${how})`;
+  const check = s.check ? `, check: ${s.check}` : '';
+  return `${s.name} (${s.distance_km} km ${s.direction}${fmt}${how}${check})`;
 }
 
 export interface RadioToolDeps extends PointDeps {
@@ -368,6 +378,8 @@ export function radioStationTools(deps: RadioToolDeps): ToolDef[] {
         parts.push(
           `The directory has more stations with coordinates in range than one answer holds: only its ${SEARCH_LIMIT} most-played were checked (by its 24 h click count), so a less popular station nearby can be missing; a smaller radius helps.`,
         );
+      const flagged = listed.filter((st) => st.check).length;
+      if (flagged) parts.push(mismatchNote(flagged, 'data.stations[].check_detail'));
       parts.push(
         'Only stations whose directory entry has coordinates appear (some well-known stations have none); names, tags and places are community-entered and can be wrong.',
       );

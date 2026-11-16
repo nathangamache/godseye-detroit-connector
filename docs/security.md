@@ -395,7 +395,12 @@ Browser counts that as a play).
   such as a US station filed under an Austrian state), cleaned of control and bidi characters and
   markup, length-capped and labelled untrusted. A stream or homepage link with credentials, to a
   loopback, private or link-local address, or to a single-label or local name is dropped (the
-  station too, when it is the stream); every other link is flagged as unvetted.
+  station too, when it is the stream); every other link is flagged as unvetted. A station whose
+  state names a region of another country than its country field (`src/extra/radio/regions.ts`:
+  the first-level regions of a few countries, in their own and English names; names that are
+  also common places elsewhere, such as "Georgia" or "Victoria", never count) is kept and
+  flagged `check: state/country mismatch` with the reason, in `radio_stations_near` and in the
+  rows of GEV's `find_radio_stations` alike.
 * Quota: `RADIO_TOOL_RATE_LIMITS` (60/h and 300/d). The tool is not part of
   `whats_happening_here`.
 
