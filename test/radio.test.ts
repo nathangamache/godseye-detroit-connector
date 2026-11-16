@@ -21,6 +21,11 @@ import {
   mirrorHost,
 } from '../src/extra/radio/browser.js';
 import { radioTools } from '../src/extra/radio/index.js';
+import {
+  STATE_COUNTRY_MISMATCH,
+  stateCountryCheck,
+  withRadioChecks,
+} from '../src/extra/radio/regions.js';
 import { RADIO_ATTRIBUTION, publicHttpUrl } from '../src/extra/radio/tools.js';
 import { LocationStore } from '../src/location/store.js';
 import { nullLogger } from '../src/log.js';
@@ -705,6 +710,106 @@ describe('radio_stations_near: answers', () => {
     const j = await junk.run({ ...DETROIT });
     expect(j.isError).toBeFalsy();
     expect(data(j)).toMatchObject({ count: 0, skipped: { malformed: 4 } });
+  });
+});
+
+describe('radio directory rows: state and country that disagree', () => {
+  it('flags, never hides, a station whose state belongs to another country', async () => {
+    const { run } = setup({
+      rows: [
+        station('Mismatch Test', 1, 0, {
+          state: 'Niederösterreich',
+          country: 'The United States Of America',
+          countrycode: 'US',
+        }),
+        station('Across The River Test', 2, 90, { state: 'Ontario' }),
+        station('Consistent Test', 3, 180),
+        station('City In State Test', 4, 270, { state: 'Detroit' }),
+        station('Code Test', 5, 0, { state: 'MI' }),
+        station('Canada Test', 6, 0, { state: 'Ontario', country: 'Canada', countrycode: 'CA' }),
+      ],
+    });
+    const r = await run({ ...DETROIT });
+    const by = (n: string) =>
+      data(r).stations.find((s) => s.name === n)! as Station & {
+        check?: string;
+        check_detail?: string;
+      };
+    expect(data(r).count).toBe(6);
+    expect(by('Mismatch Test')).toMatchObject({
+      state: 'Niederösterreich',
+      country: 'The United States Of America',
+      check: 'state/country mismatch',
+      check_detail:
+        'the state "Niederösterreich" is a region of Austria, but the country given is The United States Of America (country code US); the directory entry may be wrong',
+    });
+    expect(by('Across The River Test')).toMatchObject({
+      check: 'state/country mismatch',
+      check_detail: expect.stringMatching(/"Ontario" is a region of Canada/),
+    });
+    for (const n of ['Consistent Test', 'City In State Test', 'Code Test', 'Canada Test'])
+      expect(by(n).check, n).toBeUndefined();
+    expect(r.summary).toContain(
+      'Mismatch Test (1 km N, MP3 128 kbps, check: state/country mismatch)',
+    );
+    expect(r.summary).toMatch(
+      /2 stations are flagged "check: state\/country mismatch": their directory state and country disagree/,
+    );
+  });
+
+  it('knows regions by their own and English names, and leaves ambiguous names alone', () => {
+    const us = { name: 'The United States Of America', code: 'US' };
+    expect(stateCountryCheck('Steiermark', us)?.check).toBe(STATE_COUNTRY_MISMATCH);
+    expect(stateCountryCheck('styria', us)?.check).toBe(STATE_COUNTRY_MISMATCH);
+    expect(stateCountryCheck('Bavaria', { name: 'Japan' })?.check_detail).toMatch(/of Germany/);
+    expect(stateCountryCheck('Michigan', { name: 'Austria' })?.check_detail).toMatch(
+      /of the United States/,
+    );
+    expect(stateCountryCheck('Graz, Steiermark', { name: 'Austria' })).toBeUndefined();
+    expect(stateCountryCheck('Wien', { name: 'Österreich' })).toBeUndefined();
+    expect(stateCountryCheck('Ohio', { name: 'United States' })).toBeUndefined();
+    expect(
+      stateCountryCheck('Nordrhein-Westfalen', { name: 'Germany', code: 'DE' }),
+    ).toBeUndefined();
+    // Also a place elsewhere: never flagged.
+    for (const st of ['Georgia', 'Victoria', 'Vienna', 'Berlin', 'Washington', 'Durango', 'Mexico'])
+      expect(stateCountryCheck(st, { name: 'Canada', code: 'CA' }), st).toBeUndefined();
+    // Nothing to compare.
+    expect(stateCountryCheck('Bayern', {})).toBeUndefined();
+    expect(stateCountryCheck(null, us)).toBeUndefined();
+    expect(stateCountryCheck('Some Town', us)).toBeUndefined();
+  });
+
+  it("flags the rows of GEV's find_radio_stations the same way, and leaves other tools alone", async () => {
+    const rows = [
+      { name: 'Vienna Test', state: 'Wien', country: 'The United States Of America' },
+      { name: 'Fine Test', state: 'Michigan', country: 'The United States Of America' },
+    ];
+    const gev = withRadioChecks(async (name) => ({
+      summary: `2 radio stations (from a directory of 500 popular stations).`,
+      data: {
+        total: 2,
+        returned: 2,
+        truncated: false,
+        rows: name === 'find_radio_stations' ? rows : [],
+      },
+    }));
+    const c = { ...ctx(), timeoutMs: 1000 };
+    const out = await gev('find_radio_stations', { query: 'news' }, c);
+    const got = (out.data as { rows: Array<Record<string, unknown>> }).rows;
+    expect(got[0]).toMatchObject({
+      name: 'Vienna Test',
+      check: 'state/country mismatch',
+      check_detail: expect.stringMatching(/"Wien" is a region of Austria/),
+    });
+    expect(got[1]!.check).toBeUndefined();
+    expect(out.summary).toBe(
+      '2 radio stations (from a directory of 500 popular stations).\n1 station is flagged "check: state/country mismatch": its directory state and country disagree (data.rows[].check_detail); the directory is community-entered.',
+    );
+    // The input rows are not changed in place; other tools pass through.
+    expect(rows[0]).not.toHaveProperty('check');
+    const other = await gev('get_weather', {}, c);
+    expect(other.summary).not.toMatch(/mismatch/);
   });
 });
 

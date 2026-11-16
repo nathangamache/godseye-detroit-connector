@@ -17,7 +17,7 @@ import {
 } from '../src/tools/postprocess.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ToolRunner } from '../src/tools/runner.js';
-import { stem } from '../src/tools/search.js';
+import { asksAboutPlace, NEAR_BONUS, stem, topicWords } from '../src/tools/search.js';
 import { metaFor } from '../src/tools/tags.js';
 import type { ToolDef } from '../src/tools/types.js';
 import { SchemaValidator } from '../src/tools/validate.js';
@@ -124,46 +124,56 @@ describe('search', () => {
   });
 });
 
-describe('search ranking over the gateway catalog', () => {
-  /** The real gateway tools, GEV tools as GEV describes them, and one with "airfields". */
-  function catalog() {
-    const dir = mkdtempSync(path.join(tmpdir(), 'gw-search-'));
-    const core = buildCore(
-      loadConfig({ GATEWAY_MODE: 'test', DATA_DIR: dir, PULSE_URL: 'http://127.0.0.1:9' }),
-      {
-        logger: nullLogger,
-        extraTools: [
-          {
-            ...nativeDef('runway_test_tool', 'Runways at public airfields near a point.'),
-            tags: [],
-          },
-        ],
-      },
-    );
-    core.registry.setGevTools(
-      [
-        upstream(
-          'find_military_installations',
-          'Military installations mapped in OpenStreetMap within an area, nearest the center first.',
-          { area: POINT },
-        ),
-        upstream(
-          'get_weather',
-          'Current weather at a location: conditions, temperature, wind and visibility.',
-        ),
-        upstream('get_wind', 'Wind speed and direction at a point.'),
+/** The real gateway tools, GEV tools as GEV describes them, and one with "airfields". */
+function catalog() {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gw-search-'));
+  const core = buildCore(
+    loadConfig({ GATEWAY_MODE: 'test', DATA_DIR: dir, PULSE_URL: 'http://127.0.0.1:9' }),
+    {
+      logger: nullLogger,
+      extraTools: [
+        {
+          ...nativeDef('runway_test_tool', 'Runways at public airfields near a point.'),
+          tags: [],
+        },
       ],
-      async (name) => ({ summary: `${name} called` }),
-      5000,
-    );
-    const names = (q: string) => core.registry.find(q, 8).map((h) => h.tool.name);
-    const close = () => {
-      core.db.close();
-      rmSync(dir, { recursive: true, force: true });
-    };
-    return { names, close };
-  }
+    },
+  );
+  core.registry.setGevTools(
+    [
+      upstream(
+        'find_military_installations',
+        'Military installations mapped in OpenStreetMap within an area, nearest the center first.',
+        { area: POINT },
+      ),
+      upstream(
+        'get_weather',
+        'Current weather at a location: conditions, temperature, wind and visibility.',
+      ),
+      upstream('get_wind', 'Wind speed and direction at a point.'),
+      // As GEV describes it.
+      upstream(
+        'find_radio_stations',
+        "Internet radio stations from a directory of popular Radio Browser stations, not every station, by area and/or a search term matched against name, tags, language and country. Each result includes the broadcaster's public stream URL.",
+        {
+          area: POINT,
+          query: { type: 'string', description: 'Words such as "jazz", "news" or "Tokyo".' },
+        },
+      ),
+    ],
+    async (name) => ({ summary: `${name} called` }),
+    5000,
+  );
+  const names = (q: string) => core.registry.find(q, 8).map((h) => h.tool.name);
+  const get = (n: string) => core.registry.get(n)!;
+  const close = () => {
+    core.db.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { names, get, close };
+}
 
+describe('search ranking over the gateway catalog', () => {
   it('"air_quality" is air_quality alone: "air" in a military tag ("air base") does not qualify', () => {
     const { names, close } = catalog();
     try {
@@ -200,6 +210,76 @@ describe('search ranking over the gateway catalog', () => {
       expect(names('is I-94 closed')[0]).toBe('road_closures');
       expect(names('who owns that helicopter')[0]).toBe('aircraft_lookup');
       expect(names('local news headlines')[0]).toBe('local_headlines');
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('search ranking: the two radio tools', () => {
+  it('describes them apart: popular stations worldwide vs stations near a place', () => {
+    const { get, close } = catalog();
+    try {
+      const popular = get('find_radio_stations').description;
+      const near = get('radio_stations_near').description;
+      expect(popular).toMatch(
+        /^Popular internet radio stations worldwide by genre, name, language or country/,
+      );
+      expect(popular).toMatch(/for stations near a place or the user, use radio_stations_near/i);
+      expect(near).toMatch(/^Radio stations near a place or the user/);
+      expect(near).toMatch(
+        /for popular stations worldwide by genre or name, use find_radio_stations/i,
+      );
+    } finally {
+      close();
+    }
+  });
+
+  it('ranks radio_stations_near first for radio questions about a place, find_radio_stations otherwise', () => {
+    const { names, close } = catalog();
+    try {
+      for (const q of [
+        'radio stations near me',
+        'radio stations in Lansing',
+        'radio stations around Toledo',
+        'what radio stations are nearby',
+        'fm stations around here',
+        'local radio',
+        'closest radio station',
+        'jazz radio stations near me',
+        'public radio stations in my area',
+        'am stations near me',
+        'stations near me',
+      ])
+        expect(names(q)[0], q).toBe('radio_stations_near');
+      for (const q of [
+        'jazz radio stations',
+        'popular radio stations worldwide',
+        'radio stations in Spanish',
+        'internet radio by genre',
+      ])
+        expect(names(q)[0], q).toBe('find_radio_stations');
+      // A place word does not pull the radio tool into other questions, nor does a word its name
+      // shares with them ("stations"): only a radio word names its topic.
+      expect(names('news near me')[0]).toBe('local_headlines');
+      expect(names('weather stations near me').slice(0, 3)).toEqual([
+        'weather_alerts',
+        'radio_stations_near',
+        'get_weather',
+      ]);
+      expect(names('fire stations nearby').slice(0, 2)).toEqual([
+        'incidents_near',
+        'radio_stations_near',
+      ]);
+      // "am" names the AM band, not the verb of "where I am".
+      expect(names('what is the weather where I am')[0]).toBe('weather_alerts');
+      expect(topicWords('what is the weather where I am').has('am')).toBe(false);
+      expect(topicWords('where am I? AM stations').has('am')).toBe(true);
+      expect(asksAboutPlace('stations around here')).toBe(true);
+      expect(asksAboutPlace('stations in Toledo')).toBe(true);
+      expect(asksAboutPlace('stations in Spanish')).toBe(false);
+      expect(asksAboutPlace('jazz stations')).toBe(false);
+      expect(NEAR_BONUS).toBe(4);
     } finally {
       close();
     }

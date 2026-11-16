@@ -12,8 +12,9 @@ import { parseRelayUrl, type Config } from './config.js';
 import { kvGet, kvSet, openDb, type DB } from './db.js';
 import { registerAviation, type AviationHandle } from './extra/aviation/index.js';
 import { withGdeltNote } from './extra/civic/gdelt.js';
-import { registerCivicTools } from './extra/civic/index.js';
+import { registerCivicTools, type CivicHandle } from './extra/civic/index.js';
 import { registerRadioTools } from './extra/radio/index.js';
+import { withRadioChecks } from './extra/radio/regions.js';
 import { registerRoads, type RoadsHandle } from './extra/roads/index.js';
 import { registerWeatherTools } from './extra/weather/index.js';
 import { GevChild, childSpawnSpec, type GevChildOptions } from './gev/child.js';
@@ -70,6 +71,8 @@ export interface GatewayCore {
   aviation: AviationHandle;
   /** The roads tools' background work (the City of Detroit permit snapshot). */
   roads: RoadsHandle;
+  /** The civic tools' background work (the local news feed refresher). */
+  civic: CivicHandle;
   now: () => number;
 }
 
@@ -183,7 +186,15 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     now,
     fetch: fetchOverride,
   });
-  registerCivicTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
+  const civic = registerCivicTools(registry, {
+    config,
+    locations,
+    audit,
+    tokens,
+    logger: logger.child({ component: 'civic' }),
+    now,
+    fetch: fetchOverride,
+  });
   registerRadioTools(registry, { config, locations, audit, tokens, now, fetch: fetchOverride });
   for (const t of overrides.extraTools ?? []) registry.register(t);
   const sessionSecret = sessionSecretFor(config, db);
@@ -219,6 +230,7 @@ export function buildCore(config: Config, overrides: GatewayOverrides = {}): Gat
     rail,
     aviation,
     roads,
+    civic,
     now,
   };
 }
@@ -254,7 +266,8 @@ export async function startGateway(
     }
     const child = new GevChild({ ...opts, logger: logger.child({ component: 'gev' }) });
     // GEV's regional brief may ask GDELT from this address: the gateway's GDELT queue counts it.
-    const call = withGdeltNote(makeGevCaller(child));
+    // find_radio_stations rows whose state and country disagree are flagged (src/extra/radio).
+    const call = withRadioChecks(withGdeltNote(makeGevCaller(child)));
     child.on('catalog', (tools) => core.registry.setGevTools(tools, call, config.TOOL_TIMEOUT_MS));
     core.gev = child;
     void child.start();
@@ -318,6 +331,7 @@ export async function startGateway(
   core.audit.prune();
   core.aviation.start();
   core.roads.start();
+  core.civic.start();
 
   logger.info('gateway_listening', {
     public: `${config.HOST}:${port}`,
@@ -350,6 +364,7 @@ export async function startGateway(
       clearInterval(prune);
       core.aviation.stop();
       core.roads.stop();
+      core.civic.stop();
       await core.gev?.stop();
       await Promise.all([closeServer(server), closeServer(privateServer), closeServer(uiServer)]);
       core.db.close();

@@ -43,8 +43,8 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `incidents_near`, `incident_detail`, `search_transcripts`, `feeds_status` | Pulse | scanner incidents, their transcripts, transcript search, feed and receiver status | Detroit Pulse at `PULSE_URL` (`PULSE_API_TOKEN`) |
 | `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
 | `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (listed as OFF, answering `not_configured`, without) |
-| `local_headlines` | gateway (civic) | recent GDELT headlines for a place or point | none |
-| `radio_stations_near` | gateway (radio) | internet radio stations near a point or the phone from the Radio Browser directory, nearest first: distance and bearing, tags, languages, codec, https/HLS, stream URL and homepage (Claude can't listen; on the globe only https MP3/AAC non-HLS streams play) | none |
+| `local_headlines` | gateway (civic) | recent local headlines for a place or point from local newsrooms' feeds, plus GDELT when it answers | none (`LOCAL_NEWS_FEEDS` lists the feeds) |
+| `radio_stations_near` | gateway (radio) | internet radio stations near a point or the phone from the Radio Browser directory (`find_tools` ranks it first for radio questions about a place: "near me", "around here", "local", "in Lansing"), nearest first: distance and bearing, tags, languages, codec, https/HLS, stream URL and homepage; a station whose state belongs to another country than its country field is kept and flagged "check: state/country mismatch" (also in `find_radio_stations` rows) (Claude can't listen; on the globe only https MP3/AAC non-HLS streams play) | none |
 | `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
 | `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
 | `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (listed as OFF, answering `not_configured`, without) |
@@ -63,7 +63,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `find_cctv_cameras`, `get_cctv_snapshot` | GEV | public traffic cameras and a current frame (no Street View fallback) | GEV; none (`ONTARIO_511_API_KEY` in GEV adds Windsor-side cameras) |
 | `vessels_in_area`, `find_vessel`, `get_vessel_track` | GEV | live AIS ships | `AISSTREAM_API_KEY` in GEV |
 | `next_satellite_pass`, `satellites_overhead`, `get_recent_launches`, `get_recent_imagery` | GEV | satellite passes, launches, recent imagery | GEV; none |
-| `get_regional_brief`, `find_radio_stations` | GEV | GDELT regional news; radio stations and streams | GEV; none |
+| `get_regional_brief`, `find_radio_stations` | GEV | GDELT regional news; popular radio stations worldwide by genre, name, language or country (the gateway's description points to `radio_stations_near` for stations near a place) | GEV; none |
 | `get_map_features`, `find_military_installations` | GEV | OpenStreetMap features and military sites | a self-hosted Overpass (`OVERPASS_UPSTREAMS` in GEV, `docs/overpass.md`) |
 | `get_terrain_height`, `find_infrastructure`, `find_submarine_cables` | GEV | terrain height, infrastructure, submarine cables | GEV; none |
 | `show_in_gods_eye_view` | GEV | a globe link for a place or view (tailnet only) | GEV; the UI origin on the tailnet |
@@ -245,7 +245,7 @@ generic User-Agent, caps its output, labels it untrusted third-party data and cr
 |---|---|---|---|
 | `dpd_calls_near` | Detroit police 911 calls near a point: time, description, category, priority, nearest intersection, neighborhood, response minutes | City of Detroit open data, Police Serviced 911 Calls (no key) | "official, delayed a few hours": when the newest published call is an hour or more old, the result opens with its age, how much of the window is published and an `hours` value that covers published calls; nearest intersection only, never a house address; Detroit city limits only |
 | `transit_vehicles_near` | Live SMART buses near a point (route, headsign, vehicle, position, distance, bearing, heading, delay, last report) plus active SMART service alerts | SMART via Swiftly GTFS-Realtime (`SWIFTLY_API_KEY`; **OFF** without it, answering `not_configured`); route names and headsigns from SMART's static GTFS | display only: one in-memory snapshot of at most 30 s, never stored or exported; DDOT and QLINE have no usable public real-time feed |
-| `local_headlines` | Recent headlines about a place (`place`, or a point turned into the town there): first from the metro's local outlets (GDELT `domain:`, `src/extra/civic/outlets.ts`) or, elsewhere, outlets in the place's country (`sourcecountry:`, town `near20:` its state), then a broad search only if that finds nothing; `data.mode` and the summary say which; titles tidied | GDELT DOC 2.0 API (no key); U.S. Census geocoder for coordinates (rounded to ~1 km) | one GDELT queue for the whole gateway: requests at least 6 s apart plus jitter (at most two per call), 60 s of quiet after a refusal; when GDELT or the queue refuses, a normal result with status `unavailable`, the reason and "try again in N s"; 15-minute cache per query, and the last metro asked about is kept warm (refreshed at most every 15 minutes while it is asked for); headlines are untrusted third-party text |
+| `local_headlines` | Recent headlines about a place (`place`, or a point turned into the town there): headline, link, outlet, byline, date and a short excerpt; stories naming the place (or from its own outlet) first, then news of its metro area, each newest first (`data.headlines[].match`); titles tidied | Local newsrooms' public RSS/Atom feeds (`LOCAL_NEWS_FEEDS`; by default Michigan Public, BridgeDetroit, WDET, Bridge Michigan and WEMU, `src/extra/civic/feedList.ts`); GDELT DOC 2.0 API (no key) as an extra; U.S. Census geocoder for coordinates (rounded to ~1 km) | feeds: a background refresher every 15 min (or the entry's longer `poll_minutes`) with conditional GETs, kept in memory and in `DATA_DIR/cache/local-news.json`; calls read that snapshot; only headline, link, date, byline and an excerpt of at most 300 characters are kept (never the full text), wire and partner copy is skipped, and each item carries its outlet's credit; personal, non-commercial reading only (link out, never republish). GDELT: one queue for the whole gateway, requests at least 6 s apart plus jitter (at most two per call, a call waits at most 15 s), 60 s of quiet after a refusal, doubled for each refusal in a row up to 6 h (calls made while paused send nothing); 15-minute cache per query. A source that is throttled or down is served from its last good answer, marked with its age ("from 2 h ago"); only when nothing at all has answered is the result status `unavailable` with "try again in N s"; headlines are untrusted third-party text |
 
 GEV's `get_transit_vehicles` no longer advertises DDOT, SMART or QLINE: its feed registry has no
 Michigan feed.
@@ -264,7 +264,7 @@ src/            gateway (TypeScript, ESM)
     aviation/   flights_near, aircraft_lookup, FAA registry sync
     weather/    NWS alerts and forecast, water levels, air quality
     roads/      road closures, geocoding, closure-aware routes, Mi Drive links, border waits
-    civic/      Detroit 911 calls, SMART buses, GDELT headlines
+    civic/      Detroit 911 calls, SMART buses, local news feeds and GDELT headlines
     radio/      Radio Browser stations near a point (mirror discovery, coarse queries)
 gev/stdio-all-surfaces.mjs   GEV MCP entry with all 40 tools (adapted from GEV, MIT)
 data/rail/      FRA crossings + NARN lines for Michigan (public domain; see data/README.md)
@@ -303,7 +303,9 @@ government data). Weather and water data: National Weather Service, NOAA CO-OPS,
 Water Prediction Service and USGS, public domain (USGS values are provisional). Air quality: EPA
 AirNow and the reporting agencies (Michigan EGLE), preliminary data under the AirNow Data Exchange
 Guidelines. Civic tools: City of Detroit Open Data (Police Serviced 911 Calls), SMART real-time
-data via Swiftly (display only, under Swiftly's API licence) and SMART's GTFS schedule, the GDELT
-Project (gdeltproject.org; a citation and link go with every result) and the U.S. Census Bureau
-geocoder; see `docs/security.md` for the terms of each. This repository is
+data via Swiftly (display only, under Swiftly's API licence) and SMART's GTFS schedule, the public
+news feeds of Michigan Public, BridgeDetroit, WDET 101.9 FM, Bridge Michigan and WEMU 89.1 FM
+(headlines, links, bylines and short excerpts for personal, non-commercial reading; each story
+belongs to its outlet), the GDELT Project (gdeltproject.org; a citation and link go with every
+result) and the U.S. Census Bureau geocoder; see `docs/security.md` for the terms of each. This repository is
 public, for personal, non-commercial use; it holds no secrets or personal data.

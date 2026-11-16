@@ -6,6 +6,11 @@
  * counts half, and a word of three letters or fewer only as a whole word, so "air" in "airfield"
  * is not a match. Hits far weaker than the best one are dropped: a lone word in a tag ("air" in
  * "air base") does not make a military-bases tool the second answer to "air_quality".
+ *
+ * A query about a place ("near me", "around here", "local", "in Lansing") lifts the tools marked
+ * nearIntent above those sharing their topic, but only when the query also names that topic with
+ * one of its words ("radio", "fm"; "stations" is weather's and fire's too): "radio stations near
+ * me" is radio_stations_near; "news near me" and "weather stations near me" are not.
  */
 import MiniSearch from 'minisearch';
 import { categoryFor } from './tags.js';
@@ -107,6 +112,56 @@ export const FIELD_WEIGHT = {
 type Field = keyof typeof FIELD_WEIGHT;
 const FIELDS = Object.keys(FIELD_WEIGHT) as Field[];
 
+/**
+ * What a place in the query adds to a nearIntent tool whose topic the query names: as much as a
+ * word of its name, so it outweighs one tag word of a tool on the same topic ("jazz").
+ */
+export const NEAR_BONUS = 4;
+
+/** "I am", "am I": the verb, never the AM band. */
+const VERB_AM = /\b(?:i\s+am|am\s+i)\b/gi;
+
+/** The words of a query that can name a nearIntent tool's topic. */
+export function topicWords(query: string): Set<string> {
+  return new Set(words(query.replace(VERB_AM, ' ')));
+}
+
+/** Words that ask about a place (some are stop words, so the index never sees them). */
+const PLACE_WORDS =
+  /\b(near|nearby|nearest|around|close to|closest|local|locally|here|my area|this area|the area|in town|where i am)\b/i;
+/** "in Lansing", "at Belle Isle": a capitalised name after in/at. */
+const IN_PLACE = /\b(?:in|at)\s+(\p{Lu}[\p{L}'.-]*)/gu;
+/** Capitalised words after "in" that are not places ("radio in Spanish"). */
+const NOT_PLACES = new Set([
+  'spanish',
+  'english',
+  'french',
+  'german',
+  'arabic',
+  'chinese',
+  'japanese',
+  'korean',
+  'italian',
+  'portuguese',
+  'russian',
+  'polish',
+  'hindi',
+  'urdu',
+  'greek',
+  'dutch',
+  'hd',
+  'stereo',
+  'mp3',
+  'aac',
+]);
+
+/** Whether a query asks about a place rather than a kind of thing. */
+export function asksAboutPlace(query: string): boolean {
+  if (PLACE_WORDS.test(query)) return true;
+  for (const m of query.matchAll(IN_PLACE)) if (!NOT_PLACES.has(m[1]!.toLowerCase())) return true;
+  return false;
+}
+
 /** A query word that only begins a longer word counts this share (and needs 4+ letters). */
 const PREFIX_SHARE = 0.5;
 const MIN_PREFIX = 4;
@@ -124,6 +179,8 @@ export class ToolSearch {
   private index = this.makeIndex();
   private tools = new Map<string, ToolDef>();
   private profiles = new Map<string, Profile>();
+  /** nearIntent tools by name: their topic's words, as the index sees them. */
+  private near = new Map<string, Set<string>>();
 
   private makeIndex() {
     return new MiniSearch<Doc>({
@@ -142,6 +199,11 @@ export class ToolSearch {
   rebuild(tools: ToolDef[]): void {
     this.index = this.makeIndex();
     this.tools = new Map(tools.map((t) => [t.name, t]));
+    this.near = new Map(
+      tools.flatMap((t) =>
+        t.nearIntent ? [[t.name, new Set(t.nearIntent.topic.flatMap(words))] as const] : [],
+      ),
+    );
     const docs: Doc[] = tools.map((t) => {
       const category = categoryFor(t.name, t.source);
       return {
@@ -221,11 +283,17 @@ export class ToolSearch {
       .filter((h) => h.tool && filter(h.tool));
     if (!raw.length) return [];
     const topBm25 = Math.max(...raw.map((h) => h.bm25));
+    const topical = asksAboutPlace(q) ? topicWords(q) : new Set<string>();
+    const namesTopic = (name: string) => {
+      const topic = this.near.get(name);
+      return topic !== undefined && [...topic].some((w) => topical.has(w));
+    };
     // Field matches rank; BM25 (at most 1 point) only orders hits the fields score alike.
     const scored = raw
       .map((h) => {
         const f = this.fieldScore(h.tool.name, terms);
-        return { tool: h.tool, score: f.score + h.bm25 / topBm25, matched: f.matched };
+        const near = namesTopic(h.tool.name) ? NEAR_BONUS : 0;
+        return { tool: h.tool, score: f.score + near + h.bm25 / topBm25, matched: f.matched };
       })
       .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
     const best = scored[0]!;

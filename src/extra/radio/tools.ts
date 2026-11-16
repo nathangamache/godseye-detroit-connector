@@ -31,6 +31,7 @@ import {
   type RadioBrowser,
   type SearchResult,
 } from './browser.js';
+import { mismatchNote, stateCountryCheck } from './regions.js';
 
 export const RADIO_ATTRIBUTION =
   "Radio Browser (radio-browser.info), community directory data, public domain (PDDL). Stations and streams belong to their broadcasters (each station's homepage is listed with it); each stream's own terms apply.";
@@ -62,7 +63,7 @@ const schema = z
       .max(80)
       .optional()
       .describe(
-        'Words that must all appear in the station name, tags or language, e.g. "news", "jazz", "public radio", "college", "spanish". Matched by the gateway, never sent to the directory.',
+        'Words that must all appear in the station name, tags or language, e.g. "news", "public radio", "college", "talk". Matched by the gateway, never sent to the directory.',
       ),
     https_only: z
       .boolean()
@@ -98,6 +99,9 @@ export interface RadioStation {
   homepage: string | null;
   last_check_ok: boolean;
   last_checked_at: string | null;
+  /** 'state/country mismatch' when the state names a region of another country (kept, flagged). */
+  check?: string;
+  check_detail?: string;
 }
 
 const LOCAL_SUFFIX = /(^|\.)(localhost|local|internal|lan|localdomain|home\.arpa)$/;
@@ -183,6 +187,10 @@ export function parseStation(
   const cc = typeof r.countrycode === 'string' ? r.countrycode.trim().toUpperCase() : '';
   const bearing = bearingDeg(at.lat, at.lon, lat, lon);
   const homepage = publicHttpUrl(r.homepage) ?? null;
+  const state = cleanText(r.state, 80) ?? null;
+  const country = cleanText(r.country, 80) ?? null;
+  const countryCode = /^[A-Z]{2}$/.test(cc) ? cc : null;
+  const check = stateCountryCheck(state, { name: country, code: countryCode });
   return {
     station: {
       id: id.toLowerCase(),
@@ -190,9 +198,9 @@ export function parseStation(
       distance_km: round(d / 1000, 1),
       bearing_deg: Math.round(bearing),
       direction: compassPoint(bearing),
-      state: cleanText(r.state, 80) ?? null,
-      country: cleanText(r.country, 80) ?? null,
-      country_code: /^[A-Z]{2}$/.test(cc) ? cc : null,
+      state,
+      country,
+      country_code: countryCode,
       tags: list(r.tags, MAX_TAGS),
       languages: languages.length ? languages : list(r.languagecodes, MAX_LANGUAGES),
       codec,
@@ -204,6 +212,7 @@ export function parseStation(
       homepage,
       last_check_ok: r.lastcheckok === 1 || r.lastcheckok === true,
       last_checked_at: isoOrNull(r.lastchecktime_iso8601),
+      ...(check ?? {}),
     },
     // Every tag counts for matching, not only the ones listed.
     haystack: fold(
@@ -234,7 +243,8 @@ function directoryFailure(err: unknown): ToolOutput {
 function stationPhrase(s: RadioStation): string {
   const fmt = s.codec ? `, ${s.codec}${s.bitrate_kbps ? ` ${s.bitrate_kbps} kbps` : ''}` : '';
   const how = s.hls ? ', HLS' : s.https ? '' : ', http only';
-  return `${s.name} (${s.distance_km} km ${s.direction}${fmt}${how})`;
+  const check = s.check ? `, check: ${s.check}` : '';
+  return `${s.name} (${s.distance_km} km ${s.direction}${fmt}${how}${check})`;
 }
 
 export interface RadioToolDeps extends PointDeps {
@@ -251,18 +261,20 @@ export function radioStationTools(deps: RadioToolDeps): ToolDef[] {
   const name = 'radio_stations_near';
   const def: ToolDef = {
     name,
-    title: 'Radio stations near a point (Radio Browser directory)',
+    title: 'Radio stations near a place (Radio Browser directory)',
     description:
-      "Internet radio stations near a point from the public Radio Browser community directory, nearest first: name, distance and bearing, state/region and country, tags, languages, codec and bitrate, whether the stream is https or HLS, the stream URL, the homepage, and whether the directory last found it working. Finds small local stations (public, college, community, news and talk) that the popularity-based find_radio_stations catalog leaves out. Only stations whose directory entry has coordinates appear, and names, tags and places are community-entered (sometimes wrong). Claude cannot listen to the audio; the user can play the stream (on the God's Eye View globe only https MP3/AAC streams that are not HLS play). Point: lat/lon or here: true (the exact position is never sent: the directory is asked about a nearby grid point).",
+      "Radio stations near a place or the user: internet radio stations around a point from the public Radio Browser community directory, nearest first, including small local stations (public, college, community, news and talk). For popular stations worldwide by genre or name, use find_radio_stations instead. Each station: name, distance and bearing, state/region and country, tags, languages, codec and bitrate, whether the stream is https or HLS, the stream URL, the homepage, and whether the directory last found it working. Only stations whose directory entry has coordinates appear, and names, tags and places are community-entered (sometimes wrong). Claude cannot listen to the audio; the user can play the stream (on the God's Eye View globe only https MP3/AAC streams that are not HLS play). Point: lat/lon (for a place name, get its coordinates with geocode_place first) or here: true (the exact position is never sent: the directory is asked about a nearby grid point).",
     source: 'gateway',
     family: 'radio',
+    // Not "station": "weather stations near me" and "fire stations nearby" are not radio questions.
+    nearIntent: { topic: ['radio', 'fm', 'am'] },
     inputSchema: jsonSchema(schema),
+    // No place words ("nearby") or bare "stations": nearIntent answers radio questions for a place.
     tags: [
       'radio',
       'radio station',
       'radio stations',
       'local radio',
-      'stations near me',
       'fm',
       'am',
       'internet radio',
@@ -365,6 +377,8 @@ export function radioStationTools(deps: RadioToolDeps): ToolDef[] {
         parts.push(
           `The directory has more stations with coordinates in range than one answer holds: only its ${SEARCH_LIMIT} most-played were checked (by its 24 h click count), so a less popular station nearby can be missing; a smaller radius helps.`,
         );
+      const flagged = listed.filter((st) => st.check).length;
+      if (flagged) parts.push(mismatchNote(flagged, 'data.stations[].check_detail'));
       parts.push(
         'Only stations whose directory entry has coordinates appear (some well-known stations have none); names, tags and places are community-entered and can be wrong.',
       );

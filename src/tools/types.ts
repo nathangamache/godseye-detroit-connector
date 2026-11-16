@@ -53,6 +53,13 @@ export interface ToolDef {
   /** Untrusted third-party text (radio transcripts, news) may appear in the output. */
   untrustedText?: boolean;
   /**
+   * The tool answers its topic for a place (radio stations near a point): find_tools ranks it
+   * above the other tools on that topic when a query asks about a place ("near me", "around
+   * here", "local", "in Lansing") and has one of the topic's words. Only words that name the
+   * topic ("radio", "fm"), not a word its name shares with other topics ("stations").
+   */
+  nearIntent?: { topic: readonly string[] };
+  /**
    * Set when the tool needs an API key that is not configured: find_tools lists it as OFF with
    * the key, and run_tool answers a normal result with status not_configured (nothing fetched).
    */
