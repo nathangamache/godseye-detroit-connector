@@ -1219,6 +1219,32 @@ describe('exit and route labels', () => {
       expect(roadText(t)).toBe(t);
   });
 
+  it("leaves another state's SR-<n> and State Highway <n> alone in a Michigan text", () => {
+    const mi = { michigan: true };
+    // Named by the state, written out or as its postal code: that state's route, not M-<n>.
+    for (const t of [
+      'Ohio SR-2',
+      'OH SR 2',
+      'OHIO SR 2',
+      'Indiana SR 912',
+      'IN SR-912',
+      'Kentucky SR 9',
+      'PA SR 8',
+      'detour via Ohio SR 51',
+      'OH State Highway 2',
+      'IN State Hwy 912',
+      'ohio state highway 2',
+    ])
+      expect(roadText(t, mi)).toBe(t);
+    // Only that one route: a Michigan one beside it is still M-<n>.
+    expect(roadText('SR-99 to Ohio SR-2', mi)).toBe('M-99 to Ohio SR-2');
+    expect(roadText('State Highway 99, then OH SR 2', mi)).toBe('M-99, then OH SR 2');
+    // "in" is a word, not Indiana; a state code needs capitals.
+    expect(roadText('Lane closed in SR 99', mi)).toBe('Lane closed in M-99');
+    expect(roadText('Lane closed in State Highway 99', mi)).toBe('Lane closed in M-99');
+    expect(roadText('Detour via Oh SR 99', mi)).toBe('Detour via Oh M-99');
+  });
+
   it('tells Michigan from Ontario, Ohio and Indiana', () => {
     expect(inMichigan([DETROIT.lon, DETROIT.lat])).toBe(true);
     expect(inMichigan([COMERICA_PARK.lon, COMERICA_PARK.lat])).toBe(true);
