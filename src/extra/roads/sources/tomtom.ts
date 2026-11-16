@@ -27,6 +27,7 @@ import { ATTRIBUTION as GEO_ATTRIBUTION } from '../geocode.js';
 import {
   clampBox,
   clampToWorld,
+  inMichigan,
   lineMidpoint,
   round6,
   travelDirection,
@@ -110,9 +111,16 @@ export function parseTomTom(j: unknown, roadAt?: RoadAt): RoadItem[] {
       .map((e) => cleanText((e as { description?: unknown })?.description, 120))
       .filter(Boolean)
       .join('; ');
-    // "M-14" and "MI-14" are one route: each number once, in the Michigan form.
+    // "M-10", "MI-10" (and in Michigan "SR-10") are one route: each number once, in the
+    // Michigan form.
+    const mid = lineMidpoint(line);
+    const michigan = inMichigan([mid.lon, mid.lat]);
     const roads = Array.isArray(p.roadNumbers)
-      ? [...new Set(p.roadNumbers.map((r) => roadText(cleanText(r, 20))).filter(Boolean))]
+      ? [
+          ...new Set(
+            p.roadNumbers.map((r) => roadText(cleanText(r, 20), { michigan })).filter(Boolean),
+          ),
+        ]
           .slice(0, 4)
           .join(' / ')
       : '';

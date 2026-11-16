@@ -23,6 +23,66 @@ export const MICHIGAN: BBox = [-90.5, 41.6, -82.1, 48.4];
 /** Everything a road-only search covers: SE Michigan plus Windsor/Essex. */
 export const COVERAGE: BBox = [-84.2, 41.6, -82.3, 43.2];
 
+/**
+ * Michigan's Lower Peninsula, coarsely (GeoJSON order): the Indiana and Ohio lines in the south,
+ * the international border along the Detroit River, Lake St. Clair and the St. Clair River in
+ * the east (within a few hundred metres), open water elsewhere. Only for telling a Michigan
+ * place from one in Ontario, Ohio, Indiana or Wisconsin; the Upper Peninsula is left out, so a
+ * place there is not taken for Michigan (texts about it are left as they are).
+ */
+const LOWER_MICHIGAN: LonLat[] = [
+  [-87.0, 41.76],
+  [-84.806, 41.76],
+  [-84.806, 41.7],
+  [-83.454, 41.733],
+  [-83.1, 41.9],
+  [-83.14, 42.03],
+  [-83.13, 42.1],
+  [-83.125, 42.15],
+  [-83.125, 42.24],
+  [-83.103, 42.282],
+  [-83.074, 42.311],
+  [-83.045, 42.3235],
+  [-83.02, 42.328],
+  [-82.975, 42.331],
+  [-82.94, 42.35],
+  [-82.65, 42.5],
+  [-82.53, 42.58],
+  [-82.515, 42.62],
+  [-82.483, 42.72],
+  [-82.47, 42.83],
+  [-82.455, 42.91],
+  [-82.42, 42.95],
+  [-82.415, 42.985],
+  [-82.42, 43.01],
+  [-82.3, 43.3],
+  [-82.4, 44.2],
+  [-83.4, 45.5],
+  [-84.0, 45.835],
+  [-85.2, 45.835],
+  [-85.8, 45.5],
+  [-86.3, 45.0],
+  [-86.6, 44.0],
+  [-86.9, 43.0],
+];
+
+/** Even-odd ray test: is p inside the ring (GeoJSON order)? */
+function inRing(p: LonLat, ring: LonLat[]): boolean {
+  const [x, y] = p;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** In Michigan's Lower Peninsula (LOWER_MICHIGAN): not Windsor, Sarnia, Toledo or Wisconsin. */
+export function inMichigan(p: LonLat): boolean {
+  return inBox(p, MICHIGAN) && inRing(p, LOWER_MICHIGAN);
+}
+
 export function bboxAround(p: Point, radiusKm: number): BBox {
   const { dLat, dLon } = degreeBox(p.lat, radiusKm * 1000);
   return [p.lon - dLon, p.lat - dLat, p.lon + dLon, p.lat + dLat];

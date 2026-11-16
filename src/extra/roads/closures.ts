@@ -7,6 +7,7 @@ import { errorText, localDay } from './http.js';
 import {
   distanceToLinesM,
   inBox,
+  inMichigan,
   intersects,
   lineLengthM,
   lineMidpoint,
@@ -64,11 +65,26 @@ export interface RoadItem {
 /** found: road is the lookup's answer; none: nothing in range; failed: the lookup errored. */
 export type RoadLookup = 'found' | 'none' | 'failed';
 
+/**
+ * The item is about a place in Michigan: the Michigan-only sources' items, and any other
+ * source's (TomTom's) whose line lies in Michigan (not Windsor, Sarnia or Toledo).
+ */
+function inMichiganItem(it: Pick<RoadItem, 'source' | 'lines'>): boolean {
+  if (it.source === 'mdot_ride' || it.source === 'detroit_row') return true;
+  if (it.source === 'ontario511') return false;
+  const line = it.lines.find((l) => l.length);
+  if (!line) return false;
+  const m = lineMidpoint(line);
+  return inMichigan([m.lon, m.lat]);
+}
+
 /** Looks up the road of an item its source gave none, and says how that went. */
 export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<void> {
   if (it.road || !it.resolveRoad) return;
   try {
-    const name = roadText(cleanText(await it.resolveRoad(signal), 120));
+    const name = roadText(cleanText(await it.resolveRoad(signal), 120), {
+      michigan: inMichiganItem(it),
+    });
     it.road = name;
     it.roadLookup = name ? 'found' : 'none';
   } catch {
@@ -78,16 +94,18 @@ export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<voi
 
 /**
  * One spelling of exits and Michigan routes across sources ("exit 50", "M-10"): roadText, with
- * cross streets read mid-sentence ("between exit 50 and …").
+ * cross streets read mid-sentence ("between exit 50 and …") and Michigan's own forms only for
+ * items in Michigan.
  */
 function tidy(it: RoadItem): RoadItem {
-  const cross = { midSentence: true };
+  const michigan = inMichiganItem(it);
+  const cross = { michigan, midSentence: true };
   return {
     ...it,
-    road: roadText(it.road),
+    road: roadText(it.road, { michigan }),
     from_cross_street: roadText(it.from_cross_street, cross),
     to_cross_street: roadText(it.to_cross_street, cross),
-    description: roadText(it.description),
+    description: roadText(it.description, { michigan }),
   };
 }
 

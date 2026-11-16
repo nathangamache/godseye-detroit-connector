@@ -52,25 +52,41 @@ export function clipWords(s: string, max: number): string {
 
 export interface RoadTextOptions {
   /**
+   * The text is about a place in Michigan: a state highway written "State Highway 10",
+   * "State Hwy 10" or "SR-10" is the trunkline M-10. Elsewhere those are another state's
+   * routes and are left alone.
+   */
+  michigan?: boolean;
+  /**
    * The text is always read mid-sentence (a cross street: "between exit 50 and Main St"),
    * so an exit is "exit 50" even at its very start.
    */
   midSentence?: boolean;
 }
 
+/** Neighbouring states whose own "State Highway <n>" a Michigan text may name. */
+const OTHER_STATE = String.raw`(?<!\b(?:Ohio|Indiana|Illinois|Wisconsin|Kentucky|Pennsylvania|Minnesota)\s+)`;
+const STATE_HIGHWAY = new RegExp(
+  String.raw`${OTHER_STATE}\b(?:Michigan\s+)?State\s+(?:Highway|Hwy\.?)\s+(?:M[- ]?)?(\d{1,3}[A-Z]?)\b`,
+  'gi',
+);
+
 /**
  * Road labels as people write them in Michigan, one way across sources:
  *   - "exit [20]" (an exit number in brackets, as some feeds give it) -> "exit 20";
  *   - an exit is "exit 50" mid-sentence ("Closed between I-94 and exit 50"); "Exit 50" only
  *     where a sentence starts (the text's start, or after ". "), unless midSentence;
- *   - a state trunkline written "MI-14" -> "M-14", the Michigan form. Only "MI-<number>" is
- *     changed: I-, US- and other states' routes are left alone.
+ *   - a state trunkline written "MI-14" -> "M-14", the Michigan form;
+ *   - with michigan, "State Highway 10", "State Hwy 10" and "SR-10" -> "M-10".
+ * I-, US- and other states' routes are left alone.
  */
 export function roadText<T extends string | null>(s: T, o: RoadTextOptions = {}): T {
   if (!s) return s;
-  const t = s
+  let t = s
     .replace(/\b(exit)\s*\[\s*([0-9]{1,3}[A-Za-z]?)\s*\]/gi, '$1 $2')
     .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1');
+  if (o.michigan)
+    t = t.replace(STATE_HIGHWAY, 'M-$1').replace(/\bSR[- ]?(\d{1,3}[A-Z]?)\b/g, 'M-$1');
   // "Exit 50" -> "exit 50", except where a sentence starts. "EXIT 50" (shouted text) stays.
   return t.replace(/\bExit(s?)(?=\s+\d)/g, (m: string, plural: string, at: number, all: string) =>
     !o.midSentence && /(?:^|[.!?]\s+)$/.test(all.slice(0, at)) ? m : `exit${plural}`,

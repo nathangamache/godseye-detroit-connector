@@ -9,7 +9,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Audit } from '../src/audit.js';
 import type { LocationStore } from '../src/location/store.js';
-import { bboxAreaKm2, decodePolyline, type LonLat } from '../src/extra/roads/geo.js';
+import { bboxAreaKm2, decodePolyline, inMichigan, type LonLat } from '../src/extra/roads/geo.js';
 import { loadConfig } from '../src/config.js';
 import { ClosureService, toPublic, type RoadItem } from '../src/extra/roads/closures.js';
 import { mergeDirections } from '../src/extra/roads/merge.js';
@@ -1001,6 +1001,101 @@ describe('exit and route labels', () => {
       'Exiting 5',
     ])
       expect(roadText(t)).toBe(t);
+  });
+
+  it('writes a Michigan state highway as M-<n>, for places in Michigan only', () => {
+    const mi = { michigan: true };
+    expect(roadText('State Highway 99', mi)).toBe('M-99');
+    expect(roadText('State Hwy 99 W', mi)).toBe('M-99 W');
+    expect(roadText('State Hwy. 99', mi)).toBe('M-99');
+    expect(roadText('STATE HIGHWAY 99', mi)).toBe('M-99');
+    expect(roadText('Michigan State Highway 99', mi)).toBe('M-99');
+    expect(roadText('SR-99 at State Highway 98', mi)).toBe('M-99 at M-98');
+    expect(roadText('SR 99', mi)).toBe('M-99');
+    // Interstates, US routes and other states' routes stay as they are.
+    for (const t of [
+      'I-94',
+      'US-12',
+      'US Highway 12',
+      'Interstate Highway 94',
+      'Ohio State Highway 2',
+      'OH-2',
+      'IN-912',
+      'Hwy 401',
+      'Detroit, MI 48202',
+    ])
+      expect(roadText(t, mi)).toBe(t);
+    // Not known to be in Michigan: "State Highway" and "SR-" may be another state's.
+    for (const t of ['State Highway 99', 'State Hwy 99', 'SR-99', 'SR 2'])
+      expect(roadText(t)).toBe(t);
+  });
+
+  it('tells Michigan from Ontario, Ohio and Indiana', () => {
+    expect(inMichigan([DETROIT.lon, DETROIT.lat])).toBe(true);
+    expect(inMichigan([COMERICA_PARK.lon, COMERICA_PARK.lat])).toBe(true);
+    expect(inMichigan([WINDSOR_CITY_HALL.lon, WINDSOR_CITY_HALL.lat])).toBe(false);
+    // City centres: Lansing and Port Huron (Michigan); Sarnia (Ontario), across the river from
+    // Port Huron; Toledo (Ohio); South Bend (Indiana).
+    expect(inMichigan([-84.5555, 42.7325])).toBe(true);
+    expect(inMichigan([-82.4249, 42.9709])).toBe(true);
+    expect(inMichigan([-82.4066, 42.9745])).toBe(false);
+    expect(inMichigan([-83.5379, 41.6528])).toBe(false);
+    expect(inMichigan([-86.252, 41.6764])).toBe(false);
+  });
+
+  it('writes "State Highway 98" next to M-99 as M-98 in Michigan, not in Ontario or Ohio', async () => {
+    const at = (id: string, p: { lat: number; lon: number }, extra: Record<string, unknown>) => {
+      const f = unnamedClosure(
+        id,
+        [
+          [p.lon, p.lat],
+          [p.lon, p.lat + 0.002],
+        ],
+        'State Highway 98',
+        'Exit 50',
+      );
+      Object.assign(f.properties as Record<string, unknown>, extra);
+      return f;
+    };
+    const desc = { events: [{ description: 'Closed between SR-98 and Exit 50', code: 401 }] };
+    const TOLEDO = { lat: 41.6528, lon: -83.5379 };
+    const x = h(
+      { ...TT_ONLY, DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          [
+            /api\.tomtom\.com/,
+            () =>
+              json({
+                incidents: [
+                  at('tt-mi', DETROIT, { roadNumbers: ['M-99', 'SR-99'], ...desc }),
+                  at('tt-on', WINDSOR_CITY_HALL, { roadNumbers: ['SR-3'], ...desc }),
+                  at('tt-oh', TOLEDO, { roadNumbers: ['SR-2'], ...desc }),
+                ],
+              }),
+          ],
+        ],
+      },
+    );
+    const near = itemsOf(await x.run('road_closures', { ...DETROIT, radius_km: 10 }));
+    const mi = near.find((i) => i.road === 'M-99')!;
+    expect(mi).toMatchObject({
+      from_cross_street: 'M-98',
+      to_cross_street: 'exit 50',
+      description: 'Closed between M-98 and exit 50',
+    });
+    expect(mi.text).toBe(
+      'M-99: road closed between M-98 and exit 50 (northbound, 0 km away, TomTom incidents)',
+    );
+    // Windsor and Toledo: other jurisdictions' names stay; exits are still "exit 50".
+    const on = near.find((i) => i.road === 'SR-3')!;
+    expect(on).toMatchObject({
+      from_cross_street: 'State Highway 98',
+      to_cross_street: 'exit 50',
+      description: 'Closed between SR-98 and exit 50',
+    });
+    const oh = itemsOf(await x.run('road_closures', { ...TOLEDO, radius_km: 5 }));
+    expect(oh.map((i) => [i.road, i.from_cross_street])).toEqual([['SR-2', 'State Highway 98']]);
   });
 
   it('lists a TomTom freeway incident with plain exit numbers and one form of each route', async () => {
