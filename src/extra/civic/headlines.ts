@@ -661,7 +661,6 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
         'media',
         'gdelt',
         'stories',
-        'public radio news',
       ],
       attribution: headlinesAttribution(feeds.feeds),
       async run(a, ctx): Promise<ToolOutput> {

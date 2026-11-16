@@ -5,6 +5,8 @@
 export interface ToolMeta {
   tags: string[];
   attribution?: string;
+  /** Replaces a GEV tool's own description, where two tools need telling apart. */
+  description?: string;
 }
 
 /** find_tools catalog categories, in display order. "other" holds anything uncategorised. */
@@ -299,9 +301,31 @@ export const TOOL_META: Record<string, ToolMeta> = {
     tags: ['alpr', 'license plate reader', 'flock', 'anpr', 'plate camera', 'surveillance'],
     attribution: OSM,
   },
+  // GEV's catalog of popular stations; radio_stations_near (gateway) answers "near a place".
   find_radio_stations: {
-    tags: ['radio', 'stream', 'station', 'am', 'fm', 'news radio', 'scanner stream', 'listen'],
+    tags: [
+      'radio',
+      'stream',
+      'station',
+      'am',
+      'fm',
+      'listen',
+      'popular stations',
+      'internet radio',
+      'worldwide',
+      'international',
+      'genre',
+      'jazz',
+      'classical',
+      'rock',
+      'pop',
+      'language',
+      'spanish',
+      'station name',
+    ],
     attribution: 'Radio Browser',
+    description:
+      "Popular internet radio stations worldwide by genre, name, language or country, from a directory of the most popular Radio Browser stations (not every station). For stations near a place or the user, use radio_stations_near: it asks the directory about the area itself, so small local stations appear. Each result includes the broadcaster's public stream URL.",
   },
   search_places: {
     tags: ['search', 'find place', 'business', 'poi', 'address', 'landmark', 'where is'],

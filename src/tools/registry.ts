@@ -36,7 +36,7 @@ export class ToolRegistry {
       this.tools.set(t.name, {
         name: t.name,
         title: t.title ?? (t.annotations?.title as string | undefined),
-        description: t.description ?? t.name,
+        description: meta.description ?? t.description ?? t.name,
         source: 'gev',
         family: 'gev',
         inputSchema: t.inputSchema,

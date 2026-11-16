@@ -6,6 +6,10 @@
  * counts half, and a word of three letters or fewer only as a whole word, so "air" in "airfield"
  * is not a match. Hits far weaker than the best one are dropped: a lone word in a tag ("air" in
  * "air base") does not make a military-bases tool the second answer to "air_quality".
+ *
+ * A query about a place ("near me", "around here", "local", "in Lansing") lifts the tools marked
+ * nearIntent above those sharing their topic, but only when the query also names their topic (a
+ * word of their name): "radio stations near me" is radio_stations_near, "news near me" is not.
  */
 import MiniSearch from 'minisearch';
 import { categoryFor } from './tags.js';
@@ -107,6 +111,48 @@ export const FIELD_WEIGHT = {
 type Field = keyof typeof FIELD_WEIGHT;
 const FIELDS = Object.keys(FIELD_WEIGHT) as Field[];
 
+/**
+ * What a place in the query adds to a nearIntent tool that shares a word of its name: as much as
+ * a word of its name, so it outweighs one tag word of a tool on the same topic ("jazz").
+ */
+export const NEAR_BONUS = 4;
+
+/** Words that ask about a place (some are stop words, so the index never sees them). */
+const PLACE_WORDS =
+  /\b(near|nearby|nearest|around|close to|closest|local|locally|here|my area|this area|the area|in town|where i am)\b/i;
+/** "in Lansing", "at Belle Isle": a capitalised name after in/at. */
+const IN_PLACE = /\b(?:in|at)\s+(\p{Lu}[\p{L}'.-]*)/gu;
+/** Capitalised words after "in" that are not places ("radio in Spanish"). */
+const NOT_PLACES = new Set([
+  'spanish',
+  'english',
+  'french',
+  'german',
+  'arabic',
+  'chinese',
+  'japanese',
+  'korean',
+  'italian',
+  'portuguese',
+  'russian',
+  'polish',
+  'hindi',
+  'urdu',
+  'greek',
+  'dutch',
+  'hd',
+  'stereo',
+  'mp3',
+  'aac',
+]);
+
+/** Whether a query asks about a place rather than a kind of thing. */
+export function asksAboutPlace(query: string): boolean {
+  if (PLACE_WORDS.test(query)) return true;
+  for (const m of query.matchAll(IN_PLACE)) if (!NOT_PLACES.has(m[1]!.toLowerCase())) return true;
+  return false;
+}
+
 /** A query word that only begins a longer word counts this share (and needs 4+ letters). */
 const PREFIX_SHARE = 0.5;
 const MIN_PREFIX = 4;
@@ -124,6 +170,7 @@ export class ToolSearch {
   private index = this.makeIndex();
   private tools = new Map<string, ToolDef>();
   private profiles = new Map<string, Profile>();
+  private near = new Set<string>();
 
   private makeIndex() {
     return new MiniSearch<Doc>({
@@ -142,6 +189,7 @@ export class ToolSearch {
   rebuild(tools: ToolDef[]): void {
     this.index = this.makeIndex();
     this.tools = new Map(tools.map((t) => [t.name, t]));
+    this.near = new Set(tools.filter((t) => t.nearIntent).map((t) => t.name));
     const docs: Doc[] = tools.map((t) => {
       const category = categoryFor(t.name, t.source);
       return {
@@ -173,13 +221,18 @@ export class ToolSearch {
 
   /**
    * What a tool's fields give a query: the sum over the query's words of each word's best
-   * field, and how many of the words it has as whole words (outside its parameters).
+   * field, how many of the words it has as whole words (outside its parameters), and whether
+   * one of them is a word of its name.
    */
-  private fieldScore(name: string, terms: string[]): { score: number; matched: number } {
+  private fieldScore(
+    name: string,
+    terms: string[],
+  ): { score: number; matched: number; inName: boolean } {
     const p = this.profiles.get(name);
-    if (!p) return { score: 0, matched: 0 };
+    if (!p) return { score: 0, matched: 0, inName: false };
     let score = 0;
     let matched = 0;
+    const inName = terms.some((t) => p.name.has(t));
     for (const term of terms) {
       let best = 0;
       let counts = false;
@@ -203,7 +256,7 @@ export class ToolSearch {
       score += best;
       if (counts) matched++;
     }
-    return { score, matched };
+    return { score, matched, inName };
   }
 
   search(query: string, limit: number, filter: (t: ToolDef) => boolean = () => true): SearchHit[] {
@@ -221,11 +274,13 @@ export class ToolSearch {
       .filter((h) => h.tool && filter(h.tool));
     if (!raw.length) return [];
     const topBm25 = Math.max(...raw.map((h) => h.bm25));
+    const place = asksAboutPlace(q);
     // Field matches rank; BM25 (at most 1 point) only orders hits the fields score alike.
     const scored = raw
       .map((h) => {
         const f = this.fieldScore(h.tool.name, terms);
-        return { tool: h.tool, score: f.score + h.bm25 / topBm25, matched: f.matched };
+        const near = place && f.inName && this.near.has(h.tool.name) ? NEAR_BONUS : 0;
+        return { tool: h.tool, score: f.score + near + h.bm25 / topBm25, matched: f.matched };
       })
       .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
     const best = scored[0]!;

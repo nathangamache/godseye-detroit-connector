@@ -44,7 +44,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `dpd_calls_near` | gateway (civic) | Detroit police 911 calls near a point (official, a few hours late) | none |
 | `transit_vehicles_near` | gateway (civic) | live SMART buses and alerts near a point | `SWIFTLY_API_KEY` (listed as OFF, answering `not_configured`, without) |
 | `local_headlines` | gateway (civic) | recent local headlines for a place or point from local newsrooms' feeds, plus GDELT when it answers | none (`LOCAL_NEWS_FEEDS` lists the feeds) |
-| `radio_stations_near` | gateway (radio) | internet radio stations near a point or the phone from the Radio Browser directory, nearest first: distance and bearing, tags, languages, codec, https/HLS, stream URL and homepage (Claude can't listen; on the globe only https MP3/AAC non-HLS streams play) | none |
+| `radio_stations_near` | gateway (radio) | internet radio stations near a point or the phone from the Radio Browser directory (`find_tools` ranks it first for radio questions about a place: "near me", "around here", "local", "in Lansing"), nearest first: distance and bearing, tags, languages, codec, https/HLS, stream URL and homepage (Claude can't listen; on the globe only https MP3/AAC non-HLS streams play) | none |
 | `weather_alerts`, `weather_forecast` | gateway (weather) | NWS alerts for a point; 12-hour or hourly forecast | none (US only) |
 | `water_levels_near` | gateway (weather) | Great Lakes, tide, stream and river gauges near a point, with flood stages | none; `USGS_API_KEY` raises USGS's low `DEMO_KEY` limits |
 | `air_quality` | gateway (weather) | AQI by pollutant and the agency forecast (EPA AirNow) | `AIRNOW_API_KEY` (listed as OFF, answering `not_configured`, without) |
@@ -63,7 +63,7 @@ them all), GEV's keys in `deploy/secrets/gev.env` (`deploy/gev/.env.example`).
 | `find_cctv_cameras`, `get_cctv_snapshot` | GEV | public traffic cameras and a current frame (no Street View fallback) | GEV; none (`ONTARIO_511_API_KEY` in GEV adds Windsor-side cameras) |
 | `vessels_in_area`, `find_vessel`, `get_vessel_track` | GEV | live AIS ships | `AISSTREAM_API_KEY` in GEV |
 | `next_satellite_pass`, `satellites_overhead`, `get_recent_launches`, `get_recent_imagery` | GEV | satellite passes, launches, recent imagery | GEV; none |
-| `get_regional_brief`, `find_radio_stations` | GEV | GDELT regional news; radio stations and streams | GEV; none |
+| `get_regional_brief`, `find_radio_stations` | GEV | GDELT regional news; popular radio stations worldwide by genre, name, language or country (the gateway's description points to `radio_stations_near` for stations near a place) | GEV; none |
 | `get_map_features`, `find_military_installations` | GEV | OpenStreetMap features and military sites | a self-hosted Overpass (`OVERPASS_UPSTREAMS` in GEV, `docs/overpass.md`) |
 | `get_terrain_height`, `find_infrastructure`, `find_submarine_cables` | GEV | terrain height, infrastructure, submarine cables | GEV; none |
 | `show_in_gods_eye_view` | GEV | a globe link for a place or view (tailnet only) | GEV; the UI origin on the tailnet |
