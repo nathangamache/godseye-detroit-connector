@@ -275,6 +275,39 @@ describe('search ranking: the two radio tools', () => {
       expect(names('what is the weather where I am')[0]).toBe('weather_alerts');
       expect(topicWords('what is the weather where I am').has('am')).toBe(false);
       expect(topicWords('where am I? AM stations').has('am')).toBe(true);
+      // Nor a time of day: a place question with "8 am" or "this am" in it keeps its own tool.
+      for (const [q, first] of [
+        ['weather near me at 8 am', 'weather_alerts'],
+        ['weather near me at 8 AM', 'weather_alerts'],
+        ['weather near me at 8:30 am', 'weather_alerts'],
+        ['weather in Lansing at 9 am', 'weather_alerts'],
+        ['weather near me at 830 am', 'weather_alerts'],
+        ['trains near me at 6 am', 'nearest_rail'],
+        ['trains near me monday am', 'nearest_rail'],
+        ['flights near me after 9 am', 'flights_near'],
+        ['flights near me in the am', 'flights_near'],
+        ['crime near me at 2 am', 'dpd_calls_near'],
+        ['incidents near me since 6 am', 'incidents_near'],
+        ['traffic near me at 7 am', 'mdot_camera_link'],
+      ])
+        expect(names(q!)[0], q).toBe(first);
+      for (const q of ['traffic near me this am', 'traffic near me early am'])
+        expect(names(q)[0], q).not.toBe('radio_stations_near');
+      for (const q of [
+        'at 8 am',
+        'at 8 AM',
+        'at 10:30 am',
+        'at 830 am',
+        'this am',
+        'monday am',
+        'in the am',
+      ])
+        expect(topicWords(q).has('am'), q).toBe(false);
+      // The band: beside a radio word.
+      for (const q of ['AM stations', 'the am band', 'am/fm', 'AM radio', 'on the AM dial'])
+        expect(topicWords(q).has('am'), q).toBe(true);
+      for (const q of ['am band stations nearby', 'where am I? AM stations here'])
+        expect(names(q)[0], q).toBe('radio_stations_near');
       expect(asksAboutPlace('stations around here')).toBe(true);
       expect(asksAboutPlace('stations in Toledo')).toBe(true);
       expect(asksAboutPlace('stations in Spanish')).toBe(false);

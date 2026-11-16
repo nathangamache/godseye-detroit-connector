@@ -267,6 +267,7 @@ export function radioStationTools(deps: RadioToolDeps): ToolDef[] {
     source: 'gateway',
     family: 'radio',
     // Not "station": "weather stations near me" and "fire stations nearby" are not radio questions.
+    // "am" counts only beside a radio word ("AM stations"), not in "where I am" or "at 8 am".
     nearIntent: { topic: ['radio', 'fm', 'am'] },
     inputSchema: jsonSchema(schema),
     // No place words ("nearby") or bare "stations": nearIntent answers radio questions for a place.

@@ -9,8 +9,10 @@
  *
  * A query about a place ("near me", "around here", "local", "in Lansing") lifts the tools marked
  * nearIntent above those sharing their topic, but only when the query also names that topic with
- * one of its words ("radio", "fm"; "stations" is weather's and fire's too): "radio stations near
- * me" is radio_stations_near; "news near me" and "weather stations near me" are not.
+ * one of its words ("radio", "fm"; "stations" is weather's and fire's too; "am" only beside a
+ * radio word, never as a time of day): "radio stations near me" and "AM stations near me" are
+ * radio_stations_near; "news near me", "weather stations near me" and "weather near me at 8 am"
+ * are not.
  */
 import MiniSearch from 'minisearch';
 import { categoryFor } from './tags.js';
@@ -118,12 +120,24 @@ const FIELDS = Object.keys(FIELD_WEIGHT) as Field[];
  */
 export const NEAR_BONUS = 4;
 
-/** "I am", "am I": the verb, never the AM band. */
-const VERB_AM = /\b(?:i\s+am|am\s+i)\b/gi;
+/** "I am", "am I": the verb; "8 am", "10:30 am": a time of day. Never the AM band. */
+const NOT_BAND_AM = /\b(?:i\s+am|am\s+i|\d{1,2}(?::\d{2})?\s*am)\b/gi;
+/**
+ * Words beside which "am" is the AM band ("AM stations", "the AM band", "AM/FM", "AM radio").
+ * Not a number: "830 am" is as often half past eight as a frequency.
+ */
+const BAND_WORDS = new Set(['radio', 'station', 'band', 'dial', 'fm']);
 
-/** The words of a query that can name a nearIntent tool's topic. */
+/**
+ * The words of a query that can name a nearIntent tool's topic. "am" counts only as the AM band,
+ * beside a band word, so neither "where I am" nor a time of day ("at 8 am", "this am", "monday
+ * am") makes a radio question of a place question.
+ */
 export function topicWords(query: string): Set<string> {
-  return new Set(words(query.replace(VERB_AM, ' ')));
+  const tokens = query.replace(NOT_BAND_AM, ' ').split(SPLIT).filter(Boolean);
+  const band = (i: number) =>
+    [tokens[i - 1], tokens[i + 1]].some((t) => t !== undefined && BAND_WORDS.has(stem(t)));
+  return new Set(tokens.flatMap((t, i) => (t.toLowerCase() === 'am' && !band(i) ? [] : words(t))));
 }
 
 /** Words that ask about a place (some are stop words, so the index never sees them). */
