@@ -13,8 +13,10 @@
  *
  * An incident on a road without a route number has no road name in the API (only roadNumbers;
  * from/to are the cross streets). Its road is then the named road nearest the incident's
- * midpoint in our own OpenStreetMap copy (the self-hosted Overpass, never an outside geocoder),
- * looked up only for the items a result shows and never cached.
+ * midpoint in our own OpenStreetMap copy (the self-hosted Overpass, never an outside geocoder):
+ * an unnamed ramp labelled from its route and destination tags, or, with nothing named nearby,
+ * the nearest freeway or ramp a little further out (Geocoder.nearestRoad; the item's note says
+ * which). Looked up only for the items a result shows and never cached.
  */
 import {
   QuotaError,
@@ -23,7 +25,7 @@ import {
   type FetchResult,
   type RoadItem,
 } from '../closures.js';
-import { ATTRIBUTION as GEO_ATTRIBUTION } from '../geocode.js';
+import { FREEWAY_RADIUS_M, ATTRIBUTION as GEO_ATTRIBUTION, type RoadMatch } from '../geocode.js';
 import {
   clampBox,
   clampToWorld,
@@ -66,8 +68,11 @@ const MAGNITUDE: Record<number, string> = {
 /** How far from the incident's midpoint the road it is on may be (OpenStreetMap lookup). */
 export const TOMTOM_ROAD_RADIUS_M = 25;
 
-/** The named road at a point, from the self-hosted Overpass (uncached), or null. */
-export type RoadAt = (p: Point, radiusM: number, signal: AbortSignal) => Promise<string | null>;
+/**
+ * The road at a point, from the self-hosted Overpass (uncached), with the rule that found it
+ * (Geocoder.nearestRoad), or null.
+ */
+export type RoadAt = (p: Point, radiusM: number, signal: AbortSignal) => Promise<RoadMatch | null>;
 
 export interface TomTomOptions {
   http: Http;
@@ -172,12 +177,24 @@ function unnamed(line: LonLat[], roadAt?: RoadAt): Partial<RoadItem> {
     };
   const mid = lineMidpoint(line);
   const within = `within ${TOMTOM_ROAD_RADIUS_M} m of the incident's midpoint`;
+  // Which rule named the road (Geocoder.nearestRoad), said in the item's note.
+  const found = (m: RoadMatch): string => {
+    const ramp = m.labelledFrom ? `an unnamed ramp, labelled from ${m.labelledFrom}` : '';
+    if (m.rule === 'named')
+      return `${none}; the road is the nearest named road in OpenStreetMap ${within}`;
+    if (m.rule === 'ramp')
+      return `${none}; the road is the nearest road in OpenStreetMap ${within}: ${ramp}`;
+    return `${none}; OpenStreetMap has no named road ${within}, so the road is the nearest freeway or ramp within ${m.radiusM} m${ramp ? `: ${ramp}` : ''}`;
+  };
   return {
-    resolveRoad: (signal) => roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal),
+    resolveRoad: async (signal) => {
+      const m = await roadAt(mid, TOMTOM_ROAD_RADIUS_M, signal);
+      return m ? { road: m.label, note: found(m) } : null;
+    },
     roadCredit: GEO_ATTRIBUTION.overpass,
     roadNote: {
       found: `${none}; the road is the nearest named road in OpenStreetMap ${within}`,
-      none: `${none}, and OpenStreetMap has no named road ${within}`,
+      none: `${none}, and OpenStreetMap has no named road ${within}, nor a freeway or ramp within ${FREEWAY_RADIUS_M} m`,
       failed: `${none}; the OpenStreetMap lookup of its road failed`,
       skipped: `${none}; not looked up in OpenStreetMap (street-name lookups are capped per call)`,
     },

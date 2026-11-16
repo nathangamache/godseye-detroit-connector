@@ -350,23 +350,172 @@ const num = (v: unknown): number | undefined => {
 const ROAD_KINDS =
   '["highway"!~"^(footway|cycleway|path|steps|service|track|pedestrian|bridleway|corridor|platform|proposed)$"]';
 
+/** A ";"-separated tag value's parts, cleaned, at most max of them. */
+function tagList(v: unknown, max: number): string[] {
+  return (cleanText(v, 120) ?? '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+/**
+ * Route numbers as signs write them: "I 94;US 12" -> ["I-94", "US-12"], "M 10 North" ->
+ * "M-10 North".
+ */
+function routeRefs(v: unknown, max: number): string[] {
+  return tagList(v, max).map((r) =>
+    r.replace(
+      /^(I|US|M)[ -]?(\d+[A-Z]?)(?=\s|$)/i,
+      (_m, a: string, n: string) => `${a.toUpperCase()}-${n}`,
+    ),
+  );
+}
+
 /** "Woodward Avenue (M-1)", "I-94", "First Street": a way's name, with its route numbers. */
 export function roadLabel(tags: Record<string, unknown>): string | null {
   const name = cleanText(tags.name, 80);
-  const refs = (cleanText(tags.ref, 60) ?? '')
-    .split(';')
-    .map((r) =>
-      r
-        .trim()
-        .replace(
-          /^(I|US|M)[ -]?(\d+[A-Z]?)$/i,
-          (_m, a: string, n: string) => `${a.toUpperCase()}-${n}`,
-        ),
-    )
-    .filter(Boolean)
-    .slice(0, 3);
+  const refs = routeRefs(tags.ref, 3);
   if (name && refs.length) return `${name} (${refs.join(' / ')})`;
   return name ?? (refs.length ? refs.join(' / ') : null);
+}
+
+/** Ramps (highway=*_link): most have no name, only route and destination tags. */
+const LINK = /_link$/;
+/** Freeways and their ramps: looked for further out when no named road is near a point. */
+const FREEWAY = /^(motorway|trunk)$|_link$/;
+
+/**
+ * How far from a point nearestRoad looks for a freeway or a ramp when no named road is within
+ * the radius asked for (a closure on a ramp can be drawn a little off OpenStreetMap's ramp).
+ */
+export const FREEWAY_RADIUS_M = 60;
+
+/** The roads a ramp joins: at its start and its end, or (direction unknown) at either end. */
+export interface RampEnds {
+  from?: string | null;
+  to?: string | null;
+  /** The ramp's direction is not known: the roads at its two ends, in no order. */
+  either?: string[];
+}
+
+/** What a ramp's label was made from, for the note that says so. */
+function basisText(basis: string[]): string {
+  const tags = basis.filter((b) => b !== 'roads');
+  const parts = tags.length ? [`its ${tags.join(' and ')} tag${tags.length > 1 ? 's' : ''}`] : [];
+  if (basis.includes('roads')) parts.push('the roads it joins');
+  return parts.join(' and ');
+}
+
+/**
+ * A ramp's label from its OpenStreetMap tags, as most ramps have no name: its own route number
+ * (ref) or exit number (junction:ref), and where it goes (destination:ref, destination:street,
+ * else the road at its end, else destination), with the road at its start when known:
+ * "M-10 ramp (to I-94 East)", "ramp from Main Street to M-10", "exit 50 ramp (to Main
+ * Street)". Null when nothing says which ramp it is. `labelledFrom` says what the label uses.
+ */
+export function rampLabel(
+  tags: Record<string, unknown>,
+  ends: RampEnds = {},
+): { label: string; labelledFrom: string } | null {
+  const basis: string[] = [];
+  const ref = routeRefs(tags.ref, 2);
+  const exit = cleanText(tags['junction:ref'], 12);
+  let head = 'ramp';
+  if (ref.length) {
+    head = `${ref.join(' / ')} ramp`;
+    basis.push('ref');
+  } else if (exit && /^\d{1,3}[A-Za-z]?$/.test(exit)) {
+    head = `exit ${exit} ramp`;
+    basis.push('junction:ref');
+  }
+  const toRef = routeRefs(tags['destination:ref'], 2);
+  const toStreet = tagList(tags['destination:street'], 2);
+  const toPlace = tagList(tags.destination, 2);
+  let to: string | undefined;
+  let joins = false;
+  if (toRef.length) {
+    to = toRef.join(' / ');
+    basis.push('destination:ref');
+  } else if (toStreet.length) {
+    to = toStreet.join(' / ');
+    basis.push('destination:street');
+  } else if (ends.to) {
+    to = ends.to;
+    joins = true;
+  } else if (toPlace.length) {
+    to = toPlace.join(' / ');
+    basis.push('destination');
+  }
+  const from = ends.from && ends.from !== to ? ends.from : undefined;
+  if (from) joins = true;
+  let tail = [from && `from ${from}`, to && `to ${to}`].filter(Boolean).join(' ');
+  // Direction unknown: the roads at its ends, unordered (only when the tags say nothing).
+  const either = [...new Set(ends.either ?? [])].slice(0, 2);
+  if (!tail && either.length) {
+    tail = either.length > 1 ? `between ${either[0]} and ${either[1]}` : `at ${either[0]}`;
+    joins = true;
+  }
+  if (joins) basis.push('roads');
+  if (!tail && head === 'ramp') return null;
+  const label = !tail ? head : head === 'ramp' ? `ramp ${tail}` : `${head} (${tail})`;
+  return { label, labelledFrom: basisText(basis) };
+}
+
+/** The way a ramp is drawn: 1 forward, -1 backward, 0 not known (OpenStreetMap's oneway rules). */
+function rampDirection(tags: Record<string, unknown>): 1 | -1 | 0 {
+  const ow = typeof tags.oneway === 'string' ? tags.oneway : undefined;
+  if (ow === 'yes' || ow === 'true' || ow === '1') return 1;
+  if (ow === '-1' || ow === 'reverse') return -1;
+  if (ow === 'no') return 0;
+  // A motorway ramp is one-way, in the direction it is drawn, unless tagged otherwise.
+  return tags.highway === 'motorway_link' ? 1 : 0;
+}
+
+/** A road nearestRoad found, and which of its rules found it. */
+export interface RoadMatch {
+  label: string;
+  /**
+   * named: the nearest named (or numbered) road within the radius asked for; ramp: the nearest
+   * road within it is an unnamed ramp, labelled from its tags (rampLabel); freeway: no named
+   * road within the radius, so the nearest freeway or ramp within FREEWAY_RADIUS_M.
+   */
+  rule: 'named' | 'ramp' | 'freeway';
+  /** The radius the rule searched. */
+  radiusM: number;
+  /** A ramp's label: what it was made from ("its destination:ref tag and the roads it joins"). */
+  labelledFrom?: string;
+}
+
+interface NearWay {
+  tags: Record<string, unknown>;
+  geom: LonLat[];
+  d: number;
+}
+
+const sameVertex = (a: LonLat, b: LonLat) =>
+  Math.abs(a[0] - b[0]) < 1e-7 && Math.abs(a[1] - b[1]) < 1e-7;
+
+/**
+ * The roads (not other ramps) a ramp starts and ends on, among the ways fetched with it: ways
+ * that share the ramp's first or last vertex.
+ */
+function rampEnds(ramp: NearWay, ways: NearWay[]): RampEnds {
+  const at = (v: LonLat): string | null => {
+    for (const w of ways) {
+      if (w === ramp || LINK.test(String(w.tags.highway ?? ''))) continue;
+      if (!w.geom.some((g) => sameVertex(g, v))) continue;
+      const label = roadLabel(w.tags);
+      if (label) return label;
+    }
+    return null;
+  };
+  const first = at(ramp.geom[0]!);
+  const last = at(ramp.geom[ramp.geom.length - 1]!);
+  const dir = rampDirection(ramp.tags);
+  if (dir === 1) return { from: first, to: last };
+  if (dir === -1) return { from: last, to: first };
+  return { either: [first, last].filter((s): s is string => Boolean(s)) };
 }
 
 function wayGeometry(wy: Record<string, unknown>): LonLat[] {
@@ -653,28 +802,56 @@ export class Geocoder {
   }
 
   /**
-   * The named road nearest a point, within radiusM, from the self-hosted Overpass only (our own
-   * OpenStreetMap copy; never an outside geocoder) and never cached: the point may come from a
-   * source whose data must not be stored (TomTom). Null without Overpass or a road in range.
+   * The road nearest a point, from the self-hosted Overpass only (our own OpenStreetMap copy;
+   * never an outside geocoder) and never cached: the point may come from a source whose data
+   * must not be stored (TomTom). In order (RoadMatch.rule):
+   *   1. named: the nearest road within radiusM with a name or route number;
+   *   2. ramp: that nearest road is a ramp with no name, labelled from its tags (rampLabel);
+   *   3. freeway: nothing named within radiusM, so the nearest freeway or ramp within
+   *      FREEWAY_RADIUS_M (closures on ramps sit between a local road and the freeway).
+   * One query: the ways within reach, and the roads the ramps among them join (for "from
+   * Main Street to M-10"). Null without Overpass or a road in range.
    */
-  async nearestRoad(p: Point, radiusM: number, signal?: AbortSignal): Promise<string | null> {
+  async nearestRoad(p: Point, radiusM: number, signal?: AbortSignal): Promise<RoadMatch | null> {
     if (!this.o.overpassUrl) return null;
-    const at = `around:${Math.round(radiusM)},${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+    const wideM = Math.max(radiusM, FREEWAY_RADIUS_M);
+    const pt = `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+    const at = `around:${Math.round(radiusM)},${pt}`;
+    const far = `around:${Math.round(wideM)},${pt}`;
     const els = await this.overpass(
-      `[out:json][timeout:10];(way(${at})["highway"]${ROAD_KINDS}["name"];way(${at})["highway"]${ROAD_KINDS}["ref"];);out tags geom;`,
+      `[out:json][timeout:10];(way(${at})["highway"]${ROAD_KINDS}["name"];way(${at})["highway"]${ROAD_KINDS}["ref"];way(${far})["highway"~"${FREEWAY.source}"];)->.near;way.near["highway"~"${LINK.source}"]->.links;node(w.links)->.ln;way(bn.ln)["highway"]${ROAD_KINDS}->.joined;(.near;.joined;);out tags geom;`,
       signal,
       12_000,
     );
-    let best: { d: number; label: string } | undefined;
+    const ways: NearWay[] = [];
     for (const wy of els) {
       if (wy.type !== 'way') continue;
-      const label = roadLabel((wy.tags ?? {}) as Record<string, unknown>);
       const geom = wayGeometry(wy);
-      if (!label || !geom.length) continue;
-      const d = distanceToLineM(p, geom).distM;
-      if (d <= radiusM && (!best || d < best.d)) best = { d, label };
+      if (!geom.length) continue;
+      const tags = (wy.tags ?? {}) as Record<string, unknown>;
+      ways.push({ tags, geom, d: distanceToLineM(p, geom).distM });
     }
-    return best?.label ?? null;
+    ways.sort((a, b) => a.d - b.d);
+    const label = (w: NearWay): { label: string; labelledFrom?: string } | null => {
+      const link = LINK.test(String(w.tags.highway ?? ''));
+      if (!link || cleanText(w.tags.name, 80)) {
+        const l = roadLabel(w.tags);
+        return l ? { label: l } : null;
+      }
+      return rampLabel(w.tags, rampEnds(w, ways));
+    };
+    for (const w of ways) {
+      if (w.d > radiusM) break;
+      const l = label(w);
+      if (l) return { ...l, rule: 'labelledFrom' in l ? 'ramp' : 'named', radiusM };
+    }
+    for (const w of ways) {
+      if (w.d > wideM) break;
+      if (!FREEWAY.test(String(w.tags.highway ?? ''))) continue;
+      const l = label(w);
+      if (l) return { ...l, rule: 'freeway', radiusM: wideM };
+    }
+    return null;
   }
 
   /** The street at a point (Overpass when configured, else Photon reverse), cached. */

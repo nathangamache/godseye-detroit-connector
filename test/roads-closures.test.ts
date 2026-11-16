@@ -16,6 +16,7 @@ import { mergeDirections } from '../src/extra/roads/merge.js';
 import { closuresOnRoute } from '../src/extra/roads/route.js';
 import {
   ATTRIBUTION as GEO_ATTRIBUTION,
+  rampLabel,
   roadLabel,
   type Geocoder,
 } from '../src/extra/roads/geocode.js';
@@ -788,7 +789,7 @@ describe('TomTom road names', () => {
     const tt = itemsOf(out).find((i) => i.from_cross_street === 'Alpha St')!;
     expect(tt.road).toBeNull();
     expect(tt.note).toBe(
-      "TomTom gives no road name here, and OpenStreetMap has no named road within 25 m of the incident's midpoint",
+      "TomTom gives no road name here, and OpenStreetMap has no named road within 25 m of the incident's midpoint, nor a freeway or ramp within 60 m",
     );
     expect(out.summary).toContain('Unknown road: road closed between Alpha St and Bravo St');
     // TomTom's own names carry no such note.
@@ -952,6 +953,194 @@ describe('TomTom road names', () => {
     expect(roadLabel({ ref: 'I 94;US 12' })).toBe('I-94 / US-12');
     expect(roadLabel({ name: 'First Street' })).toBe('First Street');
     expect(roadLabel({ highway: 'residential' })).toBeNull();
+  });
+
+  it('labels an unnamed ramp from its route, exit and destination tags and the roads it joins', () => {
+    const link = { highway: 'motorway_link' };
+    expect(rampLabel({ ...link, ref: 'M 99', 'destination:ref': 'I 999 North;US 99' })).toEqual({
+      label: 'M-99 ramp (to I-999 North / US-99)',
+      labelledFrom: 'its ref and destination:ref tags',
+    });
+    expect(
+      rampLabel({ ...link, 'junction:ref': '50A', 'destination:street': 'Echo Street' }),
+    ).toEqual({
+      label: 'exit 50A ramp (to Echo Street)',
+      labelledFrom: 'its junction:ref and destination:street tags',
+    });
+    expect(rampLabel({ ...link, destination: 'Alphaville;Bravotown;Charlieburg' })).toEqual({
+      label: 'ramp to Alphaville / Bravotown',
+      labelledFrom: 'its destination tag',
+    });
+    expect(rampLabel(link, { from: 'Delta Road', to: 'M-99' })).toEqual({
+      label: 'ramp from Delta Road to M-99',
+      labelledFrom: 'the roads it joins',
+    });
+    // The signs say where it goes; the road it joins says where it starts.
+    expect(
+      rampLabel({ ...link, 'destination:ref': 'M 99 East' }, { from: 'Delta Road', to: 'M-99' }),
+    ).toEqual({
+      label: 'ramp from Delta Road to M-99 East',
+      labelledFrom: 'its destination:ref tag and the roads it joins',
+    });
+    // Its direction not known: the roads at its ends, in no order.
+    expect(rampLabel({ highway: 'trunk_link' }, { either: ['Delta Road', 'M-99'] })!.label).toBe(
+      'ramp between Delta Road and M-99',
+    );
+    // Nothing says which ramp it is.
+    expect(rampLabel(link)).toBeNull();
+    expect(rampLabel({ ...link, 'junction:ref': 'north' })).toBeNull();
+  });
+
+  describe('freeway ramps (no name, only route and destination tags)', () => {
+    /** The incident's midpoint (CLOSED_NB's) and a way for an Overpass answer. */
+    const MID = { lat: 42.3365, lon: -83.05 };
+    const way = (tags: Record<string, string>, pts: Array<[number, number]>) => ({
+      type: 'way',
+      tags,
+      geometry: pts.map(([lon, lat]) => ({ lat, lon })),
+    });
+    /** Northward along a line `eastM` metres east of the midpoint (negative: west). */
+    const northAt = (eastM: number): Array<[number, number]> => {
+      const lon = MID.lon + eastM / 82_300;
+      return [
+        [lon, 42.334],
+        [lon, 42.339],
+      ];
+    };
+    /** A cross street 30 m north of the midpoint: named, but too far for the 25 m rule. */
+    const LOCAL_30M = way({ highway: 'residential', name: 'Alpha Street' }, [
+      [-83.052, 42.33677],
+      [-83.048, 42.33677],
+    ]);
+    const lookup = async (elements: unknown[]) => {
+      const x = h(
+        { ...OVERPASS, DETROIT_ROW_ENABLED: 'false' },
+        { routes: [[/overpass\.invalid/, () => json({ elements })]] },
+      );
+      const m = await x.deps.geocoder.nearestRoad(MID, 25, new AbortController().signal);
+      return { m, qs: overpassCalls(x) };
+    };
+
+    it('names the ramp the closure is on, nearer than the local road', async () => {
+      const { m, qs } = await lookup([
+        way(
+          { highway: 'motorway_link', ref: 'M 99', 'destination:ref': 'I 999 North' },
+          northAt(-3),
+        ),
+        NEAR_WAYS.elements[0],
+      ]);
+      expect(m).toEqual({
+        label: 'M-99 ramp (to I-999 North)',
+        rule: 'ramp',
+        radiusM: 25,
+        labelledFrom: 'its ref and destination:ref tags',
+      });
+      // One query: named roads within 25 m, freeways and ramps within 60 m, and the roads the
+      // ramps join.
+      expect(qs).toHaveLength(1);
+      expect(qs[0]).toContain('around:25,42.336500,-83.050000');
+      expect(qs[0]).toContain(
+        'way(around:60,42.336500,-83.050000)["highway"~"^(motorway|trunk)$|_link$"]',
+      );
+      expect(qs[0]).toContain('node(w.links)->.ln;way(bn.ln)');
+    });
+
+    it('says where a ramp with no tags of its own goes, from the roads at its ends', async () => {
+      const ramp = northAt(-3);
+      const [start, end] = [ramp[0]!, ramp[1]!];
+      const local = way({ highway: 'secondary', name: 'Delta Road' }, [
+        [-83.052, start[1]],
+        start,
+        [-83.048, start[1]],
+      ]);
+      const freeway = way({ highway: 'motorway', ref: 'M 99' }, [
+        [-83.06, end[1]],
+        end,
+        [-83.04, end[1]],
+      ]);
+      const fwd = await lookup([way({ highway: 'motorway_link' }, ramp), local, freeway]);
+      expect(fwd.m).toEqual({
+        label: 'ramp from Delta Road to M-99',
+        rule: 'ramp',
+        radiusM: 25,
+        labelledFrom: 'the roads it joins',
+      });
+      // Drawn the other way round and tagged so: the same ramp.
+      const back = await lookup([
+        way({ highway: 'trunk_link', oneway: '-1' }, [end, start]),
+        local,
+        freeway,
+      ]);
+      expect(back.m!.label).toBe('ramp from Delta Road to M-99');
+    });
+
+    it('looks for a freeway or ramp up to 60 m out when no named road is within 25 m', async () => {
+      const ramp = way(
+        { highway: 'motorway_link', 'destination:street': 'Echo Street' },
+        northAt(40),
+      );
+      const { m } = await lookup([LOCAL_30M, ramp]);
+      expect(m).toEqual({
+        label: 'ramp to Echo Street',
+        rule: 'freeway',
+        radiusM: 60,
+        labelledFrom: 'its destination:street tag',
+      });
+      // A freeway itself, by its route number.
+      const fwy = await lookup([
+        LOCAL_30M,
+        way({ highway: 'motorway', ref: 'I 999' }, northAt(-45)),
+      ]);
+      expect(fwy.m).toEqual({ label: 'I-999', rule: 'freeway', radiusM: 60 });
+      // Only freeways and ramps go that far: a local road 30 m off, a freeway 70 m off: none.
+      const none = await lookup([
+        LOCAL_30M,
+        way({ highway: 'motorway', ref: 'I 999' }, northAt(70)),
+      ]);
+      expect(none.m).toBeNull();
+    });
+
+    it("says in the item's note which rule named its road", async () => {
+      const run = async (elements: unknown[]) => {
+        const x = h(
+          { ...TT_ONLY, ...OVERPASS, DETROIT_ROW_ENABLED: 'false' },
+          {
+            routes: [
+              tomtomWith(unnamedClosure('tt-ramp', CLOSED_NB, 'Delta Road', 'M-99')),
+              [/overpass\.invalid/, () => json({ elements })],
+            ],
+          },
+        );
+        const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
+        return { out, tt: itemsOf(out).find((i) => i.from_cross_street === 'Delta Road')! };
+      };
+      const near = await run([
+        way({ highway: 'motorway_link', ref: 'M 99', 'destination:ref': 'I 999' }, northAt(-3)),
+      ]);
+      expect(near.tt.road).toBe('M-99 ramp (to I-999)');
+      expect(near.tt.note).toBe(
+        "TomTom gives no road name here; the road is the nearest road in OpenStreetMap within 25 m of the incident's midpoint: an unnamed ramp, labelled from its ref and destination:ref tags",
+      );
+      expect(near.tt.text).toBe(
+        'M-99 ramp (to I-999): road closed between Delta Road and M-99 (northbound, 0.5 km away, TomTom incidents)',
+      );
+      expect((near.out.data as { attribution: string[] }).attribution).toContain(
+        GEO_ATTRIBUTION.overpass,
+      );
+      const far = await run([
+        LOCAL_30M,
+        way({ highway: 'motorway_link', 'destination:ref': 'M 99 West' }, northAt(40)),
+      ]);
+      expect(far.tt.road).toBe('ramp to M-99 West');
+      expect(far.tt.note).toBe(
+        "TomTom gives no road name here; OpenStreetMap has no named road within 25 m of the incident's midpoint, so the road is the nearest freeway or ramp within 60 m: an unnamed ramp, labelled from its destination:ref tag",
+      );
+      // A named road keeps the note it had.
+      const named = await run(NEAR_WAYS.elements);
+      expect(named.tt.note).toBe(
+        "TomTom gives no road name here; the road is the nearest named road in OpenStreetMap within 25 m of the incident's midpoint",
+      );
+    });
   });
 });
 

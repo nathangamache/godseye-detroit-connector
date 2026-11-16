@@ -48,8 +48,11 @@ export interface RoadItem {
   merged?: number;
   /** start/end are local calendar dates (YYYY-MM-DD), not instants. */
   dateOnly?: boolean;
-  /** Looks up the street name when the source has none (Detroit permits, TomTom). */
-  resolveRoad?: (signal: AbortSignal) => Promise<string | null>;
+  /**
+   * Looks up the street name when the source has none (Detroit permits, TomTom): the name, or
+   * the name with the note that says how it was found (it replaces roadNote.found).
+   */
+  resolveRoad?: (signal: AbortSignal) => Promise<string | ResolvedRoad | null>;
   /** Credit for the map a looked-up name comes from (shown once a name was found). */
   roadCredit?: string;
   /** How the lookup went (lookUpRoad): unset while no lookup was made. */
@@ -64,6 +67,12 @@ export interface RoadItem {
 
 /** found: road is the lookup's answer; none: nothing in range; failed: the lookup errored. */
 export type RoadLookup = 'found' | 'none' | 'failed';
+
+/** A looked-up road, and how it was found (shown as the item's note). */
+export interface ResolvedRoad {
+  road: string | null;
+  note?: string;
+}
 
 /**
  * The item is about a place in Michigan: the Michigan-only sources' items, and any other
@@ -82,11 +91,13 @@ function inMichiganItem(it: Pick<RoadItem, 'source' | 'lines'>): boolean {
 export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<void> {
   if (it.road || !it.resolveRoad) return;
   try {
-    const name = roadText(cleanText(await it.resolveRoad(signal), 120), {
-      michigan: inMichiganItem(it),
-    });
+    const got = await it.resolveRoad(signal);
+    const r: ResolvedRoad = got !== null && typeof got === 'object' ? got : { road: got };
+    const name = roadText(cleanText(r.road, 120), { michigan: inMichiganItem(it) });
     it.road = name;
     it.roadLookup = name ? 'found' : 'none';
+    // How this name was found (a copy: merged items share their reports' notes).
+    if (name && r.note) it.roadNote = { ...it.roadNote, found: r.note };
   } catch {
     it.roadLookup = 'failed';
   }

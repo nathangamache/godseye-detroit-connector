@@ -7,7 +7,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { loadConfig } from '../../src/config.js';
-import { buildRoadsDeps, type RoadsDeps } from '../../src/extra/roads/index.js';
+import { buildRoadsDeps, type RoadsDeps, type RoadsRuntime } from '../../src/extra/roads/index.js';
 import { roadsTools } from '../../src/extra/roads/tools.js';
 import type { ToolDef, ToolOutput } from '../../src/tools/types.js';
 
@@ -565,6 +565,8 @@ export interface Harness {
   dir: string;
   mock: MockFetch;
   tools: Record<string, ToolDef>;
+  /** The tools' dependencies (the geocoder, the closure service, ...). */
+  deps: RoadsRuntime;
   clock: { now: number };
   run(name: string, args: Record<string, unknown>): Promise<ToolOutput>;
 }
@@ -590,6 +592,7 @@ export function harness(
     dir,
     mock,
     tools,
+    deps,
     clock,
     run: (name, args) => tools[name]!.run(args, { signal: new AbortController().signal }),
   };
