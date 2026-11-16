@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parseStepUpKey } from './auth/stepup.js';
+import { parseLocalNewsFeeds } from './extra/civic/feedList.js';
 import { isIpv6Loopback, isUnspecifiedIp, parseIp } from './util/net.js';
 
 /** Repository root (works from src/ under vitest and from dist/src/ when compiled). */
@@ -417,6 +418,22 @@ const schema = z.object({
   CIVIC_TOOL_RATE_LIMITS: rateLimitList(
     'dpd_calls_near=60/h,transit_vehicles_near=120/h,local_headlines=30/h,local_headlines=200/d',
   ),
+  /**
+   * The local news feeds local_headlines reads (src/extra/civic/feedList.ts): unset = the
+   * built-in list of checked local newsrooms; "none" = no feeds (GDELT only); else a JSON array
+   * of entries like the built-in ones.
+   */
+  LOCAL_NEWS_FEEDS: z
+    .string()
+    .optional()
+    .transform((v, ctx) => {
+      try {
+        return parseLocalNewsFeeds(v);
+      } catch (err) {
+        ctx.addIssue({ code: 'custom', message: (err as Error).message });
+        return z.NEVER;
+      }
+    }),
   // ---- end civic ----
 
   // ---- radio ----

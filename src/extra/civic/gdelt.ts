@@ -179,8 +179,9 @@ export class SpacedQueue {
     return new RateLimitedError('the wait for a turn is too long', 'long_wait', s);
   }
 
-  run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const { clock, maxPending, maxWaitMs } = this.opts;
+  /** Runs fn in turn; `maxWaitMs` (default: the queue's) bounds this call's wait for its turn. */
+  run<T>(fn: () => Promise<T>, signal?: AbortSignal, maxWaitMs = this.opts.maxWaitMs): Promise<T> {
+    const { clock, maxPending } = this.opts;
     // A pause after a refusal is never waited out by a call: it is refused until the pause ends.
     if (this.backedOff()) return Promise.reject(this.refusal(this.nextStartInMs()));
     if (this.pending >= maxPending) return Promise.reject(this.refusal(this.waitMs(), true));

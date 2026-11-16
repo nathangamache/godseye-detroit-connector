@@ -34,8 +34,6 @@ import {
   HEADLINES_CACHE_MS,
   normalizeTitle,
   placeQuery,
-  WARM_IDLE_MS,
-  type Schedule,
 } from '../src/extra/civic/headlines.js';
 import { civicTools } from '../src/extra/civic/index.js';
 import { metroForPlace } from '../src/extra/civic/outlets.js';
@@ -104,12 +102,11 @@ function setup(
     routes?: Array<[string, Handler]>;
     now?: () => number;
     clock?: Clock & { t: number };
-    /** local_headlines' warm refresh: the test runs what it schedules. */
-    schedule?: Schedule;
   } = {},
 ) {
   const now = opts.now ?? (() => NOW);
-  const config = loadConfig({ GATEWAY_MODE: 'test', ...opts.env });
+  // GDELT on its own here (test/local-news.test.ts covers the local news feeds).
+  const config = loadConfig({ GATEWAY_MODE: 'test', LOCAL_NEWS_FEEDS: 'none', ...opts.env });
   const db = openDb(':memory:');
   const locations = new LocationStore(db, { retentionHours: 24 }, now);
   const audit = new Audit(db, nullLogger, now);
@@ -125,7 +122,6 @@ function setup(
     now,
     fetch: http.fetch,
     gdeltQueue: queue,
-    headlinesSchedule: opts.schedule ?? (() => ({ cancel: () => undefined })),
   });
   const registry = new ToolRegistry(new ToolPolicy(config));
   for (const t of tools) registry.register(t);
@@ -900,20 +896,24 @@ describe('local_headlines', () => {
     expect(q.get('mode')).toBe('artlist');
     expect(q.get('format')).toBe('json');
     expect(q.get('sort')).toBe('datedesc');
-    expect(q.get('timespan')).toBe('24h');
+    // The default look-back is 72 h.
+    expect(q.get('timespan')).toBe('72h');
     const d = data(r);
     const h = d.headlines as Array<Record<string, unknown>>;
     expect(h).toHaveLength(2);
     expect(h[0]).toMatchObject({
       title: 'Story 0 about Detroit',
-      url: 'https://news.example/story-0',
-      domain: 'news.example',
+      link: 'https://news.example/story-0',
+      outlet: 'news.example',
       seen_at: '2026-11-14T20:00:00.000Z',
+      source: 'gdelt',
+      match: 'place',
+      attribution: 'Source: GDELT Project (gdeltproject.org)',
     });
     expect(JSON.stringify(d)).not.toContain('javascript:');
     expect(r.summary).toMatch(/untrusted third-party text/);
     const out = await runner.run('local_headlines', { place: 'Lansing, Michigan' }, ctx());
-    expect(out.content[0]!.text).toMatch(/Attribution: GDELT Project \(gdeltproject\.org\)/);
+    expect(out.content[0]!.text).toMatch(/Attribution: .*GDELT Project \(gdeltproject\.org\)/);
     expect(out.content[0]!.text).toMatch(/third-party links \(news\.example\)/);
     // The second call came from the cache.
     expect(http.calls.filter((c) => c.url.startsWith(GDELT_DOC_API))).toHaveLength(1);
@@ -960,7 +960,10 @@ describe('local_headlines', () => {
     );
     expect(g.get('timespan')).toBe('6h');
     expect(data(r).place).toBe('Detroit, Michigan');
-    expect(data(r)).toMatchObject({ mode: 'local_outlets', metro: 'Metro Detroit' });
+    expect(data(r)).toMatchObject({
+      metro: 'Metro Detroit',
+      sources: { gdelt: { status: 'ok', mode: 'local_outlets' } },
+    });
   });
 
   it('local outlets first, then the broad search when they have nothing, each labelled', async () => {
@@ -982,9 +985,9 @@ describe('local_headlines', () => {
       { place: 'Dearborn' },
     );
     expect(local.summary).toMatch(
-      /^2 headline\(s\) mentioning Dearborn from the last 24 h, newest first; search: local outlets in Metro Detroit \(freep\.com, detroitnews\.com, clickondetroit\.com, wxyz\.com, …\)/,
+      /^2 headline\(s\) for Dearborn from the last 72 h, newest first:/,
     );
-    expect(data(local)).toMatchObject({ mode: 'local_outlets' });
+    expect(data(local)).toMatchObject({ sources: { gdelt: { mode: 'local_outlets' } } });
     const r = await run('local_headlines', { place: 'Dearborn' });
     expect(r.isError).toBeFalsy();
     expect(queries).toHaveLength(2);
@@ -993,15 +996,21 @@ describe('local_headlines', () => {
     // Still one GDELT request every 6 s.
     expect(http.calls[1]!.at - http.calls[0]!.at).toBeGreaterThanOrEqual(6_000);
     expect(r.summary).toMatch(
-      /search: broad \(any outlet GDELT indexes; national stories that only mention the place can dominate\).* Local outlets in Metro Detroit .* found nothing in the last 24 h, so this is the broad search\./,
+      /GDELT: local outlets in Metro Detroit \(freep\.com, detroitnews\.com, clickondetroit\.com, wxyz\.com, …\) found nothing in the last 72 h, so its part is the broad search\./,
     );
+    // Broad-search rows are labelled as such.
+    expect((data(r).headlines as Array<{ match: string }>)[0]!.match).toBe('broad');
     expect(data(r)).toMatchObject({
-      mode: 'broad',
-      gdelt_query: '"Dearborn"',
-      searches: [
-        { mode: 'local_outlets', found: 0 },
-        { mode: 'broad', found: 2 },
-      ],
+      sources: {
+        gdelt: {
+          mode: 'broad',
+          query: '"Dearborn"',
+          searches: [
+            { mode: 'local_outlets', found: 0 },
+            { mode: 'broad', found: 2 },
+          ],
+        },
+      },
     });
   });
 
@@ -1020,13 +1029,12 @@ describe('local_headlines', () => {
     });
     const r = await run('local_headlines', { place: 'Toledo, Ohio' });
     expect(queries).toEqual(['"Toledo" "Ohio" near20:"Toledo Ohio" sourcecountry:US']);
-    expect(data(r)).toMatchObject({ mode: 'country' });
-    expect(r.summary).toMatch(/search: U\.S\. outlets only/);
+    expect(data(r)).toMatchObject({ sources: { gdelt: { mode: 'country' } } });
     // No country to go on: the broad search alone.
     queries.length = 0;
     const any = await run('local_headlines', { place: 'Atlantis' });
     expect(queries).toEqual(['"Atlantis"']);
-    expect(data(any)).toMatchObject({ mode: 'broad' });
+    expect(data(any)).toMatchObject({ sources: { gdelt: { mode: 'broad' } } });
     // A conflicting state is not the metro of the same city name.
     queries.length = 0;
     await run('local_headlines', { place: 'Lansing, Illinois' });
@@ -1069,12 +1077,15 @@ describe('local_headlines', () => {
     });
     const r = await run('local_headlines', { place: 'Ottawa' });
     expect(queries).toEqual(['"Ottawa"']);
-    expect(data(r)).toMatchObject({ mode: 'broad' });
+    expect(data(r)).toMatchObject({ sources: { gdelt: { mode: 'broad' } } });
     expect(r.summary).not.toMatch(/Grand Rapids/);
     queries.length = 0;
     const county = await run('local_headlines', { place: 'Ottawa County' });
     expect(queries[0]).toMatch(/^"Ottawa County" \(domain:woodtv\.com OR /);
-    expect(data(county)).toMatchObject({ mode: 'local_outlets', metro: 'the Grand Rapids area' });
+    expect(data(county)).toMatchObject({
+      metro: 'the Grand Rapids area',
+      sources: { gdelt: { mode: 'local_outlets' } },
+    });
   });
 
   it('a narrow query GDELT refuses falls back to the broad one', async () => {
@@ -1093,11 +1104,15 @@ describe('local_headlines', () => {
     expect(r.isError).toBeFalsy();
     expect(http.calls).toHaveLength(2);
     expect(data(r)).toMatchObject({
-      mode: 'broad',
-      searches: [
-        { mode: 'local_outlets', found: 'refused' },
-        { mode: 'broad', found: 1 },
-      ],
+      sources: {
+        gdelt: {
+          mode: 'broad',
+          searches: [
+            { mode: 'local_outlets', found: 'refused' },
+            { mode: 'broad', found: 1 },
+          ],
+        },
+      },
     });
     expect(r.summary).toMatch(/could not be run \(GDELT refused the narrow query\)/);
   });
@@ -1247,7 +1262,17 @@ describe('local_headlines', () => {
     expect(queue.refusalsInRow).toBe(0);
     refuse = true;
     clock.t += 16 * 60_000;
-    expect(data(await ask())).toMatchObject({ status: 'unavailable', retry_after_s: 60 });
+    // Refused again: GDELT's last answer is served with its age, and the pause is 60 s again.
+    const later = await ask();
+    expect(data(later)).toMatchObject({
+      status: 'ok',
+      count: 1,
+      sources: { gdelt: { status: 'paused', retry_after_s: 60, from: '16 min ago' } },
+    });
+    expect((data(later).headlines as Array<{ from?: string }>)[0]!.from).toBe('16 min ago');
+    expect(later.summary).toMatch(
+      /GDELT: .*; next try in 60 s; its last answer, from 16 min ago, is used\./,
+    );
   });
 
   it("GDELT's Retry-After sets the pause when it is longer than 60 s", async () => {
@@ -1302,57 +1327,6 @@ describe('local_headlines', () => {
       },
     );
     expect(q2.waitMs()).toBe(0);
-  });
-
-  it('keeps the last metro asked about warm: refreshed at most every 15 min while it is used', async () => {
-    const clock = fakeClock();
-    const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
-    const schedule: Schedule = (fn, ms) => {
-      const t = { fn, ms, cancelled: false };
-      timers.push(t);
-      return { cancel: () => (t.cancelled = true) };
-    };
-    const { run, http } = setup({
-      clock,
-      now: () => clock.now(),
-      schedule,
-      routes: [[GDELT_DOC_API, () => json(gdeltBody(2))]],
-    });
-    const gdelt = () => http.calls.length;
-    const fire = async () => {
-      const t = timers.at(-1)!;
-      clock.t += t.ms;
-      t.fn();
-      // Let the refresh's queue and fetch settle.
-      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-    };
-    await run('local_headlines', { place: 'Dearborn' });
-    expect(gdelt()).toBe(1);
-    expect(timers).toHaveLength(1);
-    // Just past the cached answer's 15 minutes.
-    expect(timers[0]!.ms).toBe(HEADLINES_CACHE_MS + 1_000);
-    await fire();
-    expect(gdelt()).toBe(2);
-    expect(timers).toHaveLength(2);
-    // Asked for again: answered from the refreshed cache, no request.
-    clock.t += 60_000;
-    const hit = await run('local_headlines', { place: 'Dearborn' });
-    expect(data(hit).status).toBe('ok');
-    expect(gdelt()).toBe(2);
-    await fire();
-    expect(gdelt()).toBe(3);
-    // Not asked for within WARM_IDLE_MS: the refresh stops.
-    expect(WARM_IDLE_MS).toBe(30 * 60_000);
-    await fire();
-    expect(gdelt()).toBe(3);
-    const armed = timers.length;
-    // A place outside the listed metros is not kept warm; another metro replaces the last one.
-    await run('local_headlines', { place: 'Toledo, Ohio' });
-    expect(timers).toHaveLength(armed);
-    await run('local_headlines', { place: 'Dearborn' });
-    await run('local_headlines', { place: 'Lansing, Michigan' });
-    expect(timers.at(-2)!.cancelled).toBe(true);
-    expect(timers.at(-1)!.cancelled).toBe(false);
   });
 
   it('GDELT plain-text query errors are reported, not parsed', async () => {

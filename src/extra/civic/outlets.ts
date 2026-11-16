@@ -22,6 +22,8 @@ export interface Metro {
   cities: string[];
   /** Local outlets' domains for GDELT's domain: filter (kept short: GDELT queries are bounded). */
   domains: string[];
+  /** Words (lower case) a story about the metro as a whole uses, for local feed matching. */
+  anchors: string[];
 }
 
 const MICHIGAN = ['michigan', 'mi', 'mich'];
@@ -83,6 +85,7 @@ export const METROS: Metro[] = [
       'mlive.com',
       'theoaklandpress.com',
     ],
+    anchors: ['detroit', 'metro detroit', 'southeast michigan', 'southeastern michigan'],
   },
   {
     id: 'lansing',
@@ -99,6 +102,7 @@ export const METROS: Metro[] = [
       'lansingcitypulse.com',
       'mlive.com',
     ],
+    anchors: ['lansing', 'greater lansing', 'mid-michigan'],
   },
   {
     id: 'grand_rapids',
@@ -108,6 +112,7 @@ export const METROS: Metro[] = [
     counties: ['Kent County', 'Ottawa County'],
     cities: ['grand rapids', 'kentwood'],
     domains: ['woodtv.com', 'wzzm13.com', 'fox17online.com', 'grbj.com', 'mlive.com'],
+    anchors: ['grand rapids', 'west michigan'],
   },
   {
     id: 'flint',
@@ -117,6 +122,7 @@ export const METROS: Metro[] = [
     counties: ['Genesee County'],
     cities: ['flint', 'burton', 'grand blanc'],
     domains: ['abc12.com', 'nbc25news.com', 'wnem.com', 'mlive.com'],
+    anchors: ['flint', 'genesee county'],
   },
   {
     id: 'windsor',
@@ -126,6 +132,7 @@ export const METROS: Metro[] = [
     counties: ['Essex County'],
     cities: ['windsor', 'lasalle', 'amherstburg', 'kingsville', 'leamington'],
     domains: ['windsorstar.com', 'cbc.ca', 'ctvnews.ca', 'blackburnnews.com'],
+    anchors: ['windsor', 'windsor-essex', 'essex county'],
   },
 ];
 
@@ -241,6 +248,84 @@ export function metroForPlace(place: string): Metro | undefined {
     );
     return named && consistent;
   });
+}
+
+/** Two-letter postal codes of the U.S. states (and DC) and Canada's provinces, to full names. */
+const REGION_CODES: Record<string, string> = {
+  al: 'alabama',
+  ak: 'alaska',
+  az: 'arizona',
+  ar: 'arkansas',
+  ca: 'california',
+  co: 'colorado',
+  ct: 'connecticut',
+  de: 'delaware',
+  dc: 'district of columbia',
+  fl: 'florida',
+  ga: 'georgia',
+  hi: 'hawaii',
+  id: 'idaho',
+  il: 'illinois',
+  in: 'indiana',
+  ia: 'iowa',
+  ks: 'kansas',
+  ky: 'kentucky',
+  la: 'louisiana',
+  me: 'maine',
+  md: 'maryland',
+  ma: 'massachusetts',
+  mi: 'michigan',
+  mn: 'minnesota',
+  ms: 'mississippi',
+  mo: 'missouri',
+  mt: 'montana',
+  ne: 'nebraska',
+  nv: 'nevada',
+  nh: 'new hampshire',
+  nj: 'new jersey',
+  nm: 'new mexico',
+  ny: 'new york',
+  nc: 'north carolina',
+  nd: 'north dakota',
+  oh: 'ohio',
+  ok: 'oklahoma',
+  or: 'oregon',
+  pa: 'pennsylvania',
+  ri: 'rhode island',
+  sc: 'south carolina',
+  sd: 'south dakota',
+  tn: 'tennessee',
+  tx: 'texas',
+  ut: 'utah',
+  vt: 'vermont',
+  va: 'virginia',
+  wa: 'washington',
+  wv: 'west virginia',
+  wi: 'wisconsin',
+  wy: 'wyoming',
+  mich: 'michigan',
+  on: 'ontario',
+  ont: 'ontario',
+  qc: 'quebec',
+  bc: 'british columbia',
+  ab: 'alberta',
+  mb: 'manitoba',
+  sk: 'saskatchewan',
+  ns: 'nova scotia',
+  nb: 'new brunswick',
+};
+
+/**
+ * The state or province (full name, lower case) a place name's comma parts after the first name
+ * ("Lansing, MI" -> "michigan"), or undefined when none is a known state or province.
+ */
+export function regionForPlace(place: string): string | undefined {
+  for (const p of place.split(',').map(norm).slice(1)) {
+    if (US_STATES.includes(p) || (CA_PROVINCES.includes(p) && p.length > 3 && p !== 'canada'))
+      return p;
+    if (REGION_CODES[p]) return REGION_CODES[p];
+  }
+  return undefined;
 }
 
 /** The country a place name says it is in (a US state, a Canadian province, or the country). */
