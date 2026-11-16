@@ -18,6 +18,8 @@ import { DPD_CALLS_LAYER } from '../src/extra/civic/dpd.js';
 import { decodeFeed, ProtobufError } from '../src/extra/civic/gtfsrt.js';
 import { parseCsv, readZipMembers, SMART_STATIC_GTFS_URL } from '../src/extra/civic/gtfsStatic.js';
 import {
+  GDELT_BACKOFF_MS,
+  GDELT_MAX_BACKOFF_MS,
   GDELT_MIN_GAP_MS,
   newGdeltQueue,
   RateLimitedError,
@@ -1188,7 +1190,7 @@ describe('local_headlines', () => {
     expect(again.isError).toBeFalsy();
     expect(data(again)).toMatchObject({ status: 'unavailable', retry_after_s: 40 });
     expect(again.summary).toBe(
-      'Headlines for Dearborn are unavailable right now: this gateway pauses GDELT requests for 60 s after GDELT refuses one. Try again in 40 s.',
+      'Headlines for Dearborn are unavailable right now: this gateway pauses GDELT requests after GDELT refuses one (60 s, doubled for each further refusal in a row, up to 6 h). Try again in 40 s.',
     );
     expect(http.calls).toHaveLength(1);
     // Over MCP too: a normal result, not a tool error.
@@ -1201,6 +1203,51 @@ describe('local_headlines', () => {
     clock.t += 41_000;
     await run('local_headlines', { place: 'Detroit' });
     expect(http.calls).toHaveLength(2);
+  });
+
+  it('refusals in a row double the GDELT pause up to 6 h; calls while paused do not restart it', async () => {
+    const clock = fakeClock();
+    let refuse = true;
+    const { run, http, queue } = setup({
+      clock,
+      now: () => clock.now(),
+      routes: [
+        [
+          GDELT_DOC_API,
+          () =>
+            refuse
+              ? new Response('Please limit requests to one every 5 seconds', { status: 429 })
+              : json(gdeltBody(1)),
+        ],
+      ],
+    });
+    const ask = () => run('local_headlines', { place: 'Toledo, Ohio' });
+    expect(data(await ask())).toMatchObject({ status: 'unavailable', retry_after_s: 60 });
+    expect(http.calls).toHaveLength(1);
+    // Asked again while paused: nothing is sent and the pause keeps its end.
+    for (const left of [50, 20, 1]) {
+      clock.t = NOW + (60 - left) * 1000;
+      expect(data(await ask())).toMatchObject({ status: 'unavailable', retry_after_s: left });
+    }
+    expect(http.calls).toHaveLength(1);
+    // Each refusal in a row doubles the pause: 2, 4, 8 ... min, then 6 h at most.
+    let t = NOW + 60_000;
+    const pauses = [120, 240, 480, 960, 1920, 3840, 7680, 15_360, 21_600, 21_600];
+    for (const [i, p] of pauses.entries()) {
+      clock.t = t;
+      expect(data(await ask()), `refusal ${i + 2}`).toMatchObject({ retry_after_s: p });
+      expect(http.calls).toHaveLength(i + 2);
+      t += p * 1000;
+    }
+    expect(queue.refusalsInRow).toBe(pauses.length + 1);
+    // An answer resets it: the next refusal pauses 60 s again.
+    refuse = false;
+    clock.t = t;
+    expect(data(await ask()).status).toBe('ok');
+    expect(queue.refusalsInRow).toBe(0);
+    refuse = true;
+    clock.t += 16 * 60_000;
+    expect(data(await ask())).toMatchObject({ status: 'unavailable', retry_after_s: 60 });
   });
 
   it("GDELT's Retry-After sets the pause when it is longer than 60 s", async () => {
@@ -1361,6 +1408,33 @@ describe('SpacedQueue', () => {
     const refused = await q.run(async () => undefined).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(RateLimitedError);
     expect(refused).toMatchObject({ kind: 'rate_limited', reason: 'paused', retryAfterS: 60 });
+  });
+
+  it('doubles the back-off for each refusal in a row, up to its cap, and an answer resets it', () => {
+    const clock = fakeClock(0);
+    const q = new SpacedQueue(6000, { maxPending: 5, maxWaitMs: 30_000, clock });
+    expect(GDELT_BACKOFF_MS).toBe(60_000);
+    expect(GDELT_MAX_BACKOFF_MS).toBe(6 * 3_600_000);
+    const steps = Array.from({ length: 12 }, () => q.refused());
+    expect(steps).toEqual([
+      60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_840_000, 7_680_000, 15_360_000,
+      21_600_000, 21_600_000, 21_600_000,
+    ]);
+    expect(q.waitMs()).toBe(21_600_000);
+    q.succeeded();
+    expect(q.refusalsInRow).toBe(0);
+    // The upstream's own ask wins when it is longer.
+    expect(q.refused(90_000)).toBe(90_000);
+    expect(q.refused(90_000)).toBe(120_000);
+    // Custom steps for other upstreams.
+    const r = new SpacedQueue(1000, {
+      maxPending: 1,
+      maxWaitMs: 1000,
+      clock,
+      backoffMs: 1000,
+      maxBackoffMs: 3000,
+    });
+    expect([r.refused(), r.refused(), r.refused()]).toEqual([1000, 2000, 3000]);
   });
 
   it('adds jitter to the spacing and the back-off', async () => {

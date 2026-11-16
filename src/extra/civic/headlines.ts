@@ -41,6 +41,7 @@ import {
 } from './common.js';
 import {
   GDELT_BACKOFF_MS,
+  GDELT_MAX_BACKOFF_MS,
   GDELT_MIN_GAP_MS,
   GDELT_RULE_S,
   gdeltQueue,
@@ -313,7 +314,7 @@ function unavailable(
   const gap = `${Math.round(GDELT_MIN_GAP_MS / 1000)} s`;
   const reason = {
     refused: err.message,
-    paused: `this gateway pauses GDELT requests for ${Math.round(GDELT_BACKOFF_MS / 1000)} s after GDELT refuses one`,
+    paused: `this gateway pauses GDELT requests after GDELT refuses one (${Math.round(GDELT_BACKOFF_MS / 1000)} s, doubled for each further refusal in a row, up to ${Math.round(GDELT_MAX_BACKOFF_MS / 3_600_000)} h)`,
     crowded: 'too many headline searches are already waiting for GDELT',
     long_wait: `the wait for GDELT (one request every ${gap} from this gateway) is too long right now`,
   }[err.reason];
@@ -364,15 +365,18 @@ export function headlinesTools(deps: HeadlinesDeps): ToolDef[] {
             headers: { accept: 'application/json' },
           });
           try {
-            return { rows: parseGdelt(r.status, r.body), at: deps.now() };
+            const rows = parseGdelt(r.status, r.body);
+            queue.succeeded();
+            return { rows, at: deps.now() };
           } catch (err) {
             if (!(err instanceof UpstreamError && err.kind === 'rate_limited')) throw err;
-            // GDELT's Retry-After, else its own rule; the gateway waits at least 60 s.
+            // GDELT's Retry-After, else its own rule; the gateway waits at least 60 s, doubled
+            // for each refusal in a row (up to 6 h).
             const asked =
               retryAfterSeconds(r.headers.get('retry-after'), queue.now()) ??
               gdeltRuleSeconds(r.body.toString('utf8')) ??
               GDELT_RULE_S;
-            queue.backOff(Math.max(GDELT_BACKOFF_MS, asked * 1000));
+            queue.refused(asked * 1000);
             throw new RateLimitedError(
               err.message,
               'refused',
