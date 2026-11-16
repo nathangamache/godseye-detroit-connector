@@ -495,12 +495,26 @@ async function resolveEndpoint(
   };
 }
 
-/** "Destination: Detroit Institute of Arts, 5200 Woodward Avenue, Detroit." (geocoded only). */
-function endpointLine(role: 'Start' | 'Destination', e: Endpoint, from?: Point): string {
+/** Metres in the trip's units, to a tenth: "2.9 mi", "4.6 km". */
+function tripDistance(m: number, units: 'mi' | 'km'): string {
+  const v = units === 'mi' ? m / 1609.344 : m / 1000;
+  return `${Math.round(v * 10) / 10} ${units}`;
+}
+
+/**
+ * "Destination: Detroit Institute of Arts, 5200 Woodward Avenue, Detroit." (geocoded only). A
+ * close second match says how far it is from the start, in the trip's units.
+ */
+function endpointLine(
+  role: 'Start' | 'Destination',
+  e: Endpoint,
+  units: 'mi' | 'km',
+  from?: Point,
+): string {
   if (!e.place) return '';
   const away = (p: Place) =>
     from
-      ? `, ${Math.round(haversineM(from.lat, from.lon, p.lat, p.lon) / 100) / 10} km from the start`
+      ? `, ${tripDistance(haversineM(from.lat, from.lon, p.lat, p.lon), units)} from the start`
       : '';
   const alt = e.alternative
     ? ` (another close match: ${placeText(e.alternative)}${away(e.alternative)})`
@@ -580,8 +594,8 @@ function routeTool(deps: RoadsToolDeps): ToolDef {
         const notes = [
           from.note,
           to.note,
-          endpointLine('Start', from),
-          endpointLine('Destination', to, from.point),
+          endpointLine('Start', from, units),
+          endpointLine('Destination', to, units, from.point),
         ]
           .filter(Boolean)
           .join(' ');

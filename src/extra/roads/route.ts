@@ -275,6 +275,8 @@ export async function routeAvoidingClosures(
   signal: AbortSignal,
 ): Promise<RouteAnswer> {
   const warnings: string[] = [];
+  // What became of the closures the route tried to avoid: listed first, as the most important.
+  const routing: string[] = [];
   const first = await deps.router.route(from, to, opts.units, [], signal);
   let trip = first;
   const avoided: RouteAnswer['closures_avoided'] = [];
@@ -341,12 +343,12 @@ export async function routeAvoidingClosures(
             });
           const still = closuresOnRoute(kept, trip.shape);
           for (const it of still)
-            warnings.push(
+            routing.push(
               `The route still passes this closure (no way around it found): ${describe(it)}`,
             );
         } catch (err) {
           if (!(err instanceof RouteError)) throw err;
-          warnings.push(
+          routing.push(
             `No route around ${kept.length} closure(s) was found (${err.message}); this route passes them: ${kept.map(describe).join('; ')}`,
           );
         }
@@ -370,13 +372,32 @@ export async function routeAvoidingClosures(
       ? { maneuvers_truncated: `${trip.maneuvers.length - MAX_MANEUVERS} more maneuver(s) omitted` }
       : {}),
     closures_avoided: avoided,
-    warnings,
+    warnings: [...routing, ...warnings],
     ...(sources ? { sources } : {}),
     closure_data,
     tomtom_excluded: Boolean(sources?.some((r) => r.source === 'tomtom' && r.status === 'skipped')),
     closureSources: [...used],
     attributions,
   };
+}
+
+/** Warnings the route summary spells out; all of them are in data.warnings. */
+const SUMMARY_WARNINGS = 4;
+
+/**
+ * " 4 warning(s): a; b; c; d." when the summary lists them all, else " 4 of 7 warnings shown
+ * (the rest in data.warnings): …": the count always says how many are listed.
+ */
+function warningText(warnings: string[]): string {
+  if (!warnings.length) return '';
+  const listed = warnings.slice(0, SUMMARY_WARNINGS);
+  let text = listed.map((w) => w.replace(/\.$/, '')).join('; ');
+  if (!/[.!?…]$/.test(text)) text += '.';
+  const count =
+    listed.length < warnings.length
+      ? `${listed.length} of ${warnings.length} warnings shown (the rest in data.warnings)`
+      : `${warnings.length} warning(s)`;
+  return ` ${count}: ${text}`;
 }
 
 export function routeSummary(r: RouteAnswer, fromLabel: string, toLabel: string): string {
@@ -399,8 +420,6 @@ export function routeSummary(r: RouteAnswer, fromLabel: string, toLabel: string)
         .map((c) => [c.type, c.road].filter(Boolean).join(' on '))
         .join('; ')}.`
     : '';
-  const warn = r.warnings.length
-    ? ` ${r.warnings.length} warning(s): ${r.warnings.slice(0, 2).join(' ')}`
-    : '';
+  const warn = warningText(r.warnings);
   return `Driving route from ${fromLabel} to ${toLabel}: ${dist}, about ${Math.round(r.duration_min)} min without live traffic, ${r.maneuvers.length} step(s).${none}${tomtom}${avoided}${warn}`;
 }

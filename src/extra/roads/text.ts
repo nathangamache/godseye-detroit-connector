@@ -50,16 +50,60 @@ export function clipWords(s: string, max: number): string {
   return `${cut.replace(/[\s,;:.\-–—(]+$/, '')}…`;
 }
 
+export interface RoadTextOptions {
+  /**
+   * The text is about a place in Michigan: a state highway written "State Highway 10",
+   * "State Hwy 10" or "SR-10" is the trunkline M-10. Elsewhere those are another state's
+   * routes and are left alone.
+   */
+  michigan?: boolean;
+  /**
+   * The text is always read mid-sentence (a cross street: "between exit 50 and Main St"),
+   * so an exit is "exit 50" even at its very start.
+   */
+  midSentence?: boolean;
+}
+
+const STATE_HIGHWAY =
+  /\b(?:Michigan\s+)?State\s+(?:Highway|Hwy\.?)\s+(?:M[- ]?)?(\d{1,3}[A-Z]?)\b/gi;
+const STATE_ROUTE = /\bSR[- ]?(\d{1,3}[A-Z]?)\b/g;
+
 /**
- * Road labels as people write them in Michigan: "exit [20]" (an exit number in brackets, as
- * some feeds give it) -> "exit 20"; a state trunkline written "MI-14" -> "M-14", the Michigan
- * form. Only "MI-<number>" is changed: I-, US- and other states' routes are left alone.
+ * Neighbouring states whose own routes a Michigan text may name ("Ohio State Highway 2",
+ * "OH SR 2"): the state written out, in any case, or its postal code, in capitals only ("in"
+ * is a word, not Indiana).
  */
-export function roadText<T extends string | null>(s: T): T {
+const OTHER_STATE_BEFORE = [
+  /\b(?:Ohio|Indiana|Illinois|Wisconsin|Kentucky|Pennsylvania|Minnesota)\s+$/i,
+  /\b(?:OH|IN|IL|WI|KY|PA|MN)\s+$/,
+];
+
+/** A state highway's match as M-<n>, unless another state's name comes just before it. */
+function trunkline(m: string, n: string, at: number, all: string): string {
+  const before = all.slice(Math.max(0, at - 40), at);
+  return OTHER_STATE_BEFORE.some((re) => re.test(before)) ? m : `M-${n}`;
+}
+
+/**
+ * Road labels as people write them in Michigan, one way across sources:
+ *   - "exit [20]" (an exit number in brackets, as some feeds give it) -> "exit 20";
+ *   - an exit is "exit 50" mid-sentence ("Closed between I-94 and exit 50"); "Exit 50" only
+ *     where a sentence starts (the text's start, or after ". "), unless midSentence;
+ *   - a state trunkline written "MI-14" -> "M-14", the Michigan form;
+ *   - with michigan, "State Highway 10", "State Hwy 10" and "SR-10" -> "M-10", unless the
+ *     text names another state just before it ("Ohio SR-2", "OH SR 2").
+ * I-, US- and other states' routes are left alone.
+ */
+export function roadText<T extends string | null>(s: T, o: RoadTextOptions = {}): T {
   if (!s) return s;
-  return s
+  let t = s
     .replace(/\b(exit)\s*\[\s*([0-9]{1,3}[A-Za-z]?)\s*\]/gi, '$1 $2')
-    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1') as T;
+    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1');
+  if (o.michigan) t = t.replace(STATE_HIGHWAY, trunkline).replace(STATE_ROUTE, trunkline);
+  // "Exit 50" -> "exit 50", except where a sentence starts. "EXIT 50" (shouted text) stays.
+  return t.replace(/\bExit(s?)(?=\s+\d)/g, (m: string, plural: string, at: number, all: string) =>
+    !o.midSentence && /(?:^|[.!?]\s+)$/.test(all.slice(0, at)) ? m : `exit${plural}`,
+  ) as T;
 }
 
 const NUMBER_WORDS: Record<string, string> = {

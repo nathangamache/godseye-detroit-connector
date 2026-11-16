@@ -7,6 +7,7 @@ import { errorText, localDay } from './http.js';
 import {
   distanceToLinesM,
   inBox,
+  inMichigan,
   intersects,
   lineLengthM,
   lineMidpoint,
@@ -47,8 +48,11 @@ export interface RoadItem {
   merged?: number;
   /** start/end are local calendar dates (YYYY-MM-DD), not instants. */
   dateOnly?: boolean;
-  /** Looks up the street name when the source has none (Detroit permits, TomTom). */
-  resolveRoad?: (signal: AbortSignal) => Promise<string | null>;
+  /**
+   * Looks up the street name when the source has none (Detroit permits, TomTom): the name, or
+   * the name with the note that says how it was found (it replaces roadNote.found).
+   */
+  resolveRoad?: (signal: AbortSignal) => Promise<string | ResolvedRoad | null>;
   /** Credit for the map a looked-up name comes from (shown once a name was found). */
   roadCredit?: string;
   /** How the lookup went (lookUpRoad): unset while no lookup was made. */
@@ -64,26 +68,55 @@ export interface RoadItem {
 /** found: road is the lookup's answer; none: nothing in range; failed: the lookup errored. */
 export type RoadLookup = 'found' | 'none' | 'failed';
 
+/** A looked-up road, and how it was found (shown as the item's note). */
+export interface ResolvedRoad {
+  road: string | null;
+  note?: string;
+}
+
+/**
+ * The item is about a place in Michigan: the Michigan-only sources' items, and any other
+ * source's (TomTom's) whose line lies in Michigan (not Windsor, Sarnia or Toledo).
+ */
+function inMichiganItem(it: Pick<RoadItem, 'source' | 'lines'>): boolean {
+  if (it.source === 'mdot_ride' || it.source === 'detroit_row') return true;
+  if (it.source === 'ontario511') return false;
+  const line = it.lines.find((l) => l.length);
+  if (!line) return false;
+  const m = lineMidpoint(line);
+  return inMichigan([m.lon, m.lat]);
+}
+
 /** Looks up the road of an item its source gave none, and says how that went. */
 export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<void> {
   if (it.road || !it.resolveRoad) return;
   try {
-    const name = roadText(cleanText(await it.resolveRoad(signal), 120));
+    const got = await it.resolveRoad(signal);
+    const r: ResolvedRoad = got !== null && typeof got === 'object' ? got : { road: got };
+    const name = roadText(cleanText(r.road, 120), { michigan: inMichiganItem(it) });
     it.road = name;
     it.roadLookup = name ? 'found' : 'none';
+    // How this name was found (a copy: merged items share their reports' notes).
+    if (name && r.note) it.roadNote = { ...it.roadNote, found: r.note };
   } catch {
     it.roadLookup = 'failed';
   }
 }
 
-/** One spelling of exits and Michigan routes across sources ("exit 20", "M-14"): roadText. */
+/**
+ * One spelling of exits and Michigan routes across sources ("exit 50", "M-10"): roadText, with
+ * cross streets read mid-sentence ("between exit 50 and …") and Michigan's own forms only for
+ * items in Michigan.
+ */
 function tidy(it: RoadItem): RoadItem {
+  const michigan = inMichiganItem(it);
+  const cross = { michigan, midSentence: true };
   return {
     ...it,
-    road: roadText(it.road),
-    from_cross_street: roadText(it.from_cross_street),
-    to_cross_street: roadText(it.to_cross_street),
-    description: roadText(it.description),
+    road: roadText(it.road, { michigan }),
+    from_cross_street: roadText(it.from_cross_street, cross),
+    to_cross_street: roadText(it.to_cross_street, cross),
+    description: roadText(it.description, { michigan }),
   };
 }
 
