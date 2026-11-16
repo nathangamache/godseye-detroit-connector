@@ -943,11 +943,22 @@ describe('route_avoiding_closures', () => {
     const locs = seen[0]!.locations as Array<{ lat: number; lon: number }>;
     expect(locs[1]!.lat).toBe(42.3335);
     expect(out.summary).toContain(
-      'Destination: Corner Coffee, 100 Alpha Street, Detroit (another close match: Corner Coffee, 900 Bravo Street, Detroit, 4.6 km from the start).',
+      'Destination: Corner Coffee, 100 Alpha Street, Detroit (another close match: Corner Coffee, 900 Bravo Street, Detroit, 2.8 mi from the start).',
     );
     expect(out.data).toMatchObject({
       places: { to: { alternative: { name: 'Corner Coffee', name_match: 1 } } },
     });
+    // In the trip's units: miles by default (above), kilometres when the trip is in km.
+    expect(out.summary).not.toMatch(/ km from the start/);
+    const km = await x.run('route_avoiding_closures', {
+      from: DETROIT,
+      to: 'Corner Coffee',
+      avoid_closures: false,
+      units: 'km',
+    });
+    expect(km.summary).toContain(
+      'Corner Coffee, 900 Bravo Street, Detroit, 4.6 km from the start)',
+    );
   });
 
   it('refuses to route to a place whose name does not match the one asked for', async () => {
