@@ -345,8 +345,7 @@ interface UrlState {
   items: FeedItem[];
   /** Last answer (200 or 304). */
   checkedAt?: number;
-  /** Last attempt, and its failure if it failed. */
-  attemptAt?: number;
+  /** The last attempt's failure, if it failed. */
   error?: { at: number; message: string };
   failures: number;
   /** Earliest next attempt. */
@@ -473,8 +472,6 @@ export class LocalNewsFeeds {
   }
 
   private async fetchOne(f: FeedSpec, s: UrlState): Promise<void> {
-    const started = this.o.now();
-    s.attemptAt = started;
     const headers: Record<string, string> = {
       accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8',
     };
@@ -512,6 +509,8 @@ export class LocalNewsFeeds {
       // A little early, so a cycle that starts a few seconds late does not skip the feed.
       s.nextAt = s.checkedAt + f.poll_minutes * 60_000 - 60_000;
     } catch (err) {
+      // Stopped (the gateway is shutting down): not the feed's failure.
+      if (this.stopped) return;
       const now = this.o.now();
       s.failures++;
       const msg = err instanceof Error ? err.message : String(err);

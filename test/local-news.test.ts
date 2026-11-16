@@ -678,6 +678,26 @@ describe('local news feeds: the refresher', () => {
     ).toEqual([]);
   });
 
+  it('a refresh cut short by stop() (shutdown) is not counted as the feed failing', async () => {
+    const errors: unknown[] = [];
+    const fetch: FetchLike = (_u, init) =>
+      new Promise((_r, reject) =>
+        init.signal!.addEventListener('abort', () => reject(new Error('aborted'))),
+      );
+    const news = new LocalNewsFeeds({
+      feeds: one(),
+      fetch,
+      now: () => NOW,
+      onError: (_o, _u, e) => errors.push(e),
+    });
+    const p = news.refresh();
+    news.stop();
+    await p;
+    expect(errors).toEqual([]);
+    expect(news.snapshot()[0]).toMatchObject({ stale: false, items: [] });
+    expect(news.snapshot()[0]!.error).toBeUndefined();
+  });
+
   it('start() refreshes in the background every 15 minutes; stop() ends it', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const http = mockFetch(() => xml(rss(story)));
