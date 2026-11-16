@@ -76,13 +76,17 @@ export async function lookUpRoad(it: RoadItem, signal: AbortSignal): Promise<voi
   }
 }
 
-/** One spelling of exits and Michigan routes across sources ("exit 20", "M-14"): roadText. */
+/**
+ * One spelling of exits and Michigan routes across sources ("exit 50", "M-10"): roadText, with
+ * cross streets read mid-sentence ("between exit 50 and …").
+ */
 function tidy(it: RoadItem): RoadItem {
+  const cross = { midSentence: true };
   return {
     ...it,
     road: roadText(it.road),
-    from_cross_street: roadText(it.from_cross_street),
-    to_cross_street: roadText(it.to_cross_street),
+    from_cross_street: roadText(it.from_cross_street, cross),
+    to_cross_street: roadText(it.to_cross_street, cross),
     description: roadText(it.description),
   };
 }

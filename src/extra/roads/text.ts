@@ -50,16 +50,31 @@ export function clipWords(s: string, max: number): string {
   return `${cut.replace(/[\s,;:.\-–—(]+$/, '')}…`;
 }
 
+export interface RoadTextOptions {
+  /**
+   * The text is always read mid-sentence (a cross street: "between exit 50 and Main St"),
+   * so an exit is "exit 50" even at its very start.
+   */
+  midSentence?: boolean;
+}
+
 /**
- * Road labels as people write them in Michigan: "exit [20]" (an exit number in brackets, as
- * some feeds give it) -> "exit 20"; a state trunkline written "MI-14" -> "M-14", the Michigan
- * form. Only "MI-<number>" is changed: I-, US- and other states' routes are left alone.
+ * Road labels as people write them in Michigan, one way across sources:
+ *   - "exit [20]" (an exit number in brackets, as some feeds give it) -> "exit 20";
+ *   - an exit is "exit 50" mid-sentence ("Closed between I-94 and exit 50"); "Exit 50" only
+ *     where a sentence starts (the text's start, or after ". "), unless midSentence;
+ *   - a state trunkline written "MI-14" -> "M-14", the Michigan form. Only "MI-<number>" is
+ *     changed: I-, US- and other states' routes are left alone.
  */
-export function roadText<T extends string | null>(s: T): T {
+export function roadText<T extends string | null>(s: T, o: RoadTextOptions = {}): T {
   if (!s) return s;
-  return s
+  const t = s
     .replace(/\b(exit)\s*\[\s*([0-9]{1,3}[A-Za-z]?)\s*\]/gi, '$1 $2')
-    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1') as T;
+    .replace(/\bMI-(\d{1,3}[A-Z]?)\b/g, 'M-$1');
+  // "Exit 50" -> "exit 50", except where a sentence starts. "EXIT 50" (shouted text) stays.
+  return t.replace(/\bExit(s?)(?=\s+\d)/g, (m: string, plural: string, at: number, all: string) =>
+    !o.midSentence && /(?:^|[.!?]\s+)$/.test(all.slice(0, at)) ? m : `exit${plural}`,
+  ) as T;
 }
 
 const NUMBER_WORDS: Record<string, string> = {

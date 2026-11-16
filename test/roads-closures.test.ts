@@ -963,7 +963,7 @@ describe('exit and route labels', () => {
     expect(roadText('M-14 exit [29]')).toBe('M-14 exit 29');
     expect(roadText('Exit [ 18A ]')).toBe('Exit 18A');
     expect(roadText('M-14 W at I-275 (MI-14), Exit 18 (MI-14)')).toBe(
-      'M-14 W at I-275 (M-14), Exit 18 (M-14)',
+      'M-14 W at I-275 (M-14), exit 18 (M-14)',
     );
     // Only "MI-<number>": Interstates, US routes, other states' routes and an address's state
     // and ZIP code stay as they are.
@@ -982,6 +982,25 @@ describe('exit and route labels', () => {
     ])
       expect(roadText(t)).toBe(t);
     expect(roadText(null)).toBeNull();
+  });
+
+  it('writes an exit "exit 50" mid-sentence, "Exit 50" only where a sentence starts', () => {
+    expect(roadText('Closed between I-94 and Exit 50')).toBe('Closed between I-94 and exit 50');
+    expect(roadText('Ramps at Exits 50-52 closed')).toBe('Ramps at exits 50-52 closed');
+    expect(roadText('Exit 50 closed. Exit 52 open; use Exit 53 instead')).toBe(
+      'Exit 50 closed. Exit 52 open; use exit 53 instead',
+    );
+    // A cross street is always read mid-sentence ("between exit 50 and …").
+    expect(roadText('Exit 50', { midSentence: true })).toBe('exit 50');
+    expect(roadText('Exit [ 50A ]', { midSentence: true })).toBe('exit 50A');
+    // Not an exit number, or shouted text: as it is.
+    for (const t of [
+      'Exit ramp closed',
+      'Use the Exit ramp',
+      'RAMP CLOSED AT EXIT 50',
+      'Exiting 5',
+    ])
+      expect(roadText(t)).toBe(t);
   });
 
   it('lists a TomTom freeway incident with plain exit numbers and one form of each route', async () => {
@@ -1008,7 +1027,7 @@ describe('exit and route labels', () => {
       road: 'M-14',
       from_cross_street: 'exit 20',
       to_cross_street: 'M-14 exit 29',
-      description: 'Closed between I-275 (M-14) and Exit 18 (M-14)',
+      description: 'Closed between I-275 (M-14) and exit 18 (M-14)',
       direction: 'westbound',
     });
     expect(it0!.text).toBe(
@@ -1172,7 +1191,7 @@ describe('one item per closed stretch', () => {
     );
     const out = await x.run('road_closures', { ...DETROIT, radius_km: 5 });
     expect(out.summary).toContain(
-      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at Exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (northbound, 1.9 km away).',
+      '3 closure, incident and work-zone item(s) within 5 km of 42.3314, -83.0458 (in effect now; from 4 source reports, each stretch counted once), 2 full closure(s): Charlie Avenue (M-99): road closed between Alpha St and Bravo St (both directions, 0.5 km away); I-375: traffic jam at exit 51 (1.6 km away); M-10: road closed between Warren Ave and Forest Ave (northbound, 1.9 km away).',
     );
     // Along a road, the length of the stretch stands in for the distance.
     const byRoad = await x.run('road_closures', { road: 'Charlie Avenue' });
