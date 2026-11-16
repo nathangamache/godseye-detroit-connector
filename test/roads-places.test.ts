@@ -1195,6 +1195,65 @@ describe('route_avoiding_closures', () => {
     expect(out.summary).toContain(
       `Closure data: ${DETROIT_ATTRIBUTION}; ${GEO_ATTRIBUTION.photon}.`,
     );
+    // The summary lists every warning it counts (the three permits and the count of the rest).
+    expect(out.summary).toContain(' 4 warning(s): ');
+    for (const s of w) expect(out.summary).toContain(s.replace(/\.$/, ''));
+  });
+
+  it('counts the warnings its summary lists, the route it could not change first', async () => {
+    const onRoute = line(DETROIT, BELLE_ISLE, 60);
+    const zone = (id: string, from: number, impact: string, road: string) => ({
+      id,
+      properties: {
+        core_details: { event_type: 'work-zone', road_names: [road], description: `${road} work` },
+        vehicle_impact: impact,
+        start_date: '2026-11-01T00:00:00Z',
+      },
+      geometry: { type: 'LineString', coordinates: onRoute.slice(from, from + 3) },
+    });
+    // Eight lane closures on the way (six are named, the rest counted) and a full closure the
+    // router finds no way around.
+    const zones = {
+      type: 'FeatureCollection',
+      features: [
+        ...Array.from({ length: 8 }, (_, i) =>
+          zone(`lane-${i}`, 4 + i * 5, 'some-lanes-closed', `Lane Road ${i}`),
+        ),
+        zone('full', 45, 'all-lanes-closed', 'Closed Road'),
+      ],
+    };
+    const x = h(
+      { MDOT_RIDE_API_KEY: 'k', DETROIT_ROW_ENABLED: 'false' },
+      {
+        routes: [
+          [/work_zone_information/, () => json(zones)],
+          [/traffic_events/, () => json({ data: [] })],
+          [
+            /valhalla/,
+            (_u, init) =>
+              (JSON.parse(String(init.body)) as Record<string, unknown>).exclude_polygons
+                ? json({ error_code: 442, error: 'No path could be found' }, 400)
+                : json({
+                    trip: {
+                      summary: { length: 4, time: 600 },
+                      legs: [{ shape: encodePolyline(onRoute, 6), maneuvers: [] }],
+                    },
+                  }),
+          ],
+        ],
+      },
+    );
+    const out = await x.run('route_avoiding_closures', { from: DETROIT, to: BELLE_ISLE });
+    const w = (out.data as { warnings: string[] }).warnings;
+    expect(w).toHaveLength(8);
+    expect(w[0]).toMatch(/^No route around 1 closure\(s\) was found .*Closed Road/);
+    expect(w[7]).toContain('2 more work site(s) on the route');
+    // The summary says how many it lists, and lists those.
+    expect(out.summary).toContain(
+      ' 4 of 8 warnings shown (the rest in data.warnings): No route around 1 closure(s) was found',
+    );
+    for (const s of w.slice(0, 4)) expect(out.summary).toContain(s);
+    for (const s of w.slice(4)) expect(out.summary).not.toContain(s);
   });
 
   it('writes Michigan trunklines in maneuvers as M-14, not MI-14', async () => {
