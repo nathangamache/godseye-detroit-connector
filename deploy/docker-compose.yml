@@ -236,7 +236,7 @@ services:
   cloudflared:
     <<: [*hardening, *dns]
     profiles: [tunnel]
-    image: cloudflare/cloudflared:2026.11.0@sha256:bf723075c9a1a35e785bdcac0e8420f504e8074cc65784ed03300b8219aafadc
+    image: cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
     container_name: godseye-cloudflared
     user: "65532:65532"
     depends_on: [gateway]
